@@ -4732,3 +4732,15 @@ JOIN orders o ON c.custom...
 2026-06-13 17:21:47 - INFO - Executing SQL: SELECT SUM(final_amount) AS total_sales FROM orders WHERE order_date >= '2026-01-01' AND order_date ...
 2026-06-13 17:21:47 - INFO - Query executed successfully, 1 rows returned
 2026-06-13 17:22:03 - INFO - User chose option 3: Ask a Question
+2026-06-13 18:09:55 - INFO - AI SQL Query Generator started
+2026-06-13 18:09:55 - INFO - Conversation session started: 20260613_180955
+2026-06-13 18:09:59 - INFO - User chose option 1: Connect Database
+2026-06-13 18:10:48 - INFO - Connected to mysql://root@localhost:3306/ai_sales_demo
+2026-06-13 18:10:48 - INFO - Successfully connected to database: mysql://root@localhost:3306/ai_sales_demo
+2026-06-13 18:10:51 - INFO - User chose option 3: Ask a Question
+2026-06-13 18:11:33 - INFO - User question: give me customer who have purchased some thing
+2026-06-13 18:11:33 - INFO - SQL generated using simple query generator
+2026-06-13 18:11:33 - INFO - Conversation session saved to output\conversations\session_20260613_180955.json
+2026-06-13 18:11:41 - INFO - User chose option 4: Execute Last SQL
+2026-06-13 18:11:41 - INFO - Executing SQL: SELECT * FROM customers LIMIT 50;...
+2026-06-13 18:11:41 - INFO - Query executed successfully, 10 rows returned
