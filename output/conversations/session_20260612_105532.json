@@ -1,0 +1,83 @@
+{
+    "session_id": "20260612_105532",
+    "started_at": "2026-06-12T10:55:32.229617",
+    "ended_at": null,
+    "status": "active",
+    "turns": [
+        {
+            "turn_id": 1,
+            "timestamp": "2026-06-12T11:02:32.070817",
+            "user_question": "Show all customers",
+            "is_follow_up": false,
+            "rewritten_question": "Show all customers",
+            "generated_sql": "SELECT * FROM customers LIMIT 50;",
+            "row_count": 0,
+            "chart_path": null,
+            "insights": []
+        },
+        {
+            "turn_id": 2,
+            "timestamp": "2026-06-12T11:02:54.824643",
+            "user_question": "Monthly sales",
+            "is_follow_up": false,
+            "rewritten_question": "Show monthly sales",
+            "generated_sql": "SELECT \n DATE_FORMAT(orders.order_date, '%Y-%m') AS month,\n SUM(orders.total_amount) AS monthly_sales\nFROM \n orders\nGROUP BY \n month\nORDER BY \nmonth;",
+            "row_count": 0,
+            "chart_path": null,
+            "insights": []
+        },
+        {
+            "turn_id": 3,
+            "timestamp": "2026-06-12T11:03:03.654599",
+            "user_question": "Show total sales",
+            "is_follow_up": false,
+            "rewritten_question": "Show total sales",
+            "generated_sql": "SELECT SUM(total_amount) AS total_sales FROM orders;",
+            "row_count": 0,
+            "chart_path": null,
+            "insights": []
+        },
+        {
+            "turn_id": 4,
+            "timestamp": "2026-06-12T11:03:58.118491",
+            "user_question": "Show all customers",
+            "is_follow_up": false,
+            "rewritten_question": "Show all customers",
+            "generated_sql": "SELECT * FROM customers LIMIT 50;",
+            "row_count": 0,
+            "chart_path": null,
+            "insights": []
+        },
+        {
+            "turn_id": 5,
+            "timestamp": "2026-06-12T11:08:07.447827",
+            "user_question": "Show all customers",
+            "is_follow_up": false,
+            "rewritten_question": "Show all customers",
+            "generated_sql": "SELECT * FROM customers LIMIT 50;",
+            "row_count": 0,
+            "chart_path": null,
+            "insights": []
+        },
+        {
+            "turn_id": 6,
+            "timestamp": "2026-06-12T11:18:39.528393",
+            "user_question": "Show all customers",
+            "is_follow_up": false,
+            "rewritten_question": "Show all customers",
+            "generated_sql": "SELECT * FROM customers LIMIT 50;",
+            "row_count": 0,
+            "chart_path": null,
+            "insights": []
+        }
+    ],
+    "last_user_question": "Show all customers",
+    "last_rewritten_question": "Show all customers",
+    "last_generated_sql": "SELECT * FROM customers LIMIT 50;",
+    "last_chart_path": null,
+    "last_insights": null,
+    "last_insights_skipped": false,
+    "last_tables_used": null,
+    "last_business_terms_used": null,
+    "last_filters_used": null
+}

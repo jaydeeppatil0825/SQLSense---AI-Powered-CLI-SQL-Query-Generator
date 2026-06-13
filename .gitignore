@@ -1,0 +1,41 @@
+# Environment variables - never commit real credentials
+.env
+.env.local
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Test and coverage artifacts
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Generated semantic artifacts
+semantic/knowledge_base.json
+semantic/business_glossary.json
+
+# Generated app output
+
+
+
+
+# Common local images
+
+
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

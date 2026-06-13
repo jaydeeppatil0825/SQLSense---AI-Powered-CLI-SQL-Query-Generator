@@ -1,0 +1,53 @@
+{
+    "session_id": "20260613_114755",
+    "started_at": "2026-06-13T11:47:55.116991",
+    "ended_at": null,
+    "status": "active",
+    "turns": [
+        {
+            "turn_id": 1,
+            "timestamp": "2026-06-13T11:52:20.364391",
+            "user_question": "total orders",
+            "is_follow_up": false,
+            "rewritten_question": "total orders",
+            "generated_sql": "SELECT SUM(final_amount) AS total_total FROM orders;",
+            "row_count": 0,
+            "method": null,
+            "chart_path": null,
+            "insights": []
+        },
+        {
+            "turn_id": 2,
+            "timestamp": "2026-06-13T12:02:43.691814",
+            "user_question": "show all customere",
+            "is_follow_up": false,
+            "rewritten_question": "show all customere",
+            "generated_sql": "SELECT * FROM customers LIMIT 50;",
+            "row_count": 0,
+            "method": null,
+            "chart_path": null,
+            "insights": []
+        },
+        {
+            "turn_id": 3,
+            "timestamp": "2026-06-13T12:06:47.303588",
+            "user_question": "tell me all customers",
+            "is_follow_up": false,
+            "rewritten_question": "tell me all customers",
+            "generated_sql": "SELECT c.customer_name, c.email, c.phone, c.city, c.state, c.country, c.customer_type\nFROM customers c\nORDER BY c.customer_name LIMIT 50;",
+            "row_count": 0,
+            "method": null,
+            "chart_path": null,
+            "insights": []
+        }
+    ],
+    "last_user_question": "tell me all customers",
+    "last_rewritten_question": "tell me all customers",
+    "last_generated_sql": "SELECT c.customer_name, c.email, c.phone, c.city, c.state, c.country, c.customer_type\nFROM customers c\nORDER BY c.customer_name LIMIT 50;",
+    "last_chart_path": null,
+    "last_insights": null,
+    "last_insights_skipped": false,
+    "last_tables_used": null,
+    "last_business_terms_used": null,
+    "last_filters_used": null
+}

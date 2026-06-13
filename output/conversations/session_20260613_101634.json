@@ -1,0 +1,29 @@
+{
+    "session_id": "20260613_101634",
+    "started_at": "2026-06-13T10:16:34.858786",
+    "ended_at": null,
+    "status": "active",
+    "turns": [
+        {
+            "turn_id": 1,
+            "timestamp": "2026-06-13T10:19:08.548556",
+            "user_question": "total customer",
+            "is_follow_up": false,
+            "rewritten_question": "total customer",
+            "generated_sql": "SELECT COUNT(DISTINCT customers.customer_id) AS total_customers\nFROM customers LIMIT 50;",
+            "row_count": 0,
+            "method": null,
+            "chart_path": null,
+            "insights": []
+        }
+    ],
+    "last_user_question": "total customer",
+    "last_rewritten_question": "total customer",
+    "last_generated_sql": "SELECT COUNT(DISTINCT customers.customer_id) AS total_customers\nFROM customers LIMIT 50;",
+    "last_chart_path": null,
+    "last_insights": null,
+    "last_insights_skipped": false,
+    "last_tables_used": null,
+    "last_business_terms_used": null,
+    "last_filters_used": null
+}

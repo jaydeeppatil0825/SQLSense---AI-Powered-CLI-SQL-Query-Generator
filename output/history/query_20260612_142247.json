@@ -1,0 +1,27 @@
+{
+    "timestamp": "2026-06-12T14:22:47.467835",
+    "user_question": "Show product sales with category name.",
+    "generated_sql": "SELECT \np.category, \nSUM(oi.line_total) AS total_sales\nFROM \norders o \nJOIN order_items oi ON o.order_id = oi.order_id \nJOIN products p ON oi.product_id = p.product_id\nGROUP BY \np.category LIMIT 50;",
+    "row_count": 3,
+    "rows": [
+        {
+            "category": "Electronics",
+            "total_sales": 1283055.0
+        },
+        {
+            "category": "Furniture",
+            "total_sales": 222500.0
+        },
+        {
+            "category": "Stationery",
+            "total_sales": 11400.0
+        }
+    ],
+    "chart_path": null,
+    "insights": [
+        "Here are three business insights based on the query result:",
+        "The Electronics category accounted for the majority of total sales, with a significant gap between its highest and second-highest values.",
+        "The average total sales across all categories is $505,651.67, which suggests that these top-selling products have a substantial impact on overall revenue.",
+        "Stationery has the lowest total sales among the three categories, with a value of 11,400, indicating a relatively small contribution to overall revenue compared to Electronics and Furniture."
+    ]
+}

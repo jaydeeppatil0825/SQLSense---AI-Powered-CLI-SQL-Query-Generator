@@ -1,0 +1,39 @@
+{
+    "session_id": "20260612_112448",
+    "started_at": "2026-06-12T11:24:48.462951",
+    "ended_at": null,
+    "status": "active",
+    "turns": [
+        {
+            "turn_id": 1,
+            "timestamp": "2026-06-12T11:28:50.673116",
+            "user_question": "total sales",
+            "is_follow_up": false,
+            "rewritten_question": "total sales",
+            "generated_sql": "SELECT SUM(total_amount) AS total_sales FROM orders;",
+            "row_count": 1,
+            "chart_path": null,
+            "insights": [
+                "Here are 3-5 business insights based on the query result:",
+                "The total sales across all orders is exactly $1,493,996.",
+                "This single transaction represents the entirety of total sales, indicating a significant and potentially anomalous event in the company's revenue stream.",
+                "With an average total sales of $1,493,996, this figure far surpasses any typical daily or monthly sales figures, suggesting a one-time or extraordinary occurrence."
+            ],
+            "insights_skipped": false
+        }
+    ],
+    "last_user_question": "total sales",
+    "last_rewritten_question": "total sales",
+    "last_generated_sql": "SELECT SUM(total_amount) AS total_sales FROM orders;",
+    "last_chart_path": null,
+    "last_insights": [
+        "Here are 3-5 business insights based on the query result:",
+        "The total sales across all orders is exactly $1,493,996.",
+        "This single transaction represents the entirety of total sales, indicating a significant and potentially anomalous event in the company's revenue stream.",
+        "With an average total sales of $1,493,996, this figure far surpasses any typical daily or monthly sales figures, suggesting a one-time or extraordinary occurrence."
+    ],
+    "last_insights_skipped": false,
+    "last_tables_used": null,
+    "last_business_terms_used": null,
+    "last_filters_used": null
+}

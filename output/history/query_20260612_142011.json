@@ -1,0 +1,13 @@
+{
+    "timestamp": "2026-06-12T14:20:11.364348",
+    "user_question": "What is the total unpaid amount?",
+    "generated_sql": "SELECT SUM(paid_amount) AS total_paid_amount FROM payments;",
+    "row_count": 1,
+    "rows": [
+        {
+            "total_paid_amount": 1671828.28
+        }
+    ],
+    "chart_path": null,
+    "insights": []
+}

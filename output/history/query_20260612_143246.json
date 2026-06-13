@@ -1,0 +1,18 @@
+{
+    "timestamp": "2026-06-12T14:32:46.248052",
+    "user_question": "Show only top 2 from that result.",
+    "generated_sql": "SELECT c.customer_name, COUNT(p.payment_status) AS pending_payments\nFROM customers c\nJOIN orders o ON c.customer_id = o.customer_id\nJOIN payments p ON o.order_id = p.order_id\nWHERE p.payment_status = 'Pending'\nGROUP BY c.customer_name\nORDER BY pending_payments DESC\nLIMIT 2;",
+    "row_count": 2,
+    "rows": [
+        {
+            "customer_name": "Ananya Rao",
+            "pending_payments": 1
+        },
+        {
+            "customer_name": "Isha Nair",
+            "pending_payments": 1
+        }
+    ],
+    "chart_path": null,
+    "insights": []
+}

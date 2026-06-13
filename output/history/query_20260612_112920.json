@@ -1,0 +1,18 @@
+{
+    "timestamp": "2026-06-12T11:29:20.316878",
+    "user_question": "total sales",
+    "generated_sql": "SELECT SUM(total_amount) AS total_sales FROM orders;",
+    "row_count": 1,
+    "rows": [
+        {
+            "total_sales": 1493996.0
+        }
+    ],
+    "chart_path": null,
+    "insights": [
+        "Here are 3-5 business insights based on the query result:",
+        "The total sales across all orders is exactly $1,493,996.",
+        "This single transaction represents the entirety of total sales, indicating a significant and potentially anomalous event in the company's revenue stream.",
+        "With an average total sales of $1,493,996, this figure far surpasses any typical daily or monthly sales figures, suggesting a one-time or extraordinary occurrence."
+    ]
+}

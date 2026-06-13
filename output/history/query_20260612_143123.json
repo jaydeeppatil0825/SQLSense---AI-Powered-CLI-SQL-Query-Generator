@@ -1,0 +1,30 @@
+{
+    "timestamp": "2026-06-12T14:31:23.088834",
+    "user_question": "Which customers have pending payments?",
+    "generated_sql": "SELECT c.customer_name, p.payment_method, p.paid_amount\nFROM customers c\nJOIN orders o ON c.customer_id = o.customer_id\nJOIN payments p ON o.order_id = p.order_id\nWHERE p.payment_status = 'Pending' LIMIT 50;",
+    "row_count": 4,
+    "rows": [
+        {
+            "customer_name": "Ananya Rao",
+            "payment_method": "UPI",
+            "paid_amount": 0.0
+        },
+        {
+            "customer_name": "Isha Nair",
+            "payment_method": "UPI",
+            "paid_amount": 0.0
+        },
+        {
+            "customer_name": "Sneha Iyer",
+            "payment_method": "UPI",
+            "paid_amount": 0.0
+        },
+        {
+            "customer_name": "Pooja Reddy",
+            "payment_method": "UPI",
+            "paid_amount": 0.0
+        }
+    ],
+    "chart_path": null,
+    "insights": []
+}

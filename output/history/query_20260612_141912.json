@@ -1,0 +1,70 @@
+{
+    "timestamp": "2026-06-12T14:19:12.449993",
+    "user_question": "Show employees list.",
+    "generated_sql": "SELECT * FROM employees LIMIT 50;",
+    "row_count": 6,
+    "rows": [
+        {
+            "employee_id": 1,
+            "employee_name": "Suresh Pawar",
+            "department": "Sales",
+            "role": "Sales Manager",
+            "city": "Mumbai",
+            "salary": 85000.0,
+            "joining_date": "2022-01-10",
+            "status": "Active"
+        },
+        {
+            "employee_id": 2,
+            "employee_name": "Ritika Sen",
+            "department": "Sales",
+            "role": "Sales Executive",
+            "city": "Pune",
+            "salary": 45000.0,
+            "joining_date": "2023-04-12",
+            "status": "Active"
+        },
+        {
+            "employee_id": 3,
+            "employee_name": "Aman Kapoor",
+            "department": "Support",
+            "role": "Support Lead",
+            "city": "Delhi",
+            "salary": 60000.0,
+            "joining_date": "2021-09-18",
+            "status": "Active"
+        },
+        {
+            "employee_id": 4,
+            "employee_name": "Divya Menon",
+            "department": "Finance",
+            "role": "Accountant",
+            "city": "Bengaluru",
+            "salary": 55000.0,
+            "joining_date": "2022-11-05",
+            "status": "Active"
+        },
+        {
+            "employee_id": 5,
+            "employee_name": "Manish Jain",
+            "department": "Operations",
+            "role": "Warehouse Manager",
+            "city": "Jaipur",
+            "salary": 50000.0,
+            "joining_date": "2020-03-22",
+            "status": "Active"
+        },
+        {
+            "employee_id": 6,
+            "employee_name": "Kavya Rao",
+            "department": "HR",
+            "role": "HR Executive",
+            "city": "Hyderabad",
+            "salary": 42000.0,
+            "joining_date": "2023-07-01",
+            "status": "Active"
+        }
+    ],
+    "chart_path": null,
+    "insights": []
+}

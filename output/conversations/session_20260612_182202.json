@@ -1,0 +1,41 @@
+{
+    "session_id": "20260612_182202",
+    "started_at": "2026-06-12T18:22:02.460631",
+    "ended_at": null,
+    "status": "active",
+    "turns": [
+        {
+            "turn_id": 1,
+            "timestamp": "2026-06-12T18:28:59.003989",
+            "user_question": "total sale by cust",
+            "is_follow_up": false,
+            "rewritten_question": "total sale by cust",
+            "generated_sql": "SELECT c.customer_name, SUM(oi.line_total) AS total_sales \nFROM customers c \nJOIN orders o ON c.customer_id = o.customer_id \nJOIN order_items oi ON o.order_id = oi.order_id \nGROUP BY c.customer_name \nORDER BY total_sales DESC LIMIT 50;",
+            "row_count": 0,
+            "method": null,
+            "chart_path": null,
+            "insights": []
+        },
+        {
+            "turn_id": 2,
+            "timestamp": "2026-06-12T18:46:30.850680",
+            "user_question": "Show total sales from orders",
+            "is_follow_up": false,
+            "rewritten_question": "Show total sales from orders",
+            "generated_sql": "SELECT SUM(final_amount) AS total_sales FROM orders;",
+            "row_count": 0,
+            "method": null,
+            "chart_path": null,
+            "insights": []
+        }
+    ],
+    "last_user_question": "Show total sales from orders",
+    "last_rewritten_question": "Show total sales from orders",
+    "last_generated_sql": "SELECT SUM(final_amount) AS total_sales FROM orders;",
+    "last_chart_path": null,
+    "last_insights": null,
+    "last_insights_skipped": false,
+    "last_tables_used": null,
+    "last_business_terms_used": null,
+    "last_filters_used": null
+}

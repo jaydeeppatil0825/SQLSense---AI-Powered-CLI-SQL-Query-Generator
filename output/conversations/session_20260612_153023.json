@@ -1,0 +1,16 @@
+{
+    "session_id": "20260612_153023",
+    "started_at": "2026-06-12T15:30:23.541070",
+    "ended_at": "2026-06-12T16:41:17.235856",
+    "status": "ended",
+    "turns": [],
+    "last_user_question": null,
+    "last_rewritten_question": null,
+    "last_generated_sql": null,
+    "last_chart_path": null,
+    "last_insights": null,
+    "last_insights_skipped": false,
+    "last_tables_used": null,
+    "last_business_terms_used": null,
+    "last_filters_used": null
+}

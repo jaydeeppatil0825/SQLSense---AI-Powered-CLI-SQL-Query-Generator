@@ -1,0 +1,46 @@
+{
+    "timestamp": "2026-06-12T14:34:34.728660",
+    "user_question": "Show unpaid people",
+    "generated_sql": "SELECT * FROM payments WHERE payment_status = 'Pending' LIMIT 50;",
+    "row_count": 4,
+    "rows": [
+        {
+            "payment_id": 8,
+            "order_id": 8,
+            "payment_date": null,
+            "payment_method": "UPI",
+            "paid_amount": 0.0,
+            "payment_status": "Pending",
+            "transaction_reference": "TXN10008"
+        },
+        {
+            "payment_id": 12,
+            "order_id": 12,
+            "payment_date": null,
+            "payment_method": "UPI",
+            "paid_amount": 0.0,
+            "payment_status": "Pending",
+            "transaction_reference": "TXN10012"
+        },
+        {
+            "payment_id": 19,
+            "order_id": 19,
+            "payment_date": null,
+            "payment_method": "UPI",
+            "paid_amount": 0.0,
+            "payment_status": "Pending",
+            "transaction_reference": "TXN10019"
+        },
+        {
+            "payment_id": 29,
+            "order_id": 29,
+            "payment_date": null,
+            "payment_method": "UPI",
+            "paid_amount": 0.0,
+            "payment_status": "Pending",
+            "transaction_reference": "TXN10029"
+        }
+    ],
+    "chart_path": null,
+    "insights": []
+}

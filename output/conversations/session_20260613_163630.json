@@ -1,0 +1,29 @@
+{
+    "session_id": "20260613_163630",
+    "started_at": "2026-06-13T16:36:30.473415",
+    "ended_at": null,
+    "status": "active",
+    "turns": [
+        {
+            "turn_id": 1,
+            "timestamp": "2026-06-13T16:38:35.935337",
+            "user_question": "show total sales",
+            "is_follow_up": false,
+            "rewritten_question": "show total sales",
+            "generated_sql": "SELECT SUM(final_amount) AS total_sales FROM orders;",
+            "row_count": 0,
+            "method": null,
+            "chart_path": null,
+            "insights": []
+        }
+    ],
+    "last_user_question": "show total sales",
+    "last_rewritten_question": "show total sales",
+    "last_generated_sql": "SELECT SUM(final_amount) AS total_sales FROM orders;",
+    "last_chart_path": null,
+    "last_insights": null,
+    "last_insights_skipped": false,
+    "last_tables_used": null,
+    "last_business_terms_used": null,
+    "last_filters_used": null
+}
