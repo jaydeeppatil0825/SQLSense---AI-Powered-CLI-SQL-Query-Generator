@@ -23,7 +23,7 @@ from semantic.ai_semantic_enricher import (
 )
 from utils.file_utils import load_json, save_json
 from utils.logger import get_logger
-from vector_store import EmbeddingService, VectorIndexBuilder, VectorRetriever
+from vector_store import EmbeddingService, VectorIndexBuilder, VectorRetriever, VectorIndexPersistence
 
 logger = get_logger()
 
@@ -43,8 +43,13 @@ class DatabaseService:
         self.last_build_summary: Dict[str, Any] = {}
         self.embedding_service = EmbeddingService()
         self.vector_index_builder = VectorIndexBuilder(self.embedding_service)
+        self.vector_index_storage = VectorIndexPersistence()
         self.vector_retriever: Optional[VectorRetriever] = None
         self.vector_index_status: str = "not_built"
+        self.vector_index_details: Dict[str, Any] = self._make_vector_index_details(
+            source="none",
+            stale_reason="vector index not built",
+        )
 
     def _align_glossary_with_active_knowledge_base(self, glossary: Dict[str, Any]) -> Dict[str, Any]:
         """Ensure loaded glossary mappings belong to the active knowledge base."""
@@ -352,28 +357,122 @@ class DatabaseService:
         """Get the business glossary."""
         return self.business_glossary
 
+    def _make_vector_index_details(self, **overrides: Any) -> Dict[str, Any]:
+        details = {
+            "index_dir": str(self.vector_index_storage.index_dir),
+            "manifest_path": str(self.vector_index_storage.manifest_path),
+            "documents_path": str(self.vector_index_storage.documents_path),
+            "exists": False,
+            "fresh": False,
+            "is_fresh": False,
+            "source": "none",
+            "loaded_from_disk": False,
+            "rebuilt": False,
+            "persisted": False,
+            "document_count": 0,
+            "stale_reason": "",
+            "persistence_error": "",
+            "knowledge_base_hash": "",
+            "glossary_hash": "",
+            "embedding_backend": self.embedding_service.get_backend_name(),
+            "embedding_model": self.embedding_service.get_model_name(),
+            "embedding_dimension": self.embedding_service.get_dimension(),
+        }
+        details.update(overrides)
+        return details
+
+    def _build_vector_documents(self) -> list[dict[str, Any]]:
+        """Build vector documents from the active KB and glossary."""
+        documents = self.vector_index_builder.build_from_knowledge_base(self.knowledge_base or {})
+        if self.business_glossary:
+            documents.extend(self.vector_index_builder.build_from_glossary(self.business_glossary))
+        return documents
+
     def refresh_vector_index(self) -> None:
         """
-        Rebuild the in-memory vector index from the active KB and glossary.
+        Load or rebuild the vector index from the active KB and glossary.
 
-        Persistence is intentionally left for a later phase; this method keeps
-        the current CLI session fast and deterministic without changing storage.
+        KB and glossary remain the source of truth. The persisted vector index
+        is only a reusable search layer derived from that source content.
         """
         if not self.knowledge_base:
             self.vector_retriever = None
             self.vector_index_status = "not_built"
+            self.vector_index_details = self._make_vector_index_details(
+                source="none",
+                stale_reason="knowledge base not loaded",
+            )
             return
 
-        retriever = VectorRetriever(self.embedding_service)
-        kb_docs = self.vector_index_builder.build_from_knowledge_base(self.knowledge_base)
-        retriever.add_documents(kb_docs)
+        inspection = self.vector_index_storage.inspect_index(
+            self.knowledge_base,
+            self.business_glossary,
+            self.embedding_service,
+        )
+        rebuild_reason = inspection.get("stale_reason", "")
 
-        if self.business_glossary:
-            glossary_docs = self.vector_index_builder.build_from_glossary(self.business_glossary)
-            retriever.add_documents(glossary_docs)
+        if inspection.get("fresh"):
+            loaded, message, documents, load_details = self.vector_index_storage.load_documents(
+                self.knowledge_base,
+                self.business_glossary,
+                self.embedding_service,
+            )
+            if loaded:
+                retriever = VectorRetriever(self.embedding_service)
+                retriever.add_documents(documents)
+                self.vector_retriever = retriever
+                self.vector_index_status = "ready"
+                self.vector_index_details = self._make_vector_index_details(**load_details)
+                logger.info(message)
+                return
 
-        self.vector_retriever = retriever
-        self.vector_index_status = "ready"
+            rebuild_reason = load_details.get("stale_reason", rebuild_reason)
+            inspection = load_details
+
+        try:
+            documents = self._build_vector_documents()
+            retriever = VectorRetriever(self.embedding_service)
+            retriever.add_documents(documents)
+            self.vector_retriever = retriever
+            self.vector_index_status = "ready"
+        except Exception as exc:
+            logger.error(f"Vector index rebuild failed: {exc}")
+            self.vector_retriever = None
+            self.vector_index_status = "degraded"
+            failure_details = dict(inspection)
+            failure_details.update(
+                {
+                    "source": "rebuild_failed",
+                    "stale_reason": rebuild_reason or f"vector rebuild failed: {exc}",
+                    "persistence_error": str(exc),
+                }
+            )
+            self.vector_index_details = self._make_vector_index_details(**failure_details)
+            return
+
+        saved, message, save_details = self.vector_index_storage.save_documents(
+            documents,
+            self.knowledge_base,
+            self.business_glossary,
+            self.embedding_service,
+        )
+        if not saved:
+            logger.warning(message)
+        final_stale_reason = rebuild_reason or save_details.get("stale_reason", "")
+        rebuilt_details = dict(save_details)
+        rebuilt_details.update(
+            {
+                "source": "rebuilt",
+                "rebuilt": True,
+                "loaded_from_disk": False,
+                "exists": bool(save_details.get("persisted")) or inspection.get("exists", False),
+                "fresh": True,
+                "is_fresh": True,
+                "stale_reason": final_stale_reason,
+                "document_count": len(documents),
+            }
+        )
+        self.vector_index_details = self._make_vector_index_details(**rebuilt_details)
 
     def get_vector_retriever(self) -> Optional[VectorRetriever]:
         """Return the active in-memory vector retriever for the current session."""
@@ -392,6 +491,7 @@ class DatabaseService:
             "index_status": self.vector_index_status,
             "embedding": self.get_embedding_status(),
             "retriever": retriever_status,
+            "persistence": dict(self.vector_index_details),
         }
 
     def get_last_ai_enrichment_result(self) -> tuple[str, str]:

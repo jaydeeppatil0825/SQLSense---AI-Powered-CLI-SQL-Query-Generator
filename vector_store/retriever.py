@@ -29,7 +29,7 @@ def _token_overlap_score(query_tokens: list[str], doc_tokens: list[str]) -> floa
     return overlap / math.sqrt(len(query_set) * len(doc_set))
 
 
-class VectorRetriever:
+class VectorRetriever: 
     """Retrieve relevant documents using vector similarity."""
     
     def __init__(self, embedding_service: EmbeddingService = None):

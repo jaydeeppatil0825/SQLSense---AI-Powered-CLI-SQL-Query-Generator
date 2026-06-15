@@ -328,12 +328,19 @@ def handle_build_knowledge_base(state: SessionState) -> None:
     vector_status = state.app_service.get_vector_status()
     embedding_status = vector_status.get("embedding", {})
     retriever_status = vector_status.get("retriever", {})
+    persistence_status = vector_status.get("persistence", {})
     print("\n  Vector / Embedding Status:")
     print(f"  - index status: {vector_status.get('index_status')}")
+    print(f"  - index source: {persistence_status.get('source')}")
+    print(f"  - index fresh: {persistence_status.get('is_fresh')}")
     print(f"  - embedding backend: {embedding_status.get('backend')}")
     print(f"  - embedding model: {embedding_status.get('model')}")
     print(f"  - fallback used: {embedding_status.get('fallback_used')}")
     print(f"  - indexed documents: {retriever_status.get('document_count', 0)}")
+    if persistence_status.get("stale_reason"):
+        print(f"  - stale reason: {persistence_status.get('stale_reason')}")
+    if persistence_status.get("persistence_error"):
+        print(f"  - persistence note: {persistence_status.get('persistence_error')}")
     if embedding_status.get("init_error"):
         print(f"  - backend note: {embedding_status.get('init_error')}")
     print("  Returning to main menu.")
@@ -391,6 +398,8 @@ def handle_ask_question(state: SessionState) -> None:
     # ── Display the SQL ───────────────────────────────────────────────────
     query_context = state.app_service.get_last_query_context() or {}
     query_plan = query_context.get("plan") or {}
+    vector_status = state.app_service.get_vector_status()
+    persistence_status = vector_status.get("persistence", {})
 
     if query_plan:
         print("\n  Query Plan:")
@@ -423,6 +432,11 @@ def handle_ask_question(state: SessionState) -> None:
         retriever_status = vector_results.get("retriever_status", {})
         embedding_status = retriever_status.get("embedding", {})
         last_search = retriever_status.get("last_search", {})
+        if persistence_status:
+            print(f"  - index source: {persistence_status.get('source')}")
+            print(f"  - index fresh: {persistence_status.get('is_fresh')}")
+            if persistence_status.get("stale_reason"):
+                print(f"  - stale reason: {persistence_status.get('stale_reason')}")
         if embedding_status:
             print(f"  - embedding backend: {embedding_status.get('backend')}")
             print(f"  - embedding model: {embedding_status.get('model')}")
@@ -456,6 +470,11 @@ def handle_ask_question(state: SessionState) -> None:
         vector_results = query_context.get("vector_results", {})
         retriever_status = vector_results.get("retriever_status", {})
         embedding_status = retriever_status.get("embedding", {})
+        if persistence_status:
+            print(f"  - index source: {persistence_status.get('source')}")
+            print(f"  - index fresh: {persistence_status.get('is_fresh')}")
+            if persistence_status.get("stale_reason"):
+                print(f"  - stale reason: {persistence_status.get('stale_reason')}")
         if embedding_status:
             print(f"  - embedding backend: {embedding_status.get('backend')}")
             print(f"  - embedding model: {embedding_status.get('model')}")

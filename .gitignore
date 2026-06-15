@@ -22,6 +22,7 @@ htmlcov/
 # Generated semantic artifacts
 semantic/knowledge_base.json
 semantic/business_glossary.json
+vector_store/index/
 
 # Generated output files
 output/

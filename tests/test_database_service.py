@@ -5,7 +5,8 @@ from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 from core.database_service import DatabaseService
 
 
-def test_build_knowledge_base_falls_back_when_ollama_is_not_running(monkeypatch):
+def test_build_knowledge_base_falls_back_when_ollama_is_not_running(monkeypatch, tmp_path):
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
     engine = create_engine("sqlite:///:memory:")
     metadata = MetaData()
     Table(
@@ -42,7 +43,8 @@ def test_build_knowledge_base_falls_back_when_ollama_is_not_running(monkeypatch)
     )
 
 
-def test_build_knowledge_base_reports_partial_ai_enrichment(monkeypatch):
+def test_build_knowledge_base_reports_partial_ai_enrichment(monkeypatch, tmp_path):
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
     engine = create_engine("sqlite:///:memory:")
     metadata = MetaData()
     Table(
@@ -99,7 +101,8 @@ def test_build_knowledge_base_reports_partial_ai_enrichment(monkeypatch):
     )
 
 
-def test_build_knowledge_base_keeps_generated_glossary_active_and_builds_vector_index(monkeypatch):
+def test_build_knowledge_base_keeps_generated_glossary_active_and_builds_vector_index(monkeypatch, tmp_path):
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
     engine = create_engine("sqlite:///:memory:")
     metadata = MetaData()
     Table(
@@ -140,3 +143,101 @@ def test_build_knowledge_base_keeps_generated_glossary_active_and_builds_vector_
     assert vector_status["index_status"] == "ready"
     assert vector_status["retriever"]["index_built"] is True
     assert vector_status["retriever"]["document_count"] >= 3
+    assert vector_status["persistence"]["rebuilt"] is True
+    assert vector_status["persistence"]["persisted"] is True
+
+
+def test_database_service_loads_persisted_index_when_fresh(monkeypatch, tmp_path):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
+    knowledge_base = {
+        "orders": {
+            "module": "transaction",
+            "business_purpose": "Stores sales orders",
+            "columns": [
+                {"name": "order_id", "type": "int", "semantic_type": "id"},
+                {"name": "final_amount", "type": "decimal", "semantic_type": "money"},
+            ],
+            "relationships": [],
+        }
+    }
+    glossary = {
+        "sales": {
+            "description": "Sales amount",
+            "mapped_columns": [{"table": "orders", "column": "final_amount", "confidence": "high"}],
+            "example_questions": ["show total sales"],
+        }
+    }
+
+    first_service = DatabaseService()
+    first_service.knowledge_base = knowledge_base
+    first_service.business_glossary = glossary
+    first_service.refresh_vector_index()
+
+    first_status = first_service.get_vector_status()
+    assert first_status["persistence"]["source"] == "rebuilt"
+    assert first_status["persistence"]["persisted"] is True
+
+    second_service = DatabaseService()
+    second_service.knowledge_base = knowledge_base
+    second_service.business_glossary = glossary
+
+    def fail_if_rebuilt(*args, **kwargs):
+        raise AssertionError("Fresh persisted vector index should load from disk instead of rebuilding")
+
+    monkeypatch.setattr(second_service.vector_index_builder, "build_from_knowledge_base", fail_if_rebuilt)
+    monkeypatch.setattr(second_service.vector_index_builder, "build_from_glossary", fail_if_rebuilt)
+
+    second_service.refresh_vector_index()
+
+    second_status = second_service.get_vector_status()
+    assert second_status["index_status"] == "ready"
+    assert second_status["persistence"]["loaded_from_disk"] is True
+    assert second_status["persistence"]["source"] == "disk"
+    assert "orders" in second_service.get_vector_retriever().get_relevant_tables("show sales orders", top_k=5)
+
+
+def test_database_service_rebuilds_persisted_index_when_glossary_changes(monkeypatch, tmp_path):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
+    knowledge_base = {
+        "stock_positions": {
+            "module": "snapshot",
+            "business_purpose": "Tracks stock levels",
+            "columns": [
+                {"name": "warehouse_code", "type": "varchar", "semantic_type": "code"},
+                {"name": "quantity_on_hand", "type": "int", "semantic_type": "quantity"},
+            ],
+            "relationships": [],
+        }
+    }
+    first_glossary = {
+        "stock": {
+            "description": "Current stock",
+            "mapped_columns": [{"table": "stock_positions", "column": "quantity_on_hand", "confidence": "high"}],
+            "example_questions": ["show stock"],
+        }
+    }
+    second_glossary = {
+        "inventory": {
+            "description": "Inventory balance",
+            "mapped_columns": [{"table": "stock_positions", "column": "quantity_on_hand", "confidence": "high"}],
+            "example_questions": ["show inventory by warehouse"],
+        }
+    }
+
+    first_service = DatabaseService()
+    first_service.knowledge_base = knowledge_base
+    first_service.business_glossary = first_glossary
+    first_service.refresh_vector_index()
+
+    second_service = DatabaseService()
+    second_service.knowledge_base = knowledge_base
+    second_service.business_glossary = second_glossary
+    second_service.refresh_vector_index()
+
+    second_status = second_service.get_vector_status()
+    assert second_status["index_status"] == "ready"
+    assert second_status["persistence"]["source"] == "rebuilt"
+    assert second_status["persistence"]["rebuilt"] is True
+    assert "glossary hash changed" in second_status["persistence"]["stale_reason"]

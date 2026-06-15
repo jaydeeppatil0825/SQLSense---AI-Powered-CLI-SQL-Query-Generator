@@ -16,7 +16,8 @@ KB = {
 }
 
 
-def _service_with_orders():
+def _service_with_orders(monkeypatch, tmp_path):
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
     engine = create_engine("sqlite:///:memory:")
     metadata = MetaData()
     orders = Table(
@@ -35,8 +36,8 @@ def _service_with_orders():
     return service
 
 
-def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypatch):
-    service = _service_with_orders()
+def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypatch, tmp_path):
+    service = _service_with_orders(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "core.question_service.generate_sql",
         lambda user_question, knowledge_base, backend=None, query_plan=None, selected_tables=None: "SELECT SUM(final_amount) AS total_sales FROM orders;",
@@ -60,8 +61,8 @@ def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypat
     assert service.get_last_sql() == sql
 
 
-def test_destructive_natural_language_question_is_blocked():
-    service = _service_with_orders()
+def test_destructive_natural_language_question_is_blocked(monkeypatch, tmp_path):
+    service = _service_with_orders(monkeypatch, tmp_path)
 
     success, message, sql, error = service.process_question("delete all customers", ai_backend="local")
 
@@ -71,8 +72,8 @@ def test_destructive_natural_language_question_is_blocked():
     assert service.get_last_sql() is None
 
 
-def test_process_question_loads_active_glossary_without_glossary_menu(monkeypatch):
-    service = _service_with_orders()
+def test_process_question_loads_active_glossary_without_glossary_menu(monkeypatch, tmp_path):
+    service = _service_with_orders(monkeypatch, tmp_path)
     active_glossary = {
         "sales": {
             "description": "Sales amount",
