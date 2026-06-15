@@ -17,6 +17,8 @@ _FORBIDDEN_KEYWORDS = [
     "TRUNCATE",
     "CREATE",
     "REPLACE",
+    "EXEC",
+    "EXECUTE",
 ]
 
 
@@ -242,15 +244,17 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
 
     # Check 7: verify table names after FROM and JOIN exist in knowledge base.
     if knowledge_base:
-        kb_tables = {t.lower() for t in knowledge_base.keys()}
+        kb_tables = {t.lower(): t for t in knowledge_base.keys()}
+        alias_to_table: dict[str, str] = {}
         # Extract bare table names after FROM / JOIN keywords.
         # Pattern: FROM/JOIN followed by optional schema prefix then table name.
         table_refs = re.findall(
-            r"\b(?:FROM|JOIN)\s+(?:`?[\w]+`?\.)?`?(\w+)`?",
+            r"\b(?:FROM|JOIN)\s+(?:`?[\w]+`?\.)?`?(\w+)`?(?:\s+(?:AS\s+)?(\w+))?",
             stripped,
             re.IGNORECASE,
         )
-        for ref in table_refs:
+        referenced_tables = []
+        for ref, alias in table_refs:
             # Skip subquery aliases, CTE names, and common SQL keywords.
             skip = {"select", "where", "on", "set", "values", "into"}
             if ref.lower() in skip:
@@ -261,5 +265,71 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
                     f"Table '{ref}' does not exist in the knowledge base. "
                     f"Available tables: {', '.join(sorted(knowledge_base.keys()))}",
                 )
+            canonical_table = kb_tables[ref.lower()]
+            referenced_tables.append(canonical_table)
+            alias_to_table[canonical_table] = canonical_table
+            if alias and alias.lower() not in skip:
+                alias_to_table[alias] = canonical_table
+
+        if re.search(r"\bSELECT\s+(?:\w+\.)?\*", stripped, re.IGNORECASE):
+            for table_name in referenced_tables:
+                row_count = knowledge_base.get(table_name, {}).get("row_count")
+                if isinstance(row_count, int) and row_count > 1000:
+                    return (
+                        False,
+                        f"SELECT * is not allowed on large table '{table_name}' ({row_count} rows).",
+                    )
+
+        strict_column_validation = (
+            len(referenced_tables) == 1
+            or all(
+                len(knowledge_base.get(table_name, {}).get("columns", [])) > 1
+                for table_name in referenced_tables
+            )
+        )
+
+        if strict_column_validation:
+            for alias, column in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b", stripped):
+                if alias.lower() in {"date_format"}:
+                    continue
+                table_name = alias_to_table.get(alias)
+                if not table_name:
+                    continue
+                known_columns = {
+                    str(col.get("name", "")).lower()
+                    for col in knowledge_base.get(table_name, {}).get("columns", [])
+                }
+                if column.lower() not in known_columns:
+                    return False, f"Column '{alias}.{column}' does not exist in table '{table_name}'."
+
+        if len(referenced_tables) == 1 and strict_column_validation:
+            table_name = referenced_tables[0]
+            known_columns = {
+                str(col.get("name", "")).lower()
+                for col in knowledge_base.get(table_name, {}).get("columns", [])
+            }
+            select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", stripped, re.IGNORECASE | re.DOTALL)
+            if select_match:
+                tokens = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", select_match.group(1))
+                alias_tokens = {
+                    match.group(1).lower()
+                    for match in re.finditer(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\b", select_match.group(1), re.IGNORECASE)
+                }
+                sql_keywords = {
+                    "select", "from", "where", "and", "or", "as", "sum", "avg", "min", "max", "count",
+                    "distinct", "date_format", "case", "when", "then", "else", "end", "limit",
+                }
+                for token in tokens:
+                    lower_token = token.lower()
+                    if lower_token in sql_keywords or lower_token in known_columns or lower_token in alias_tokens:
+                        continue
+                    if token.isdigit():
+                        continue
+                    if any(ch in select_match.group(1) for ch in ("'", '"')):
+                        # String literals in the select list are rare in this CLI path; skip them.
+                        continue
+                    if lower_token in alias_to_table:
+                        continue
+                    return False, f"Column '{token}' does not exist in table '{table_name}'."
 
     return True, "SQL structure is valid"

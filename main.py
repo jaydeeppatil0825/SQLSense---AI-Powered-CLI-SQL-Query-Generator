@@ -350,6 +350,23 @@ def handle_ask_question(state: SessionState) -> None:
         return
 
     # ── Display the SQL ───────────────────────────────────────────────────
+    query_context = state.app_service.get_last_query_context() or {}
+    selected_tables = query_context.get("selected_tables", [])
+    if selected_tables:
+        print("\n  Selected Tables:")
+        for table_entry in selected_tables:
+            print(f"  - {table_entry.get('table', '')} (confidence: {table_entry.get('confidence', 'unknown')})")
+            if table_entry.get("reason"):
+                print(f"    reason: {table_entry['reason']}")
+
+    if query_context.get("confidence") is not None:
+        print(f"\n  Planning Confidence: {query_context['confidence']}")
+
+    if query_context.get("warnings"):
+        print("\n  Warnings:")
+        for warning in query_context["warnings"]:
+            print(f"  - {warning}")
+
     print("\n  Generated SQL:")
     print(f"  {sql}")
     
@@ -489,6 +506,13 @@ def handle_execute_last_sql(state: SessionState) -> None:
     # ── Execute query ───────────────────────────────────────────────────
     logger.info(f"Executing SQL: {sql[:100]}...")
     print(f"\n  Executing:\n  {sql}\n")
+
+    query_context = state.app_service.get_last_query_context() or {}
+    if query_context.get("warnings"):
+        print("  Execution warnings:")
+        for warning in query_context["warnings"]:
+            print(f"  - {warning}")
+        print()
     
     success, message, rows = state.app_service.execute_sql(sql, revalidate=True)
     if not success:

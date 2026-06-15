@@ -60,19 +60,23 @@ def test_prompt_omits_limit_instruction_when_question_has_numeric_qualifier():
 
 def test_get_relevant_glossary_terms_fallback_to_hardcoded():
     """Test that glossary falls back to hardcoded when business_glossary.json not found."""
-    glossary_section = _get_relevant_glossary_terms("show sales", _knowledge_base())
+    # Use a non-existent path to force fallback
+    glossary_section = _get_relevant_glossary_terms("show sales", _knowledge_base(), glossary_path="nonexistent_path.json")
     
     # Should return the hardcoded glossary when file not found
     assert "Business term glossary" in glossary_section
     assert "SALES" in glossary_section or "REVENUE" in glossary_section
 
 
-def test_get_relevant_glossary_terms_includes_hardcoded_content():
-    """Test that the hardcoded glossary contains expected content."""
+def test_get_relevant_glossary_terms_uses_real_glossary_when_available():
+    """Test that the real business_glossary.json is used when it exists."""
+    # Use the default path (semantic/business_glossary.json) which exists in the project
     glossary_section = _get_relevant_glossary_terms("show sales", _knowledge_base())
     
-    # Should contain common business terms
-    assert "SALES" in glossary_section or "REVENUE" in glossary_section or "CUSTOMER" in glossary_section
+    # Should contain the real glossary content from business_glossary.json
+    assert "Business term glossary" in glossary_section
+    # The real glossary contains CUSTOMER term (as seen in the test failure)
+    assert "CUSTOMER" in glossary_section
 
 
 def test_prompt_includes_cli_safety_and_pcsoft_relationship_guidance():

@@ -234,6 +234,198 @@ _RULE_BASED_MAPPINGS = {
     }
 }
 
+_ERP_RULE_BASED_MAPPINGS = {
+    "purchase": {
+        "description": "Purchase orders, vendor bills, or procurement amounts.",
+        "column_patterns": ["purchase_amount", "final_amount", "total_amount", "amount"],
+        "table_patterns": ["purchases", "purchase_orders", "vendor_invoices"],
+        "example_questions": [
+            "Show purchase by vendor",
+            "Show total purchase this month",
+        ],
+    },
+    "vendor": {
+        "description": "Suppliers or vendors the business buys from.",
+        "column_patterns": ["vendor_name", "vendor_id", "supplier_name", "supplier_id", "name"],
+        "table_patterns": ["vendors", "suppliers"],
+        "example_questions": [
+            "Show purchase by vendor",
+            "Show vendor pending payments",
+        ],
+    },
+    "invoice": {
+        "description": "Sales or purchase billing documents.",
+        "column_patterns": ["invoice_no", "invoice_number", "invoice_date", "invoice_amount", "amount_due"],
+        "table_patterns": ["invoices", "sales_invoices", "vendor_invoices"],
+        "example_questions": [
+            "Show unpaid invoices",
+            "Show invoice amount by month",
+        ],
+    },
+    "payment": {
+        "description": "Money received from customers or paid to vendors.",
+        "column_patterns": ["payment_status", "paid_amount", "payment_amount", "payment_date", "amount_due"],
+        "table_patterns": ["payments", "vendor_payments", "customer_payments"],
+        "example_questions": [
+            "Show vendor pending payments",
+            "Show payments by month",
+        ],
+    },
+    "inventory": {
+        "description": "Current stock position and inventory movement.",
+        "column_patterns": ["stock_qty", "quantity", "available_stock", "on_hand", "warehouse_id"],
+        "table_patterns": ["inventory", "inventory_balance", "stock_ledger"],
+        "example_questions": [
+            "Show current stock by warehouse",
+            "Show low stock items",
+        ],
+    },
+    "warehouse": {
+        "description": "Storage locations for stock and materials.",
+        "column_patterns": ["warehouse_name", "warehouse_code", "warehouse_id", "location"],
+        "table_patterns": ["warehouses"],
+        "example_questions": [
+            "Show current stock by warehouse",
+            "Show warehouse wise stock",
+        ],
+    },
+    "ledger": {
+        "description": "Accounting ledger or balance tracking data.",
+        "column_patterns": ["ledger_name", "ledger_code", "ledger_id", "balance", "debit", "credit"],
+        "table_patterns": ["ledgers", "general_ledger", "gl_entries"],
+        "example_questions": [
+            "Show customer outstanding balance",
+            "Show ledger balance",
+        ],
+    },
+    "account": {
+        "description": "Chart of account or finance account definitions.",
+        "column_patterns": ["account_name", "account_code", "account_id", "balance"],
+        "table_patterns": ["accounts", "chart_of_accounts"],
+        "example_questions": [
+            "Show balance by account",
+            "Show tax account balances",
+        ],
+    },
+    "tax": {
+        "description": "Tax amounts such as GST or VAT charged on transactions.",
+        "column_patterns": ["tax_amount", "gst_amount", "vat_amount", "taxable_amount"],
+        "table_patterns": ["taxes", "invoices", "orders"],
+        "example_questions": [
+            "Show tax collected by month",
+            "Show GST by invoice",
+        ],
+    },
+    "gst": {
+        "description": "Goods and Services Tax charged on invoices or orders.",
+        "column_patterns": ["gst_amount", "gst_rate", "tax_amount"],
+        "table_patterns": ["invoices", "orders", "taxes"],
+        "example_questions": [
+            "Show GST collected by month",
+            "Show GST by customer",
+        ],
+    },
+    "salary": {
+        "description": "Employee compensation and payroll totals.",
+        "column_patterns": ["salary", "gross_salary", "net_salary", "pay_amount"],
+        "table_patterns": ["employees", "payroll", "salary_register"],
+        "example_questions": [
+            "Show salary by department",
+            "Show total salary this month",
+        ],
+    },
+    "department": {
+        "description": "Business unit or department grouping for employees.",
+        "column_patterns": ["department", "department_name", "department_id"],
+        "table_patterns": ["departments", "employees"],
+        "example_questions": [
+            "Show salary by department",
+            "Show employees by department",
+        ],
+    },
+    "production": {
+        "description": "Manufacturing or production execution data.",
+        "column_patterns": ["production_qty", "produced_qty", "work_order_no", "bom_id"],
+        "table_patterns": ["production_orders", "production_entries", "work_orders"],
+        "example_questions": [
+            "Show production by BOM",
+            "Show produced quantity by date",
+        ],
+    },
+    "bom": {
+        "description": "Bill of materials linking products to required materials.",
+        "column_patterns": ["bom_no", "bom_id", "material_id", "required_qty"],
+        "table_patterns": ["bom", "bom_items", "bill_of_materials"],
+        "example_questions": [
+            "Show BOM materials",
+            "Show production by BOM",
+        ],
+    },
+    "material": {
+        "description": "Raw materials or components consumed in production.",
+        "column_patterns": ["material_name", "material_id", "required_qty", "consumed_qty"],
+        "table_patterns": ["materials", "bom_items", "material_issue"],
+        "example_questions": [
+            "Show required material quantity by BOM",
+            "Show material consumption",
+        ],
+    },
+    "balance": {
+        "description": "Open balance or outstanding monetary amount.",
+        "column_patterns": ["balance", "outstanding_amount", "amount_due", "pending_amount"],
+        "example_questions": [
+            "Show customer outstanding balance",
+            "Show vendor balance due",
+        ],
+    },
+    "due": {
+        "description": "Amounts that are unpaid, pending, or due.",
+        "column_patterns": ["due_date", "amount_due", "balance_due", "pending_amount"],
+        "example_questions": [
+            "Show unpaid invoices",
+            "Show vendor payments due",
+        ],
+    },
+    "pending": {
+        "description": "Transactions or documents not yet completed.",
+        "column_patterns": ["status", "payment_status", "invoice_status", "pending_amount"],
+        "example_questions": [
+            "Show vendor pending payments",
+            "Show pending invoices",
+        ],
+    },
+}
+
+
+def _combined_rule_mappings() -> Dict[str, Any]:
+    combined = dict(_RULE_BASED_MAPPINGS)
+    combined.update(_ERP_RULE_BASED_MAPPINGS)
+    return combined
+
+
+def get_default_business_glossary() -> Dict[str, Any]:
+    """
+    Return a hardcoded glossary fallback that works without a JSON file.
+    """
+    glossary = {}
+    for term, term_data in _combined_rule_mappings().items():
+        mapped_columns = []
+        for table_name, column_name in term_data.get("preferred_columns", []):
+            mapped_columns.append(
+                {
+                    "table": table_name,
+                    "column": column_name,
+                    "type": "unknown",
+                    "confidence": "medium",
+                }
+            )
+        glossary[term] = {
+            "description": term_data["description"],
+            "mapped_columns": mapped_columns,
+            "example_questions": term_data.get("example_questions", []),
+        }
+    return glossary
+
 
 def _find_columns_for_term(knowledge_base: dict, term_data: dict) -> List[Dict[str, Any]]:
     """
@@ -375,7 +567,7 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
         # Fall back to rule-based mappings
         logger.info("Using rule-based mappings for glossary generation")
         
-        for term, term_data in _RULE_BASED_MAPPINGS.items():
+        for term, term_data in _combined_rule_mappings().items():
             mappings = _find_columns_for_term(knowledge_base, term_data)
             
             if mappings:
@@ -413,20 +605,27 @@ def load_business_glossary(glossary_path: str = "semantic/business_glossary.json
         glossary_path: Path to the glossary file
     
     Returns:
-        Glossary dict, or empty dict if file not found
+        Glossary dict loaded from disk, or a hardcoded fallback glossary when the
+        file is missing, invalid, or unreadable.
     """
     from utils.file_utils import load_json
     
     try:
         glossary = load_json(glossary_path)
         logger.info(f"Business glossary loaded from {glossary_path}")
-        return glossary
+        return glossary if isinstance(glossary, dict) and glossary else get_default_business_glossary()
     except FileNotFoundError:
         logger.warning(f"Business glossary not found at {glossary_path}")
-        return {}
+        return get_default_business_glossary()
+    except ValueError as exc:
+        logger.error(f"Business glossary at {glossary_path} is invalid: {exc}")
+        return get_default_business_glossary()
+    except OSError as exc:
+        logger.error(f"Business glossary at {glossary_path} is unreadable: {exc}")
+        return get_default_business_glossary()
     except Exception as exc:
         logger.error(f"Failed to load business glossary: {exc}")
-        return {}
+        return get_default_business_glossary()
 
 
 def search_business_glossary(search_term: str, glossary: Dict[str, Any] | None = None) -> Dict[str, Any]:

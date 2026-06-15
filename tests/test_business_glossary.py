@@ -163,9 +163,34 @@ def test_search_business_glossary_in_mapped_columns():
 
 
 def test_load_business_glossary_missing_file():
-    """Test that missing glossary file returns empty dict."""
+    """Test that missing glossary file falls back to the default glossary."""
     glossary = load_business_glossary("nonexistent_path.json")
-    assert glossary == {}
+    assert "sales" in glossary
+    assert "vendor" in glossary
+
+
+def test_load_business_glossary_invalid_json_falls_back(tmp_path):
+    """Test that invalid glossary JSON falls back to the default glossary."""
+    invalid_path = tmp_path / "business_glossary.json"
+    invalid_path.write_text("{not valid json", encoding="utf-8")
+
+    glossary = load_business_glossary(str(invalid_path))
+
+    assert "sales" in glossary
+    assert "purchase" in glossary
+
+
+def test_load_business_glossary_unreadable_falls_back(monkeypatch):
+    """Test that unreadable glossary content falls back to the default glossary."""
+    def fake_load_json(path):
+        raise OSError("Permission denied")
+
+    monkeypatch.setattr("utils.file_utils.load_json", fake_load_json)
+
+    glossary = load_business_glossary("semantic/business_glossary.json")
+
+    assert "customer" in glossary
+    assert "inventory" in glossary
 
 
 def test_generate_glossary_with_empty_knowledge_base():

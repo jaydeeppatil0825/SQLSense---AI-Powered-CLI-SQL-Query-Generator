@@ -148,6 +148,10 @@ class AppService:
     def get_conversation_memory(self):
         """Get conversation memory."""
         return self.question_service.get_conversation_memory()
+
+    def get_last_query_context(self) -> Optional[Dict[str, Any]]:
+        """Get the latest query-planning context for CLI display."""
+        return self.question_service.get_last_query_context()
     
     # SQL execution
     def execute_sql(

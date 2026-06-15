@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 
+from ai.erp_query_generator import generate_erp_sql
 from semantic.business_glossary import load_business_glossary
 
 
@@ -662,7 +663,11 @@ def _try_show_all(q: str, table: str, knowledge_base: dict) -> str | None:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def generate_simple_sql(user_question: str, knowledge_base: dict) -> str | None:
+def generate_simple_sql(
+    user_question: str,
+    knowledge_base: dict,
+    query_plan: dict | None = None,
+) -> str | None:
     """
     Try to generate SQL for a simple single-table question using Python logic.
 
@@ -678,6 +683,10 @@ def generate_simple_sql(user_question: str, knowledge_base: dict) -> str | None:
     """
     if not user_question or not knowledge_base:
         return None
+
+    erp_sql = generate_erp_sql(user_question, knowledge_base, query_plan=query_plan)
+    if erp_sql:
+        return erp_sql
 
     business_sql = _try_pcsoft_business_sql(user_question, knowledge_base)
     if business_sql:

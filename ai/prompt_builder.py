@@ -202,13 +202,14 @@ def _extract_limit(user_question: str) -> int | None:
 
 # ── Dynamic glossary from business_glossary.json ─────────────────────────────
 
-def _get_relevant_glossary_terms(user_question: str, knowledge_base: dict | None = None) -> str:
+def _get_relevant_glossary_terms(user_question: str, knowledge_base: dict | None = None, glossary_path: str | None = None) -> str:
     """
     Load the business glossary and extract terms relevant to the user's question.
     
     Args:
         user_question: The user's natural language question
         knowledge_base: Optional knowledge base for additional context
+        glossary_path: Optional path to glossary file (defaults to semantic/business_glossary.json)
     
     Returns:
         Formatted glossary section for the prompt
@@ -217,8 +218,11 @@ def _get_relevant_glossary_terms(user_question: str, knowledge_base: dict | None
     
     logger = get_logger()
     
+    if glossary_path is None:
+        glossary_path = "semantic/business_glossary.json"
+    
     try:
-        glossary = load_business_glossary("semantic/business_glossary.json")
+        glossary = load_business_glossary(glossary_path)
         
         if not glossary:
             logger.debug("Business glossary not found, using hardcoded glossary")
@@ -358,6 +362,34 @@ def _build_schema_section(knowledge_base: dict) -> list[str]:
     return lines
 
 
+def _build_plan_section(query_plan: dict | None, selected_tables: list[dict] | None) -> list[str]:
+    if not query_plan and not selected_tables:
+        return []
+
+    lines: list[str] = []
+    lines.append("Structured query plan:")
+    if query_plan:
+        lines.append(f"  intent: {query_plan.get('intent')}")
+        lines.append(f"  metric: {query_plan.get('metric')}")
+        lines.append(f"  dimension: {query_plan.get('dimension')}")
+        lines.append(f"  filters: {query_plan.get('filters')}")
+        lines.append(f"  date_range: {query_plan.get('date_range')}")
+        lines.append(f"  grouping: {query_plan.get('grouping')}")
+        lines.append(f"  sorting: {query_plan.get('sorting')}")
+        lines.append(f"  limit: {query_plan.get('limit')}")
+
+    if selected_tables:
+        lines.append("Relevant tables selected before SQL generation:")
+        for table_entry in selected_tables:
+            table_name = table_entry.get("table", "")
+            confidence = table_entry.get("confidence", "unknown")
+            reason = table_entry.get("reason", "")
+            lines.append(f"  - {table_name} (confidence={confidence}): {reason}")
+
+    lines.append("")
+    return lines
+
+
 # ── Worked examples (injected dynamically based on question topic) ────────────
 
 def _monthly_sales_example(user_question: str, knowledge_base: dict | None = None) -> str:
@@ -444,7 +476,12 @@ def _paid_orders_example(user_question: str, knowledge_base: dict | None = None)
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def build_sql_prompt(user_question: str, knowledge_base: dict) -> list[dict]:
+def build_sql_prompt(
+    user_question: str,
+    knowledge_base: dict,
+    query_plan: dict | None = None,
+    selected_tables: list[dict] | None = None,
+) -> list[dict]:
     """
     Build an OpenAI-compatible message list for SQL generation.
 
@@ -516,12 +553,17 @@ def build_sql_prompt(user_question: str, knowledge_base: dict) -> list[dict]:
     system_parts.append(dynamic_glossary)
     system_parts.append("")
 
+    system_parts.extend(_build_plan_section(query_plan, selected_tables))
+
     # 5b. Generic semantic type guidance (always included, works for any database)
     system_parts.append(
         "Semantic type guidance:\n"
-        "  - For sales/revenue/amount questions: prefer columns with semantic_type=value. Use SUM().\n"
+        "  - For sales/revenue/amount questions: prefer columns with semantic_type=money. Use SUM().\n"
         "  - For date/month/time questions: prefer columns with semantic_type=date. Use DATE_FORMAT() for monthly grouping.\n"
-        "  - For customer/person questions: prefer columns with semantic_type=customer or semantic_type=name.\n"
+        "  - For customer questions: prefer columns with semantic_type=customer.\n"
+        "  - For vendor questions: prefer columns with semantic_type=vendor.\n"
+        "  - For warehouse or stock questions: prefer semantic_type=warehouse and semantic_type=quantity.\n"
+        "  - For invoice or ERP document filters: prefer semantic_type=document_number or semantic_type=reference_number.\n"
         "  - For status/state filters: prefer columns with semantic_type=status.\n"
         "  - For quantity/count questions: prefer columns with semantic_type=quantity. Use SUM() or COUNT()."
     )

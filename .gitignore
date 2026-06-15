@@ -23,7 +23,14 @@ htmlcov/
 semantic/knowledge_base.json
 semantic/business_glossary.json
 
-# Generated app output
+# Generated output files
+output/
+charts/
+
+# Log files
+logs/
+*.log
+
 
 
 

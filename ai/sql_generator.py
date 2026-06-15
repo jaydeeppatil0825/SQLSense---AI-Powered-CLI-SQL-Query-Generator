@@ -362,6 +362,8 @@ def generate_sql(
     user_question: str,
     knowledge_base: dict,
     backend: str | None = None,
+    query_plan: dict | None = None,
+    selected_tables: list[dict] | None = None,
 ) -> str:
     """
     Generate a SQL SELECT statement for *user_question* using *knowledge_base*
@@ -392,7 +394,12 @@ def generate_sql(
     """
     selected_backend = "local"
 
-    messages = build_sql_prompt(user_question, knowledge_base)
+    messages = build_sql_prompt(
+        user_question,
+        knowledge_base,
+        query_plan=query_plan,
+        selected_tables=selected_tables,
+    )
     raw_response = _call_ai_backend(messages, selected_backend)
     return _clean_sql_response(raw_response)
 
@@ -403,6 +410,8 @@ def generate_sql_with_retry(
     backend: str,
     first_attempt_sql: str,
     validation_reason: str,
+    query_plan: dict | None = None,
+    selected_tables: list[dict] | None = None,
 ) -> str:
     """
     Retry AI SQL generation once after a failed first attempt.
@@ -445,7 +454,15 @@ def generate_sql_with_retry(
 
     # Append schema context so the model has column references.
     from ai.prompt_builder import _build_schema_section  # local import to avoid circular
+    plan_lines = []
+    if query_plan:
+        plan_lines.append(f"Structured plan: {query_plan}")
+    if selected_tables:
+        plan_lines.append(f"Selected tables: {selected_tables}")
+
     schema_lines = _build_schema_section(knowledge_base)
+    if plan_lines:
+        correction_user += "\n".join(plan_lines) + "\n\n"
     correction_user += "\n".join(schema_lines)
 
     messages = [
