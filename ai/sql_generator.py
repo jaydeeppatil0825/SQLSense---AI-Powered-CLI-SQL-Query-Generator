@@ -366,6 +366,7 @@ def generate_sql(
     backend: str | None = None,
     query_plan: dict | None = None,
     selected_tables: list[dict] | None = None,
+    business_glossary: dict | None = None,
 ) -> str:
     """
     Generate a SQL SELECT statement for *user_question* using *knowledge_base*
@@ -401,6 +402,7 @@ def generate_sql(
         knowledge_base,
         query_plan=query_plan,
         selected_tables=selected_tables,
+        business_glossary=business_glossary,
     )
     raw_response = _call_ai_backend(messages, selected_backend)
     return _clean_sql_response(raw_response)
@@ -414,6 +416,7 @@ def generate_sql_with_retry(
     validation_reason: str,
     query_plan: dict | None = None,
     selected_tables: list[dict] | None = None,
+    business_glossary: dict | None = None,
 ) -> str:
     """
     Retry AI SQL generation once after a failed first attempt.
@@ -443,6 +446,7 @@ def generate_sql_with_retry(
         knowledge_base,
         query_plan=query_plan,
         selected_tables=selected_tables,
+        business_glossary=business_glossary,
     )
     correction_system = (
         "You are correcting a previously invalid MySQL SELECT statement. "
@@ -456,7 +460,7 @@ def generate_sql_with_retry(
         f"Original question: {user_question}\n\n"
         f"Rejected SQL:\n{first_attempt_sql}\n\n"
         f"Validation failure: {validation_reason}\n\n"
-        "Correct the SQL so it follows the plan, selected tables, trusted joins, and safety rules."
+        "Correct the SQL so it follows the plan, selected tables, selected relationships, glossary context, and safety rules."
     )
 
     messages = [

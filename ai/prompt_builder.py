@@ -1,326 +1,162 @@
 """
 ai/prompt_builder.py
 ====================
-Builds the structured prompt that is sent to the AI backend (Ollama or
-OpenAI) for SQL generation.
+Build the structured prompt sent to the AI backend for SQL generation.
 
-This module is the single place that controls how much context the model
-receives.  A richer prompt = more accurate SQL.
-
-What the prompt contains
-------------------------
-1. Hard rules   — what the model MUST and MUST NOT do
-2. Query rules  — how to handle aggregates, joins, ORDER BY, LIMIT, etc.
-3. Business glossary — maps plain English terms to SQL patterns
-4. Schema context — every table, column, type, nullable, semantic_type,
-                    sample values, min/max, row count
-5. Relationship map — every foreign key explained as a JOIN instruction
-6. LIMIT hint   — dynamically set based on the user's question
-
-Debug mode
-----------
-Set DEBUG_PROMPT=true in .env to print the full system prompt to the
-terminal before sending it to the model.  Useful for diagnosing why a
-query came out wrong.
+The prompt is fully dynamic:
+- Knowledge base is the source of truth
+- Business glossary is derived from the active KB
+- Relationships come only from the active schema context
+- No fixed demo or ERP-specific table guidance is injected
 """
 
 from __future__ import annotations
 
 import os
 import re
+from typing import Any
 
-from semantic.business_glossary import load_business_glossary, search_business_glossary
-
-
-# ── Business glossary ─────────────────────────────────────────────────────────
-# Maps plain-English terms a user might write to the SQL concept they imply.
-# The model sees this glossary and uses it to choose the right column/function.
-# Entries are schema-aware: they reference the actual table.column names so
-# the model picks the correct column instead of guessing.
-_BUSINESS_GLOSSARY = """
-Business term glossary — map the user's words to the correct table/column:
-
-  SALES / REVENUE / INCOME / EARNINGS
-    → Use orders.final_amount or orders.total_amount with SUM().
-    → The primary sales table is "orders", NOT "customers".
-    → Do NOT use customers.signup_date for sales questions.
-    → For monthly sales: GROUP BY DATE_FORMAT(orders.order_date, '%Y-%m').
-
-  MONTHLY / BY MONTH / PER MONTH
-    → Date column to use: orders.order_date (type DATE, in table "orders").
-    → Expression: DATE_FORMAT(order_date, '%Y-%m') AS month
-    → Do NOT use customers.signup_date for monthly sales.
-
-  TOTAL AMOUNT / PAID AMOUNT
-    → orders.final_amount  — the after-tax, after-discount order total.
-    → orders.total_amount  — the pre-tax subtotal.
-    → payments.paid_amount — the amount actually collected.
-
-  CUSTOMER / CLIENT / BUYER / USER
-    -> Trusted join: orders.customer_id = customers.customer_id.
-    → customers.customer_name, customers.customer_id
-    → Join orders to customers on orders.customer_id = customers.customer_id.
-
-  TRUSTED PCSOFT RELATIONSHIPS
-    -> customers.customer_id = orders.customer_id
-    -> orders.order_id = order_items.order_id
-    -> products.product_id = order_items.product_id
-    -> orders.order_id = payments.order_id
-    -> customers.customer_id = support_tickets.customer_id
-    -> orders.order_id = support_tickets.order_id.
-
-  ORDER / INVOICE / BOOKING / TRANSACTION
-    -> High value orders use orders.final_amount or orders.total_amount with a numeric threshold.
-    → Table "orders": order_id, order_date, order_status, final_amount.
-
-  PAYMENT DETAILS / PENDING PAYMENTS
-    -> Join payments to orders on payments.order_id = orders.order_id.
-    -> Join orders to customers on orders.customer_id = customers.customer_id.
-    -> Pending payments usually means payment_status = 'Pending'.
-
-  SUPPORT TICKETS
-    -> Use support_tickets.ticket_status, support_tickets.priority, and support_tickets.customer_id.
-    -> Join to customers for customer names.
-
-  QUANTITY / QTY / UNITS / COUNT (of items)
-    → order_items.quantity  (per line item)
-    → SUM(order_items.quantity) for totals.
-
-  STATUS / STATE
-    → orders.order_status   values: Delivered, Cancelled, Processing, Shipped
-    → orders.payment_status values: Paid, Refunded, Pending
-
-  PRODUCT / ITEM / SKU
-    → products.product_name, products.category, products.unit_price
-
-  CATEGORY / TYPE / GROUP (product)
-    → products.category  values: Electronics, Furniture, Stationery
-
-  CITY / LOCATION
-    → customers.city  or  orders.shipping_city
-
-  EMPLOYEE / STAFF / SALESPERSON
-    → employees.employee_name, employees.department, employees.salary
-""".strip()
+from semantic.business_glossary import load_business_glossary
 
 
-# ── Query rules ───────────────────────────────────────────────────────────────
-# Explicit instructions for common query patterns so the model does not guess.
 _QUERY_RULES = """
 SQL query construction rules:
   - Use COUNT(*) or COUNT(column) when the user asks "how many".
-  - Use SUM(column) when the user asks for total/sales/revenue/amount.
+  - Use SUM(column) when the user asks for total, amount, balance, or quantity.
   - Use AVG(column) when the user asks for average.
   - Use MAX/MIN when the user asks for highest/lowest/most/least.
   - Always add GROUP BY when mixing aggregate functions with non-aggregate columns.
-  - Add ORDER BY <alias or aggregate> DESC when the user asks "top", "highest", "most".
-  - Add ORDER BY <alias or aggregate> ASC  when the user asks "lowest", "least", "fewest".
-  - ORDER BY MUST reference a column name or alias that exists in the SELECT clause.
-  - NEVER write "ORDER BY LIMIT" — ORDER BY requires a column/alias before LIMIT.
-  - NEVER write "ORDER BY ;" or "ORDER BY" with nothing after it.
-  - If you are unsure what to ORDER BY, omit ORDER BY entirely rather than writing it incorrectly.
-  - Use WHERE to filter by city, status, date range, category, or any specific value.
-  - Use JOIN only when a foreign key relationship exists between the two tables.
-  - Use the exact join condition from the foreign key definition (do not guess).
-  - Never invent table names or column names — use only what is listed below.
-  - Prefer fully-qualified column references (table.column) to avoid ambiguity.
-  - Do NOT add extra text, explanations, or comments inside the SQL output.
-
-TABLE ALIAS RULES (very important — alias errors cause runtime failures):
-  - When you write "FROM orders o", the alias for orders is "o". Use "o." everywhere.
-  - When you write "JOIN customers c", the alias for customers is "c". Use "c." everywhere.
-  - When you write "JOIN payments p", the alias for payments is "p". Use "p." everywhere.
-  - NEVER use an alias that was not declared in the FROM or JOIN clause.
-  - NEVER invent an alias like "pt" for payments if you declared "p" in the JOIN.
-
-Alias correctness examples:
-  CORRECT:  FROM payments p  →  SELECT p.payment_method, p.paid_amount
-  WRONG:    FROM payments p  →  SELECT pt.payment_method   ← "pt" was never declared
-  CORRECT:  FROM orders o JOIN customers c  →  SELECT o.order_id, c.customer_name
-  WRONG:    FROM orders o JOIN customers c  →  SELECT ord.order_id  ← "ord" was never declared
-
-ORDER BY correctness examples:
-  CORRECT:   SELECT month, SUM(final_amount) AS total_sales ... ORDER BY month
-  CORRECT:   SELECT customer_name, SUM(final_amount) AS revenue ... ORDER BY revenue DESC
-  WRONG:     ... ORDER BY LIMIT 50          ← missing column before LIMIT
-  WRONG:     ... ORDER BY;                  ← missing column before semicolon
-  WRONG:     ... ORDER BY                   ← missing column entirely
+  - Add ORDER BY <alias or aggregate> DESC when the user asks "top", "highest", or "most".
+  - Add ORDER BY <alias or aggregate> ASC when the user asks "lowest", "least", or "fewest".
+  - ORDER BY must reference a selected column or alias.
+  - Use WHERE to filter by status, date range, value, or any explicit condition from the prompt context.
+  - Use JOIN only when a listed relationship supports it.
+  - Never invent table names or column names.
+  - Prefer fully qualified column references when multiple tables are involved.
+  - Do not include explanations or comments in the SQL output.
 """.strip()
-
-
-# ── Safety rules ──────────────────────────────────────────────────────────────
-_PCSOFT_RELATIONSHIP_GUIDANCE = """
-Trusted PCSoft relationship guidance:
-  - customers.customer_id = orders.customer_id
-  - orders.order_id = order_items.order_id
-  - products.product_id = order_items.product_id
-  - orders.order_id = payments.order_id
-  - customers.customer_id = support_tickets.customer_id
-  - orders.order_id = support_tickets.order_id
-  - Use these joins only when the listed tables and columns exist in the schema context.
-""".strip()
-
 
 _SAFETY_RULES = """
-Safety rules (these are enforced by a validator after you respond):
-  - Return ONLY a single SELECT statement — nothing else.
+Safety rules:
+  - Return ONLY a single SELECT statement.
   - Do NOT use: INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, REPLACE.
-  - Do NOT use markdown fences (```sql), backticks around the answer, or explanations.
-  - Do NOT include SQL comments (#, --, /* */, or /*! */).
+  - Do NOT include markdown fences, backticks, comments, or explanations.
   - Do NOT include multiple statements separated by semicolons.
   - A trailing semicolon on the final statement is allowed.
 """.strip()
 
-
 _AI_PLAN_RULES = """
 Structured-plan execution rules:
-  - Treat the structured query plan as authoritative, not optional.
-  - Use the selected tables first. Do NOT ignore them and do NOT expand to unrelated tables unless a listed relationship requires it.
+  - Treat the structured query plan as authoritative.
+  - Prefer the selected tables first.
   - Prefer the selected columns when choosing measures, dimensions, date filters, and status filters.
-  - For intent=total use SUM() on the best money or quantity column for the metric.
+  - For intent=total use SUM() on the best numeric measure.
   - For intent=count use COUNT(*), COUNT(column), or COUNT(DISTINCT column) as appropriate.
   - For intent=top_n use GROUP BY + ORDER BY DESC + LIMIT.
-  - For intent=trend or grouping by month use DATE_FORMAT(date_column, '%Y-%m') and aggregate.
-  - For pending, unpaid, outstanding, overdue, or due questions use status, due, payment, or balance columns. Do NOT answer them with a plain table dump.
-  - For customer, vendor, warehouse, department, or month questions, include the right JOIN or GROUP BY so the SQL matches the business dimension.
-  - Do NOT use SELECT * for business questions involving totals, counts, balances, tax, stock, sales, purchase, salary, pending, outstanding, or grouped analysis.
-  - Only use SELECT * when the user clearly asks to list raw records from a table.
+  - For intent=trend or grouping by month use a date expression and aggregate.
+  - For pending, unpaid, outstanding, overdue, due, or low-stock questions, apply meaningful filters rather than returning a raw table dump.
+  - Do NOT use SELECT * for totals, counts, balances, grouped analysis, or other business-style questions unless the plan clearly indicates a raw record listing.
+""".strip()
+
+_SEMANTIC_GUIDANCE = """
+Semantic type guidance:
+  - semantic_type=money: prefer for totals, balances, amounts, costs, prices, and payables/receivables.
+  - semantic_type=quantity: prefer for stock, counts, units, and measurable quantities.
+  - semantic_type=date: prefer for latest/recent/date/month questions.
+  - semantic_type=status: prefer for pending/open/closed/paid/active filters.
+  - semantic_type=name: prefer for user-facing labels in SELECT, GROUP BY, or ORDER BY.
+  - semantic_type=code or semantic_type=id: prefer for identifiers and joins when needed.
+  - semantic_type=percentage: prefer for ratio or percent questions.
 """.strip()
 
 
-# ── LIMIT extraction ──────────────────────────────────────────────────────────
+def _normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
 
 def _extract_limit(user_question: str) -> int | None:
-    """
-    Parse an explicit row count from the user's question.
-
-    Returns the integer if found (e.g. "top 5" → 5), or None if the
-    question does not specify a count (caller will default to 50).
-
-    Examples
-    --------
-    "Show top 5 customers"  → 5
-    "List latest 10 orders" → 10
-    "Show all customers"    → None
-    """
     match = re.search(
         r"\b(?:top|first|last|latest|recent|limit|show|get|return|fetch)\s+(\d+)\b"
-        r"|\b(\d+)\s+(?:rows?|records?|results?|customers?|orders?|products?)\b",
+        r"|\b(\d+)\s+(?:rows?|records?|results?|items?)\b",
         user_question,
         re.IGNORECASE,
     )
     if match:
-        # One of the two capture groups will have the number.
-        raw = match.group(1) or match.group(2)
-        return int(raw)
+        return int(match.group(1) or match.group(2))
     return None
 
 
-# ── Dynamic glossary from business_glossary.json ─────────────────────────────
+def _term_matches_question(term: str, term_data: dict[str, Any], question: str) -> bool:
+    normalized_question = _normalize(question)
+    normalized_term = _normalize(term)
+    if normalized_term and normalized_term in normalized_question:
+        return True
 
-def _get_relevant_glossary_terms(user_question: str, knowledge_base: dict | None = None, glossary_path: str | None = None) -> str:
-    """
-    Load the business glossary and extract terms relevant to the user's question.
-    
-    Args:
-        user_question: The user's natural language question
-        knowledge_base: Optional knowledge base for additional context
-        glossary_path: Optional path to glossary file (defaults to semantic/business_glossary.json)
-    
-    Returns:
-        Formatted glossary section for the prompt
-    """
-    from utils.logger import get_logger
-    
-    logger = get_logger()
-    
+    question_terms = set(re.split(r"[^a-z0-9]+", normalized_question))
+    term_terms = {token for token in re.split(r"[^a-z0-9]+", normalized_term) if token}
+    if term_terms and term_terms <= question_terms:
+        return True
+
+    for alias in term_data.get("business_terms", []) or []:
+        alias_terms = {token for token in re.split(r"[^a-z0-9]+", _normalize(alias)) if token}
+        if alias_terms and alias_terms <= question_terms:
+            return True
+    return False
+
+
+def _get_relevant_glossary_terms(
+    user_question: str,
+    knowledge_base: dict | None = None,
+    glossary: dict | None = None,
+    glossary_path: str | None = None,
+) -> str:
+    """Load the active glossary and return the section relevant to this question."""
     if glossary_path is None:
         glossary_path = "semantic/business_glossary.json"
-    
-    try:
-        glossary = load_business_glossary(glossary_path)
-        
-        if not glossary:
-            logger.debug("Business glossary not found, using hardcoded glossary")
-            # Fall back to hardcoded glossary if business glossary not available
-            return _BUSINESS_GLOSSARY
-        
-        # Extract words from the user's question
-        question_words = set(user_question.lower().split())
-        
-        # Find matching glossary terms
-        relevant_terms = {}
-        for term, term_data in glossary.items():
-            # Check if term or any of its business_terms match the question
-            term_lower = term.lower()
-            if term_lower in question_words:
-                relevant_terms[term] = term_data
-                continue
-            
-            # Check business_terms
-            for business_term in term_data.get("business_terms", []):
-                if business_term.lower() in question_words:
-                    relevant_terms[term] = term_data
-                    break
-        
-        # If no matches found, use a few common terms as fallback
-        if not relevant_terms:
-            # Include a few common terms as a safety net
-            common_terms = ["sales", "customer", "revenue"]
-            for term in common_terms:
-                if term in glossary:
-                    relevant_terms[term] = glossary[term]
-        
-        logger.debug(f"Found {len(relevant_terms)} relevant glossary terms for question")
-        
-        # Format the relevant glossary terms
-        if not relevant_terms:
-            return _BUSINESS_GLOSSARY  # Fallback to hardcoded
-        
-        lines = ["Business term glossary — map the user's words to the correct table/column:"]
+
+    active_glossary = glossary if glossary is not None else load_business_glossary(glossary_path)
+    if not active_glossary:
+        return "Business glossary: no glossary terms are available for this session."
+
+    relevant_terms = {
+        term: term_data
+        for term, term_data in active_glossary.items()
+        if _term_matches_question(term, term_data, user_question)
+    }
+
+    if not relevant_terms and knowledge_base:
+        relevant_terms = dict(list(active_glossary.items())[:4])
+
+    if not relevant_terms:
+        return "Business glossary: no directly matched glossary terms. Use the selected schema context only."
+
+    lines = ["Business glossary for this question:"]
+    lines.append("")
+    for term, term_data in list(relevant_terms.items())[:8]:
+        lines.append(f"  TERM: {term}")
+        description = str(term_data.get("description", "")).strip()
+        if description:
+            lines.append(f"    description: {description}")
+        mappings = []
+        for mapping in term_data.get("mapped_columns", [])[:5]:
+            table_name = mapping.get("table", "")
+            column_name = mapping.get("column", "")
+            if table_name and column_name:
+                mappings.append(f"{table_name}.{column_name}")
+        if mappings:
+            lines.append(f"    mapped_columns: {', '.join(mappings)}")
+        aliases = [str(alias) for alias in (term_data.get("business_terms") or [])[:5] if str(alias).strip()]
+        if aliases:
+            lines.append(f"    aliases: {', '.join(aliases)}")
+        examples = [str(example) for example in (term_data.get("example_questions") or [])[:2] if str(example).strip()]
+        if examples:
+            lines.append(f"    examples: {', '.join(examples)}")
         lines.append("")
-        
-        for term, term_data in relevant_terms.items():
-            description = term_data.get("description", "")
-            lines.append(f"  {term.upper()}")
-            lines.append(f"    → {description}")
-            
-            mapped_columns = term_data.get("mapped_columns", [])
-            if mapped_columns:
-                col_mappings = []
-                for mapping in mapped_columns[:3]:  # Limit to top 3 mappings
-                    table = mapping.get("table", "")
-                    column = mapping.get("column", "")
-                    col_mappings.append(f"{table}.{column}")
-                if col_mappings:
-                    lines.append(f"    → Maps to: {', '.join(col_mappings)}")
-            
-            example_questions = term_data.get("example_questions", [])
-            if example_questions:
-                lines.append(f"    → Example questions: {', '.join(example_questions[:2])}")
-            
-            lines.append("")
-        
-        return "\n".join(lines)
-    
-    except Exception as exc:
-        logger.warning(f"Failed to load business glossary: {exc}, using hardcoded glossary")
-        # If anything goes wrong, fall back to hardcoded glossary
-        return _BUSINESS_GLOSSARY
 
+    return "\n".join(lines).strip()
 
-# ── Schema context builder ────────────────────────────────────────────────────
 
 def _build_schema_section(knowledge_base: dict) -> list[str]:
-    """
-    Convert the knowledge base into a readable schema section for the prompt.
-
-    Each table gets:
-    - table name and row count
-    - primary keys
-    - every column: name, type, nullable, semantic_type, sample values, min/max
-    - foreign key relationships explained as JOIN instructions
-    """
     lines: list[str] = []
     lines.append("Database schema (use ONLY these tables and columns):")
     lines.append("")
@@ -329,51 +165,37 @@ def _build_schema_section(knowledge_base: dict) -> list[str]:
         row_count = table_data.get("row_count", "unknown")
         lines.append(f"TABLE: {table_name}  (approx. {row_count} rows)")
 
-        # Primary keys
         primary_keys = table_data.get("primary_keys", [])
         if primary_keys:
             lines.append(f"  Primary key(s): {', '.join(str(k) for k in primary_keys)}")
 
-        # Columns
         for col in table_data.get("columns", []):
-            name     = col.get("name", "")
+            name = col.get("name", "")
             col_type = col.get("type", "")
             nullable = "nullable" if col.get("nullable") else "not null"
             sem_type = col.get("semantic_type", "general")
-
-            col_line = (
-                f"  COLUMN: {name}"
-                f"  type={col_type}"
-                f"  {nullable}"
-                f"  semantic_type={sem_type}"
+            lines.append(
+                f"  COLUMN: {name}  type={col_type}  {nullable}  semantic_type={sem_type}"
             )
-            lines.append(col_line)
-
-            # Sample values give the model concrete examples (read-only context).
             samples = [str(v) for v in (col.get("sample_values") or [])[:5] if v is not None]
             if samples:
                 lines.append(f"    sample_values: {', '.join(samples)}")
-
-            # Min/max help with range queries and ORDER BY choices.
             if "min_value" in col and col["min_value"] is not None:
-                lines.append(
-                    f"    range: {col['min_value']} … {col.get('max_value')}"
-                )
+                lines.append(f"    range: {col['min_value']} .. {col.get('max_value')}")
 
-        # Foreign keys — explained as explicit JOIN instructions.
         foreign_keys = table_data.get("foreign_keys", [])
         if foreign_keys:
             lines.append(f"  Relationships (JOIN hints for {table_name}):")
             for fk in foreign_keys:
-                local_col  = fk.get("column", "")
-                ref_table  = fk.get("referenced_table", "")
-                ref_col    = fk.get("referenced_column", "")
+                local_col = fk.get("column", "")
+                ref_table = fk.get("referenced_table", "")
+                ref_col = fk.get("referenced_column", "")
                 lines.append(
                     f"    {table_name}.{local_col} references {ref_table}.{ref_col}"
-                    f"  →  JOIN {ref_table} ON {table_name}.{local_col} = {ref_table}.{ref_col}"
+                    f"  ->  JOIN {ref_table} ON {table_name}.{local_col} = {ref_table}.{ref_col}"
                 )
 
-        lines.append("")  # blank line between tables
+        lines.append("")
 
     return lines
 
@@ -393,6 +215,8 @@ def _build_plan_section(query_plan: dict | None, selected_tables: list[dict] | N
         lines.append(f"  grouping: {query_plan.get('grouping')}")
         lines.append(f"  sorting: {query_plan.get('sorting')}")
         lines.append(f"  limit: {query_plan.get('limit')}")
+        lines.append(f"  semantic_hints: {sorted(query_plan.get('semantic_hints') or [])}")
+        lines.append(f"  matched_glossary_terms: {query_plan.get('matched_glossary_terms')}")
 
     if selected_tables:
         lines.append("Relevant tables selected before SQL generation:")
@@ -403,11 +227,10 @@ def _build_plan_section(query_plan: dict | None, selected_tables: list[dict] | N
             lines.append(f"  - {table_name} (confidence={confidence}): {reason}")
             selected_columns = table_entry.get("selected_columns", [])
             if selected_columns:
-                column_parts = []
-                for column_entry in selected_columns[:6]:
-                    column_parts.append(
-                        f"{column_entry.get('column')}[{column_entry.get('semantic_type', 'general')}]"
-                    )
+                column_parts = [
+                    f"{column_entry.get('column')}[{column_entry.get('semantic_type', 'general')}]"
+                    for column_entry in selected_columns[:6]
+                ]
                 lines.append(f"    selected columns: {', '.join(column_parts)}")
 
     lines.append("")
@@ -428,7 +251,7 @@ def _build_ai_target_section(query_plan: dict | None, selected_tables: list[dict
     sorting = query_plan.get("sorting") or {}
 
     if metric:
-        lines.append(f"  - Use the metric '{metric}' as the main business measure.")
+        lines.append(f"  - Use the metric '{metric}' as the main measure hint.")
     if intent == "total":
         lines.append("  - Use SUM() for the final measure.")
     elif intent == "count":
@@ -440,9 +263,9 @@ def _build_ai_target_section(query_plan: dict | None, selected_tables: list[dict
     elif intent == "trend":
         lines.append("  - Aggregate over time and include GROUP BY for the time bucket.")
     elif intent == "pending_outstanding":
-        lines.append("  - Apply unpaid, pending, due, or outstanding business filters.")
+        lines.append("  - Apply pending, unpaid, due, or outstanding filters when the schema supports them.")
     elif intent == "low_stock":
-        lines.append("  - Filter rows by a low-stock threshold before ordering.")
+        lines.append("  - Filter rows by a low-stock or low-quantity condition before ordering.")
 
     if dimension:
         lines.append(f"  - Break down results by '{dimension}'.")
@@ -469,7 +292,7 @@ def _build_ai_target_section(query_plan: dict | None, selected_tables: list[dict
         if ranked_columns:
             lines.append(f"  - Prefer these columns first: {', '.join(ranked_columns[:8])}.")
 
-    lines.append("  - Do not answer this with a generic SELECT * unless the question is clearly asking for raw records.")
+    lines.append("  - Do not answer this with a generic SELECT * unless the plan clearly indicates a raw record listing.")
     lines.append("")
     return lines
 
@@ -524,210 +347,61 @@ def _build_relationship_section(knowledge_base: dict, selected_tables: list[dict
     if not relationship_lines:
         return []
 
-    return ["Detected ERP relationships to prefer for JOINs:"] + relationship_lines + [""]
+    return ["Detected schema relationships to prefer for JOINs:"] + relationship_lines + [""]
 
-
-# ── Worked examples (injected dynamically based on question topic) ────────────
-
-def _monthly_sales_example(user_question: str, knowledge_base: dict | None = None) -> str:
-    """Return monthly sales example only if schema supports it and question matches."""
-    q = user_question.lower()
-    is_monthly = any(w in q for w in ("month", "monthly", "per month", "by month"))
-    is_sales = any(w in q for w in ("sale", "sales", "revenue", "income", "amount", "total"))
-
-    if not (is_monthly and is_sales):
-        return ""
-
-    # Only include if the schema has orders.order_date + a sales amount column
-    if knowledge_base:
-        orders = knowledge_base.get("orders", {})
-        order_cols = [c["name"] for c in orders.get("columns", [])]
-        has_date = "order_date" in order_cols
-        has_amount = any(c in order_cols for c in ["final_amount", "total_amount"])
-        if not (has_date and has_amount):
-            return ""   # schema doesn't match — don't add this example
-
-    amount_col = "final_amount"
-    if knowledge_base:
-        orders = knowledge_base.get("orders", {})
-        order_cols = [c["name"] for c in orders.get("columns", [])]
-        if "final_amount" not in order_cols and "total_amount" in order_cols:
-            amount_col = "total_amount"
-
-    return (
-        "Worked example — monthly sales query:\n"
-        "  Question: Show monthly sales\n"
-        "  Correct SQL:\n"
-        f"    SELECT DATE_FORMAT(order_date, '%Y-%m') AS month,\n"
-        f"           SUM({amount_col}) AS total_sales\n"
-        "    FROM orders\n"
-        f"    GROUP BY DATE_FORMAT(order_date, '%Y-%m')\n"
-        "    ORDER BY month\n"
-        "    LIMIT 50;\n"
-        "  Key points:\n"
-        "    - Use orders.order_date for monthly grouping.\n"
-        f"    - Use SUM({amount_col}) for the money total.\n"
-        "    - GROUP BY the DATE_FORMAT expression, not just the alias.\n"
-        "    - ORDER BY month (the alias defined in SELECT)."
-    )
-
-
-def _paid_orders_example(user_question: str, knowledge_base: dict | None = None) -> str:
-    """Return paid orders example only if schema supports it and question matches."""
-    q = user_question.lower()
-    is_paid = "paid" in q
-    is_orders = any(w in q for w in ("order", "orders", "invoice"))
-
-    if not (is_paid and is_orders):
-        return ""
-
-    # Only include if orders, customers, and payments tables exist with right columns
-    if knowledge_base:
-        kb_tables = set(knowledge_base.keys())
-        required = {"orders", "customers", "payments"}
-        if not required.issubset(kb_tables):
-            return ""
-        # Check payment_status exists
-        payments_cols = [c["name"] for c in knowledge_base.get("payments", {}).get("columns", [])]
-        orders_cols = [c["name"] for c in knowledge_base.get("orders", {}).get("columns", [])]
-        has_payment_status = "payment_status" in payments_cols or "payment_status" in orders_cols
-        if not has_payment_status:
-            return ""
-
-    return (
-        "Worked example — paid orders query:\n"
-        "  Question: Show paid orders\n"
-        "  Correct SQL:\n"
-        "    SELECT o.order_id, c.customer_name, o.order_date,\n"
-        "           p.paid_amount, p.payment_method\n"
-        "    FROM orders o\n"
-        "    JOIN customers c ON o.customer_id = c.customer_id\n"
-        "    JOIN payments p ON o.order_id = p.order_id\n"
-        "    WHERE p.payment_status = 'Paid'\n"
-        "    LIMIT 50;\n"
-        "  Key alias rules:\n"
-        "    - orders alias is 'o', customers alias is 'c', payments alias is 'p'.\n"
-        "    - NEVER use 'pt.' — it was not declared anywhere."
-    )
-
-
-# ── Main entry point ──────────────────────────────────────────────────────────
 
 def build_sql_prompt(
     user_question: str,
     knowledge_base: dict,
     query_plan: dict | None = None,
     selected_tables: list[dict] | None = None,
+    business_glossary: dict | None = None,
 ) -> list[dict]:
-    """
-    Build an OpenAI-compatible message list for SQL generation.
-
-    The returned list has exactly two items:
-      - {"role": "system", "content": <full context + rules>}
-      - {"role": "user",   "content": <user question>}
-
-    This format is accepted by both Ollama (/api/chat) and the OpenAI SDK.
-
-    Args:
-        user_question:  The plain-English question from the user.
-        knowledge_base: The dict loaded from semantic/knowledge_base.json.
-
-    Returns:
-        A two-element messages list ready to send to the AI backend.
-
-    Raises:
-        ValueError: If knowledge_base is None or empty.
-    """
+    """Build an OpenAI-compatible message list for SQL generation."""
     if not knowledge_base:
         raise ValueError(
             "Knowledge base is missing or empty. "
             "Please run option 2 (Build Knowledge Base) first."
         )
 
-    # ── Determine LIMIT for this question ────────────────────────────────────
     explicit_limit = _extract_limit(user_question)
     if explicit_limit:
-        # The user asked for a specific number — tell the model exactly.
         limit_instruction = (
             f"The user asked for {explicit_limit} rows. "
             f"Use LIMIT {explicit_limit} in your query."
         )
     else:
-        # No count specified — apply the default safety cap.
         limit_instruction = (
             "The user did not specify a row count. "
-            "Add LIMIT 50 at the end of the query."
+            "Add LIMIT 50 at the end of the query unless the query plan already specifies another limit."
         )
 
-    # ── Assemble the system message ───────────────────────────────────────────
     system_parts: list[str] = []
-
-    # 1. Role and output format
     system_parts.append(
         "You are a MySQL SQL expert. "
         "Your only job is to write a single SELECT SQL statement. "
-        "Return ONLY the SQL — no explanation, no markdown, no extra text."
+        "Return ONLY the SQL with no explanations."
     )
     system_parts.append("")
-
-    # 2. Safety rules
     system_parts.append(_SAFETY_RULES)
     system_parts.append("")
-
-    # 3. Query construction rules
     system_parts.append(_QUERY_RULES)
     system_parts.append("")
-
     system_parts.append(_AI_PLAN_RULES)
     system_parts.append("")
-
-    system_parts.append(_PCSOFT_RELATIONSHIP_GUIDANCE)
-    system_parts.append("")
-
-    # 4. LIMIT instruction (dynamic)
     system_parts.append(f"LIMIT rule: {limit_instruction}")
     system_parts.append("")
-
-    # 5. Business glossary (dynamic from business_glossary.json if available)
-    dynamic_glossary = _get_relevant_glossary_terms(user_question, knowledge_base)
-    system_parts.append(dynamic_glossary)
+    system_parts.append(_get_relevant_glossary_terms(user_question, knowledge_base, glossary=business_glossary))
     system_parts.append("")
-
     system_parts.extend(_build_plan_section(query_plan, selected_tables))
     system_parts.extend(_build_ai_target_section(query_plan, selected_tables))
     system_parts.extend(_build_relationship_section(knowledge_base, selected_tables))
-
-    # 5b. Generic semantic type guidance (always included, works for any database)
-    system_parts.append(
-        "Semantic type guidance:\n"
-        "  - For sales/revenue/amount questions: prefer columns with semantic_type=money. Use SUM().\n"
-        "  - For date/month/time questions: prefer columns with semantic_type=date. Use DATE_FORMAT() for monthly grouping.\n"
-        "  - For customer questions: prefer columns with semantic_type=customer.\n"
-        "  - For vendor questions: prefer columns with semantic_type=vendor.\n"
-        "  - For warehouse or stock questions: prefer semantic_type=warehouse and semantic_type=quantity.\n"
-        "  - For invoice or ERP document filters: prefer semantic_type=document_number or semantic_type=reference_number.\n"
-        "  - For status/state filters: prefer columns with semantic_type=status.\n"
-        "  - For quantity/count questions: prefer columns with semantic_type=quantity. Use SUM() or COUNT()."
-    )
+    system_parts.append(_SEMANTIC_GUIDANCE)
     system_parts.append("")
-
-    # 6. Worked examples — injected dynamically based on the question topic.
-    #    Each example gives the model a concrete reference so it copies the
-    #    correct tables, columns, and aliases instead of hallucinating them.
-    for example_fn in (_monthly_sales_example, _paid_orders_example):
-        example = example_fn(user_question, knowledge_base)
-        if example:
-            system_parts.append(example)
-            system_parts.append("")
-
-    # 7. Full schema context
     system_parts.extend(_build_schema_section(knowledge_base))
 
     system_content = "\n".join(system_parts).strip()
 
-    # ── Debug mode ────────────────────────────────────────────────────────────
-    # Set DEBUG_PROMPT=true in .env to print the prompt before sending it.
-    # This helps diagnose why a query came out wrong without changing any logic.
     if os.getenv("DEBUG_PROMPT", "").strip().lower() == "true":
         print("\n" + "=" * 60)
         print("  DEBUG: Full system prompt being sent to AI")
@@ -737,5 +411,5 @@ def build_sql_prompt(
 
     return [
         {"role": "system", "content": system_content},
-        {"role": "user",   "content": user_question},
+        {"role": "user", "content": user_question},
     ]

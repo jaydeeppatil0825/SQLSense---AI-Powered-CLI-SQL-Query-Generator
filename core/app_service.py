@@ -120,12 +120,19 @@ class AppService:
             return False, "Knowledge base not loaded", None, None
         
         business_glossary = self.database_service.get_business_glossary()
+        if business_glossary is None:
+            success, _, business_glossary = self.database_service.load_business_glossary()
+            if not success:
+                business_glossary = None
+
+        vector_retriever = self.database_service.get_vector_retriever()
         backend = ai_backend or self.ai_backend_service.get_active_backend()
         
         success, message, sql, error = self.question_service.process_question(
             question=question,
             knowledge_base=knowledge_base,
             business_glossary=business_glossary,
+            vector_retriever=vector_retriever,
             ai_backend=backend,
         )
         

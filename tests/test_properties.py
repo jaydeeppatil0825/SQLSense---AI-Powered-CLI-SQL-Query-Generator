@@ -14,7 +14,7 @@ from ai.sql_generator import generate_sql
 from db.data_profiler import profile_database_data
 from db.query_executor import execute_query
 from db.schema_reader import read_database_schema
-from semantic.semantic_mapper import SEMANTIC_MAP, add_semantic_mapping
+from semantic.semantic_mapper import SEMANTIC_MAP, GENERIC_SEMANTIC_PATTERNS, add_semantic_mapping
 from utils.file_utils import load_json, save_json
 from utils.sql_validator import add_limit_if_missing, validate_sql
 
@@ -164,7 +164,7 @@ def test_property_4_semantic_mapping_covers_every_column(column_names):
 
     result = add_semantic_mapping(schema)
 
-    valid_types = set(SEMANTIC_MAP.values()) | {"general"}
+    valid_types = set(GENERIC_SEMANTIC_PATTERNS.values()) | {"general"}
     for column in result["table"]["columns"]:
         assert column["semantic_type"] in valid_types
 

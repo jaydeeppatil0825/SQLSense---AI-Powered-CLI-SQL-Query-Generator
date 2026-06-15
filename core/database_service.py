@@ -23,6 +23,7 @@ from semantic.ai_semantic_enricher import (
 )
 from utils.file_utils import load_json, save_json
 from utils.logger import get_logger
+from vector_store import EmbeddingService, VectorIndexBuilder, VectorRetriever
 
 logger = get_logger()
 
@@ -40,6 +41,52 @@ class DatabaseService:
         self.last_ai_enrichment_status: str = "skipped"
         self.last_ai_enrichment_message: str = "AI enrichment skipped."
         self.last_build_summary: Dict[str, Any] = {}
+        self.embedding_service = EmbeddingService()
+        self.vector_index_builder = VectorIndexBuilder(self.embedding_service)
+        self.vector_retriever: Optional[VectorRetriever] = None
+        self.vector_index_status: str = "not_built"
+
+    def _align_glossary_with_active_knowledge_base(self, glossary: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure loaded glossary mappings belong to the active knowledge base."""
+        if not glossary or not self.knowledge_base:
+            return glossary
+
+        kb_tables = set(self.knowledge_base.keys())
+        if not kb_tables:
+            return glossary
+
+        table_columns = {
+            table_name: {str(column.get("name", "")) for column in table_data.get("columns", [])}
+            for table_name, table_data in self.knowledge_base.items()
+        }
+
+        aligned: Dict[str, Any] = {}
+        mapped_terms = 0
+        for term, term_data in glossary.items():
+            mappings = []
+            for mapping in term_data.get("mapped_columns", []):
+                table_name = mapping.get("table")
+                column_name = mapping.get("column")
+                if table_name not in kb_tables:
+                    continue
+                if column_name and column_name not in table_columns.get(table_name, set()):
+                    continue
+                mappings.append(mapping)
+
+            if mappings:
+                mapped_terms += 1
+
+            if mappings or not term_data.get("mapped_columns"):
+                aligned[term] = {
+                    **term_data,
+                    "mapped_columns": mappings,
+                }
+
+        if mapped_terms == 0:
+            logger.info("Loaded glossary does not match the active KB; regenerating glossary from the current KB.")
+            return generate_business_glossary(self.knowledge_base, use_ai_enrichment=False)
+
+        return aligned
     
     def connect_database(
         self,
@@ -211,12 +258,14 @@ class DatabaseService:
         try:
             glossary = generate_business_glossary(final_knowledge_base, use_ai_enrichment=use_ai_enrichment)
             save_business_glossary(glossary, "semantic/business_glossary.json")
+            self.business_glossary = glossary
             logger.info("Business glossary saved")
         except Exception as e:
             logger.error(f"Failed to generate business glossary: {e}")
         
         self.knowledge_base = final_knowledge_base
         self.last_build_summary = summarize_knowledge_base(final_knowledge_base)
+        self.refresh_vector_index()
         return True, "Knowledge base built successfully", final_knowledge_base
     
     def load_knowledge_base(self) -> tuple[bool, str, Optional[Dict[str, Any]]]:
@@ -229,6 +278,10 @@ class DatabaseService:
         try:
             knowledge_base = load_json(KNOWLEDGE_BASE_PATH)
             self.knowledge_base = knowledge_base
+            if self.business_glossary is None:
+                self.load_business_glossary()
+            else:
+                self.refresh_vector_index()
             return True, "Knowledge base loaded successfully", knowledge_base
         except FileNotFoundError:
             return False, "Knowledge base not found", None
@@ -244,8 +297,20 @@ class DatabaseService:
             (success, message, glossary)
         """
         try:
-            glossary = load_business_glossary(glossary_path)
+            if self.knowledge_base:
+                has_ai_terms = any(
+                    column.get("business_terms")
+                    for table_data in self.knowledge_base.values()
+                    for column in table_data.get("columns", [])
+                )
+                glossary = generate_business_glossary(
+                    self.knowledge_base,
+                    use_ai_enrichment=bool(has_ai_terms),
+                )
+            else:
+                glossary = load_business_glossary(glossary_path)
             self.business_glossary = glossary
+            self.refresh_vector_index()
             return True, "Business glossary loaded successfully", glossary
         except Exception as e:
             logger.error(f"Failed to load business glossary: {e}")
@@ -286,6 +351,35 @@ class DatabaseService:
     def get_business_glossary(self) -> Optional[Dict[str, Any]]:
         """Get the business glossary."""
         return self.business_glossary
+
+    def refresh_vector_index(self) -> None:
+        """
+        Rebuild the in-memory vector index from the active KB and glossary.
+
+        Persistence is intentionally left for a later phase; this method keeps
+        the current CLI session fast and deterministic without changing storage.
+        """
+        if not self.knowledge_base:
+            self.vector_retriever = None
+            self.vector_index_status = "not_built"
+            return
+
+        retriever = VectorRetriever(self.embedding_service)
+        kb_docs = self.vector_index_builder.build_from_knowledge_base(self.knowledge_base)
+        retriever.add_documents(kb_docs)
+
+        if self.business_glossary:
+            glossary_docs = self.vector_index_builder.build_from_glossary(self.business_glossary)
+            retriever.add_documents(glossary_docs)
+
+        self.vector_retriever = retriever
+        self.vector_index_status = "ready"
+
+    def get_vector_retriever(self) -> Optional[VectorRetriever]:
+        """Return the active in-memory vector retriever for the current session."""
+        if self.vector_retriever is None and self.knowledge_base:
+            self.refresh_vector_index()
+        return self.vector_retriever
 
     def get_last_ai_enrichment_result(self) -> tuple[str, str]:
         """Return the last AI enrichment status and clean CLI message."""

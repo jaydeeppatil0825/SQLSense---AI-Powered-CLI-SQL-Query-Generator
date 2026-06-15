@@ -213,7 +213,7 @@ def test_enrich_knowledge_base_allows_partial_table_fallback(monkeypatch):
 def test_invalid_ai_business_purpose_uses_rule_based_fallback(monkeypatch):
     knowledge_base = {
         "vendor_payments": {
-            "module": "finance",
+            "module": "transaction",
             "columns": [
                 {"name": "payment_amount", "type": "DECIMAL(10,2)", "semantic_type": "money"}
             ],
@@ -244,7 +244,7 @@ def test_invalid_ai_business_purpose_uses_rule_based_fallback(monkeypatch):
 
     enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
 
-    assert enriched["vendor_payments"]["business_purpose"] == "Stores vendor payment records for finance workflows."
+    assert enriched["vendor_payments"]["business_purpose"] == "Stores transaction records for vendor payment."
     assert enriched["vendor_payments"]["possible_business_questions"] == ["What is unpaid?"]
 
 

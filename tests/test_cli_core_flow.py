@@ -69,3 +69,36 @@ def test_destructive_natural_language_question_is_blocked():
     assert message == "Unsafe request blocked. Only SELECT questions are allowed."
     assert sql is None
     assert service.get_last_sql() is None
+
+
+def test_process_question_loads_active_glossary_without_glossary_menu(monkeypatch):
+    service = _service_with_orders()
+    active_glossary = {
+        "sales": {
+            "description": "Sales amount",
+            "mapped_columns": [{"table": "orders", "column": "final_amount", "confidence": "high"}],
+            "example_questions": ["show total sales"],
+        }
+    }
+    captured = {}
+
+    def fake_load_business_glossary(glossary_path="semantic/business_glossary.json"):
+        service.database_service.business_glossary = active_glossary
+        service.database_service.refresh_vector_index()
+        return True, "Business glossary loaded successfully", active_glossary
+
+    def fake_process_question(question, knowledge_base, business_glossary=None, vector_retriever=None, ai_backend="local"):
+        captured["business_glossary"] = business_glossary
+        captured["vector_retriever"] = vector_retriever
+        return True, "ok", "SELECT * FROM orders LIMIT 50;", None
+
+    service.database_service.business_glossary = None
+    monkeypatch.setattr(service.database_service, "load_business_glossary", fake_load_business_glossary)
+    monkeypatch.setattr(service.question_service, "process_question", fake_process_question)
+
+    success, message, sql, error = service.process_question("show orders", ai_backend="local")
+
+    assert success is True
+    assert sql == "SELECT * FROM orders LIMIT 50;"
+    assert captured["business_glossary"] == active_glossary
+    assert captured["vector_retriever"] is not None

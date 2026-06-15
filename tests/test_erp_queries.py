@@ -284,6 +284,7 @@ def test_erp_customer_outstanding_balance(monkeypatch):
         monkeypatch,
         "SELECT c.customer_name AS customer_name, SUM(f.outstanding_amount) AS outstanding_balance "
         "FROM sales_invoices f JOIN customers c ON f.customer_id = c.customer_id "
+        "WHERE f.outstanding_amount > 0 "
         "GROUP BY c.customer_name ORDER BY outstanding_balance DESC LIMIT 50;"
     )
     success, message, sql, error = service.process_question("show customer outstanding balance", ai_backend="local")
@@ -292,6 +293,7 @@ def test_erp_customer_outstanding_balance(monkeypatch):
     assert "FROM sales_invoices f" in sql
     assert "JOIN customers c" in sql
     assert "SUM(f.outstanding_amount) AS outstanding_balance" in sql
+    assert "WHERE f.outstanding_amount > 0" in sql
 
 
 def test_erp_vendor_pending_payments(monkeypatch):
@@ -391,7 +393,7 @@ def test_business_question_passes_plan_and_selected_tables_to_ai(monkeypatch):
     success, message, sql, error = service.process_question("show tax collected by month", ai_backend="local")
 
     assert success is True
-    assert captured["query_plan"]["metric"] == "tax"
+    assert captured["query_plan"]["metric"] == "money"
     assert captured["query_plan"]["intent"] == "trend"
     assert captured["selected_tables"]
     assert any(entry["table"] == "sales_invoices" for entry in captured["selected_tables"])
@@ -411,5 +413,6 @@ def test_business_question_uses_rule_based_fallback_when_ai_is_too_generic(monke
 
     assert success is True
     assert message == "SQL generated successfully (rule-based fallback)"
-    assert "SUM(final_amount) AS total_sales" in sql
+    assert "SUM(final_amount)" in sql
+    assert "FROM sales_invoices" in sql
     assert "retry_reason" in captured

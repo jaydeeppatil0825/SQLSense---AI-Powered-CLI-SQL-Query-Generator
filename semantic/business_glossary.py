@@ -1,594 +1,408 @@
 """
 semantic/business_glossary.py
 ==============================
-Generate and search a business glossary from the knowledge base.
+Generate and search a business glossary from the active knowledge base.
 
-The business glossary maps plain-English business terms to actual
-database tables and columns, making it easier for users to ask questions
-in natural language.
-
-Features
---------
-- Generates glossary from enriched knowledge base
-- Maps business terms to table/columns with confidence scores
-- Provides example questions for each term
-- Search functionality to find relevant glossary entries
-- Fallback to rule-based glossary if AI enrichment is not available
+The glossary is dynamic and database-aware:
+- The knowledge base remains the source of truth.
+- The glossary is derived from current tables, columns, relationships, and
+  optional AI business terms already attached to the knowledge base.
+- Fallback behavior stays generic and never assumes demo or ERP table names.
 """
 
+from __future__ import annotations
+
+from collections import defaultdict
 from typing import Dict, List, Any
+import re
 
 from utils.file_utils import save_json
 from utils.logger import get_logger
 
 logger = get_logger()
 
-
-# Rule-based business term mappings (fallback when AI enrichment is not available)
-_RULE_BASED_MAPPINGS = {
-    "sales": {
-        "description": "Total revenue or order amount.",
-        "column_patterns": ["final_amount", "total_amount", "amount", "sales"],
-        "preferred_columns": [("orders", "final_amount"), ("orders", "total_amount")],
-        "example_questions": [
-            "Show total sales",
-            "Show monthly sales",
-            "Show sales by city"
-        ]
-    },
-    "revenue": {
-        "description": "Income generated from sales.",
-        "column_patterns": ["final_amount", "total_amount", "revenue", "income"],
-        "preferred_columns": [("orders", "final_amount"), ("orders", "total_amount")],
-        "example_questions": [
-            "Show total revenue",
-            "Show revenue by product",
-            "Show monthly revenue"
-        ]
-    },
-    "order value": {
-        "description": "The monetary value of an order.",
-        "column_patterns": ["final_amount", "total_amount", "order_value"],
-        "preferred_columns": [("orders", "final_amount"), ("orders", "total_amount")],
-        "example_questions": [
-            "Show average order value",
-            "Show total order value"
-        ]
-    },
-    "paid amount": {
-        "description": "Amount actually paid for an order.",
-        "column_patterns": ["paid_amount", "payment_amount"],
-        "example_questions": [
-            "Show total paid amount",
-            "Show paid amount by customer"
-        ]
-    },
-    "pending payment": {
-        "description": "Payments that are not yet completed.",
-        "column_patterns": ["payment_status", "status"],
-        "preferred_columns": [("payments", "payment_status"), ("orders", "payment_status")],
-        "example_questions": [
-            "Show pending payments",
-            "Show orders with pending payment"
-        ]
-    },
-    "customer": {
-        "description": "Person or organization placing orders.",
-        "column_patterns": ["customer_name", "customer_id", "name"],
-        "table_patterns": ["customers"],
-        "example_questions": [
-            "Show all customers",
-            "Show top customers by sales",
-            "Show customer count"
-        ]
-    },
-    "product": {
-        "description": "Items sold by the business.",
-        "column_patterns": ["product_name", "product_id"],
-        "table_patterns": ["products"],
-        "example_questions": [
-            "Show all products",
-            "Show products by category",
-            "Show product count"
-        ]
+_GENERIC_FALLBACK_GLOSSARY = {
+    "money": {
+        "description": "Monetary values such as totals, prices, balances, or costs.",
+        "mapped_columns": [],
+        "example_questions": ["Show total amount"],
+        "business_terms": ["amount", "total", "price", "cost", "balance"],
     },
     "quantity": {
-        "description": "Number of items ordered or in stock.",
-        "column_patterns": ["quantity", "qty", "units", "stock"],
-        "preferred_columns": [("order_items", "quantity"), ("products", "stock_quantity")],
-        "example_questions": [
-            "Show total quantity sold",
-            "Show products with low quantity"
-        ]
-    },
-    "city": {
-        "description": "Geographic location for customers or shipping.",
-        "column_patterns": ["city", "location", "shipping_city"],
-        "preferred_columns": [("customers", "city"), ("orders", "shipping_city")],
-        "example_questions": [
-            "Show sales by city",
-            "Show customers in each city"
-        ]
-    },
-    "category": {
-        "description": "Classification or grouping of products.",
-        "column_patterns": ["category", "type", "group"],
-        "preferred_columns": [("products", "category")],
-        "example_questions": [
-            "Show products by category",
-            "Show sales by category"
-        ]
-    },
-    "status": {
-        "description": "Current state of an order or payment.",
-        "column_patterns": ["status", "state", "order_status", "payment_status"],
-        "example_questions": [
-            "Show orders by status",
-            "Show pending orders"
-        ]
-    },
-    "monthly": {
-        "description": "Time-based grouping by month.",
-        "column_patterns": ["order_date", "date", "created_at"],
-        "preferred_columns": [("orders", "order_date")],
-        "example_questions": [
-            "Show monthly sales",
-            "Show monthly revenue"
-        ]
+        "description": "Counts or measurable quantities.",
+        "mapped_columns": [],
+        "example_questions": ["Show total quantity"],
+        "business_terms": ["qty", "count", "units", "stock"],
     },
     "date": {
-        "description": "Temporal information for events.",
-        "column_patterns": ["order_date", "date", "created_at", "updated_at"],
-        "example_questions": [
-            "Show orders by date",
-            "Show recent orders"
-        ]
+        "description": "Date or time information.",
+        "mapped_columns": [],
+        "example_questions": ["Show latest records"],
+        "business_terms": ["time", "month", "year", "recent"],
     },
-    "employee": {
-        "description": "Staff members working for the business.",
-        "column_patterns": ["employee_name", "employee_id", "name"],
-        "table_patterns": ["employees"],
-        "example_questions": [
-            "Show all employees",
-            "Show employees by department"
-        ]
+    "status": {
+        "description": "State or lifecycle information.",
+        "mapped_columns": [],
+        "example_questions": ["Show pending records"],
+        "business_terms": ["state", "active", "inactive", "pending"],
     },
-    "salary": {
-        "description": "Compensation paid to employees.",
-        "column_patterns": ["salary", "wage", "compensation"],
-        "example_questions": [
-            "Show average salary",
-            "Show total salary by department"
-        ]
+    "name": {
+        "description": "Names or labels used to identify records.",
+        "mapped_columns": [],
+        "example_questions": ["Show names"],
+        "business_terms": ["title", "label"],
     },
-    "support ticket": {
-        "description": "Customer service requests or issues.",
-        "column_patterns": ["ticket_id", "subject", "issue"],
-        "table_patterns": ["support_tickets", "tickets"],
-        "example_questions": [
-            "Show open support tickets",
-            "Show tickets by status"
-        ]
-    },
-    "orders": {
-        "description": "Customer purchases or order transactions.",
-        "column_patterns": ["order_id", "order_date", "order_status", "payment_status", "final_amount"],
-        "table_patterns": ["orders"],
-        "example_questions": [
-            "Show all orders",
-            "Show orders by status",
-            "Show high value orders"
-        ]
-    },
-    "payments": {
-        "description": "Payment records linked to orders.",
-        "column_patterns": ["payment_id", "payment_status", "paid_amount", "payment_method"],
-        "table_patterns": ["payments"],
-        "example_questions": [
-            "Show pending payments",
-            "Show payment details with customer names"
-        ]
-    },
-    "paid": {
-        "description": "Completed payments or paid orders.",
-        "column_patterns": ["payment_status"],
-        "preferred_columns": [("payments", "payment_status"), ("orders", "payment_status")],
-        "example_questions": [
-            "Show paid orders",
-            "Show paid payments"
-        ]
-    },
-    "top customers": {
-        "description": "Customers ranked by total sales value.",
-        "column_patterns": ["customer_id", "customer_name", "final_amount"],
-        "preferred_columns": [("customers", "customer_name"), ("orders", "final_amount")],
-        "example_questions": [
-            "Show top 5 customers by sales",
-            "Show top customers by revenue"
-        ]
-    },
-    "monthly sales": {
-        "description": "Sales grouped by order month.",
-        "column_patterns": ["order_date", "final_amount", "total_amount"],
-        "preferred_columns": [("orders", "order_date"), ("orders", "final_amount")],
-        "example_questions": [
-            "Show monthly sales",
-            "Show revenue by month"
-        ]
-    },
-    "high value orders": {
-        "description": "Orders above a requested value threshold.",
-        "column_patterns": ["final_amount", "total_amount"],
-        "preferred_columns": [("orders", "final_amount"), ("orders", "total_amount")],
-        "example_questions": [
-            "Show high value orders above 50000"
-        ]
-    },
-    "customer type": {
-        "description": "Customer segment such as Enterprise, Retail, or Wholesale.",
-        "column_patterns": ["customer_type"],
-        "preferred_columns": [("customers", "customer_type")],
-        "example_questions": [
-            "Show sales by customer type"
-        ]
-    }
-}
-
-_ERP_RULE_BASED_MAPPINGS = {
-    "purchase": {
-        "description": "Purchase orders, vendor bills, or procurement amounts.",
-        "column_patterns": ["purchase_amount", "final_amount", "total_amount", "amount"],
-        "table_patterns": ["purchases", "purchase_orders", "vendor_invoices"],
-        "example_questions": [
-            "Show purchase by vendor",
-            "Show total purchase this month",
-        ],
-    },
-    "vendor": {
-        "description": "Suppliers or vendors the business buys from.",
-        "column_patterns": ["vendor_name", "vendor_id", "supplier_name", "supplier_id", "name"],
-        "table_patterns": ["vendors", "suppliers"],
-        "example_questions": [
-            "Show purchase by vendor",
-            "Show vendor pending payments",
-        ],
-    },
-    "invoice": {
-        "description": "Sales or purchase billing documents.",
-        "column_patterns": ["invoice_no", "invoice_number", "invoice_date", "invoice_amount", "amount_due"],
-        "table_patterns": ["invoices", "sales_invoices", "vendor_invoices"],
-        "example_questions": [
-            "Show unpaid invoices",
-            "Show invoice amount by month",
-        ],
-    },
-    "payment": {
-        "description": "Money received from customers or paid to vendors.",
-        "column_patterns": ["payment_status", "paid_amount", "payment_amount", "payment_date", "amount_due"],
-        "table_patterns": ["payments", "vendor_payments", "customer_payments"],
-        "example_questions": [
-            "Show vendor pending payments",
-            "Show payments by month",
-        ],
-    },
-    "inventory": {
-        "description": "Current stock position and inventory movement.",
-        "column_patterns": ["stock_qty", "quantity", "available_stock", "on_hand", "warehouse_id"],
-        "table_patterns": ["inventory", "inventory_balance", "stock_ledger"],
-        "example_questions": [
-            "Show current stock by warehouse",
-            "Show low stock items",
-        ],
-    },
-    "warehouse": {
-        "description": "Storage locations for stock and materials.",
-        "column_patterns": ["warehouse_name", "warehouse_code", "warehouse_id", "location"],
-        "table_patterns": ["warehouses"],
-        "example_questions": [
-            "Show current stock by warehouse",
-            "Show warehouse wise stock",
-        ],
-    },
-    "ledger": {
-        "description": "Accounting ledger or balance tracking data.",
-        "column_patterns": ["ledger_name", "ledger_code", "ledger_id", "balance", "debit", "credit"],
-        "table_patterns": ["ledgers", "general_ledger", "gl_entries"],
-        "example_questions": [
-            "Show customer outstanding balance",
-            "Show ledger balance",
-        ],
-    },
-    "account": {
-        "description": "Chart of account or finance account definitions.",
-        "column_patterns": ["account_name", "account_code", "account_id", "balance"],
-        "table_patterns": ["accounts", "chart_of_accounts"],
-        "example_questions": [
-            "Show balance by account",
-            "Show tax account balances",
-        ],
-    },
-    "tax": {
-        "description": "Tax amounts such as GST or VAT charged on transactions.",
-        "column_patterns": ["tax_amount", "gst_amount", "vat_amount", "taxable_amount"],
-        "table_patterns": ["taxes", "invoices", "orders"],
-        "example_questions": [
-            "Show tax collected by month",
-            "Show GST by invoice",
-        ],
-    },
-    "gst": {
-        "description": "Goods and Services Tax charged on invoices or orders.",
-        "column_patterns": ["gst_amount", "gst_rate", "tax_amount"],
-        "table_patterns": ["invoices", "orders", "taxes"],
-        "example_questions": [
-            "Show GST collected by month",
-            "Show GST by customer",
-        ],
-    },
-    "salary": {
-        "description": "Employee compensation and payroll totals.",
-        "column_patterns": ["salary", "gross_salary", "net_salary", "pay_amount"],
-        "table_patterns": ["employees", "payroll", "salary_register"],
-        "example_questions": [
-            "Show salary by department",
-            "Show total salary this month",
-        ],
-    },
-    "department": {
-        "description": "Business unit or department grouping for employees.",
-        "column_patterns": ["department", "department_name", "department_id"],
-        "table_patterns": ["departments", "employees"],
-        "example_questions": [
-            "Show salary by department",
-            "Show employees by department",
-        ],
-    },
-    "production": {
-        "description": "Manufacturing or production execution data.",
-        "column_patterns": ["production_qty", "produced_qty", "work_order_no", "bom_id"],
-        "table_patterns": ["production_orders", "production_entries", "work_orders"],
-        "example_questions": [
-            "Show production by BOM",
-            "Show produced quantity by date",
-        ],
-    },
-    "bom": {
-        "description": "Bill of materials linking products to required materials.",
-        "column_patterns": ["bom_no", "bom_id", "material_id", "required_qty"],
-        "table_patterns": ["bom", "bom_items", "bill_of_materials"],
-        "example_questions": [
-            "Show BOM materials",
-            "Show production by BOM",
-        ],
-    },
-    "material": {
-        "description": "Raw materials or components consumed in production.",
-        "column_patterns": ["material_name", "material_id", "required_qty", "consumed_qty"],
-        "table_patterns": ["materials", "bom_items", "material_issue"],
-        "example_questions": [
-            "Show required material quantity by BOM",
-            "Show material consumption",
-        ],
-    },
-    "balance": {
-        "description": "Open balance or outstanding monetary amount.",
-        "column_patterns": ["balance", "outstanding_amount", "amount_due", "pending_amount"],
-        "example_questions": [
-            "Show customer outstanding balance",
-            "Show vendor balance due",
-        ],
-    },
-    "due": {
-        "description": "Amounts that are unpaid, pending, or due.",
-        "column_patterns": ["due_date", "amount_due", "balance_due", "pending_amount"],
-        "example_questions": [
-            "Show unpaid invoices",
-            "Show vendor payments due",
-        ],
-    },
-    "pending": {
-        "description": "Transactions or documents not yet completed.",
-        "column_patterns": ["status", "payment_status", "invoice_status", "pending_amount"],
-        "example_questions": [
-            "Show vendor pending payments",
-            "Show pending invoices",
-        ],
+    "code": {
+        "description": "Codes, references, or external identifiers.",
+        "mapped_columns": [],
+        "example_questions": ["Show reference codes"],
+        "business_terms": ["reference", "ref", "identifier"],
     },
 }
 
 
-def _combined_rule_mappings() -> Dict[str, Any]:
-    combined = dict(_RULE_BASED_MAPPINGS)
-    combined.update(_ERP_RULE_BASED_MAPPINGS)
-    return combined
+def _normalize(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _normalize_identifier(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", _normalize(value)).strip("_")
+
+
+def _tokenize(value: str) -> list[str]:
+    return [token for token in re.split(r"[^a-z0-9]+", _normalize(value)) if token]
+
+
+def _humanize(value: str) -> str:
+    return _normalize_identifier(value).replace("_", " ").strip()
+
+
+def _singularize(term: str) -> str:
+    normalized = _humanize(term)
+    if normalized.endswith("ies") and len(normalized) > 3:
+        return normalized[:-3] + "y"
+    if normalized.endswith("ses") and len(normalized) > 3:
+        return normalized[:-2]
+    if normalized.endswith("s") and not normalized.endswith("ss") and len(normalized) > 1:
+        return normalized[:-1]
+    return normalized
+
+
+def _unique_preserve_order(items: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for item in items:
+        clean = str(item or "").strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(clean)
+    return result
+
+
+def _mapping_key(mapping: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(mapping.get("table", "")),
+        str(mapping.get("column", "")),
+    )
+
+
+def _preferred_column_order(column: dict[str, Any]) -> tuple[int, str]:
+    semantic = str(column.get("semantic_type", "")).lower()
+    name = str(column.get("name", ""))
+    if semantic == "name":
+        return (0, name)
+    if semantic in {"money", "quantity", "date", "status", "code"}:
+        return (1, name)
+    if name.endswith("_id") or semantic == "id":
+        return (2, name)
+    return (3, name)
+
+
+def _representative_mappings(table_name: str, table_data: dict) -> list[dict[str, Any]]:
+    mappings: list[dict[str, Any]] = []
+    for column in sorted(table_data.get("columns", []), key=_preferred_column_order)[:4]:
+        mappings.append(
+            {
+                "table": table_name,
+                "column": column.get("name", ""),
+                "type": column.get("type", ""),
+                "confidence": "high",
+            }
+        )
+    return mappings
+
+
+def _generic_description_for_column(table_name: str, column: dict[str, Any]) -> str:
+    semantic_type = str(column.get("semantic_type", "general")).lower()
+    column_term = _humanize(column.get("name", "column"))
+    table_term = _humanize(table_name)
+
+    if semantic_type == "money":
+        return f"Monetary field from {table_term}: {column_term}."
+    if semantic_type == "quantity":
+        return f"Quantity field from {table_term}: {column_term}."
+    if semantic_type == "date":
+        return f"Date or time field from {table_term}: {column_term}."
+    if semantic_type == "status":
+        return f"Status field from {table_term}: {column_term}."
+    if semantic_type == "name":
+        return f"Name field from {table_term}: {column_term}."
+    if semantic_type == "code":
+        return f"Reference field from {table_term}: {column_term}."
+    return f"Column from {table_term}: {column_term}."
+
+
+def _example_questions_for_column(table_name: str, column: dict[str, Any]) -> list[str]:
+    semantic_type = str(column.get("semantic_type", "general")).lower()
+    table_term = _humanize(table_name)
+    column_term = _humanize(column.get("name", "column"))
+
+    if semantic_type == "money":
+        return [f"Show total {column_term}", f"Show {column_term} from {table_term}"]
+    if semantic_type == "quantity":
+        return [f"Show total {column_term}", f"Show {column_term} by record"]
+    if semantic_type == "date":
+        return [f"Show latest {table_term}", f"Show {table_term} by {column_term}"]
+    if semantic_type == "status":
+        return [f"Show {table_term} by {column_term}", f"Show pending {table_term}"]
+    return [f"Show {column_term}", f"Show {table_term}"]
+
+
+def _example_questions_for_table(table_name: str) -> list[str]:
+    table_term = _humanize(table_name)
+    return [f"Show {table_term}", f"Count {table_term}"]
+
+
+def _table_alias_terms(table_name: str) -> list[str]:
+    human_table = _humanize(table_name)
+    tokens = [token for token in human_table.split() if token]
+    aliases = [human_table, _singularize(human_table), table_name]
+    if len(tokens) > 1:
+        aliases.append(tokens[0])
+        aliases.append(tokens[-1])
+    return _unique_preserve_order(aliases)
+
+
+def _column_synonym_aliases(column_name: str) -> list[str]:
+    human_column = _humanize(column_name)
+    tokens = [token for token in human_column.split() if token]
+    aliases = [human_column]
+
+    if {"gst", "vat", "tax"} & set(tokens):
+        aliases.extend(["tax", "gst", "vat"])
+    if {"balance", "outstanding", "due"} & set(tokens):
+        aliases.extend(["balance", "outstanding", "due"])
+
+    return _unique_preserve_order(aliases)
+
+
+def _add_entry(
+    glossary: dict[str, dict[str, Any]],
+    term: str,
+    *,
+    description: str,
+    mappings: list[dict[str, Any]] | None = None,
+    example_questions: list[str] | None = None,
+    business_terms: list[str] | None = None,
+) -> None:
+    normalized_term = _normalize(term)
+    if not normalized_term:
+        return
+
+    entry = glossary.setdefault(
+        normalized_term,
+        {
+            "description": description,
+            "mapped_columns": [],
+            "example_questions": [],
+            "business_terms": [],
+        },
+    )
+
+    if description and (
+        not entry.get("description")
+        or entry["description"].startswith("Column from ")
+        or entry["description"].startswith("Table from ")
+    ):
+        entry["description"] = description
+
+    existing_keys = {_mapping_key(mapping) for mapping in entry.get("mapped_columns", [])}
+    for mapping in mappings or []:
+        key = _mapping_key(mapping)
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        entry["mapped_columns"].append(mapping)
+
+    entry["example_questions"] = _unique_preserve_order(
+        list(entry.get("example_questions", [])) + list(example_questions or [])
+    )[:4]
+    entry["business_terms"] = _unique_preserve_order(
+        list(entry.get("business_terms", [])) + [normalized_term] + list(business_terms or [])
+    )[:8]
 
 
 def get_default_business_glossary() -> Dict[str, Any]:
-    """
-    Return a hardcoded glossary fallback that works without a JSON file.
-    """
-    glossary = {}
-    for term, term_data in _combined_rule_mappings().items():
-        mapped_columns = []
-        for table_name, column_name in term_data.get("preferred_columns", []):
-            mapped_columns.append(
+    """Return a generic fallback glossary with no database-specific mappings."""
+    return {
+        term: {
+            "description": data["description"],
+            "mapped_columns": list(data.get("mapped_columns", [])),
+            "example_questions": list(data.get("example_questions", [])),
+            "business_terms": list(data.get("business_terms", [])),
+        }
+        for term, data in _GENERIC_FALLBACK_GLOSSARY.items()
+    }
+
+
+def _semantic_aliases(term: str, semantic_type: str) -> list[str]:
+    aliases = [term]
+    if semantic_type == "money":
+        aliases.extend(["amount", "total", "value", "balance"])
+    elif semantic_type == "quantity":
+        aliases.extend(["qty", "count", "stock", "units"])
+    elif semantic_type == "date":
+        aliases.extend(["time", "month", "year"])
+    elif semantic_type == "status":
+        aliases.extend(["state"])
+    elif semantic_type == "name":
+        aliases.extend(["label", "title"])
+    elif semantic_type == "code":
+        aliases.extend(["reference", "ref"])
+    return _unique_preserve_order(aliases)
+
+
+def _build_semantic_rollups(knowledge_base: dict) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for table_name, table_data in knowledge_base.items():
+        for column in table_data.get("columns", []):
+            semantic_type = str(column.get("semantic_type", "general")).lower()
+            if semantic_type in {"general", "", "text", "boolean", "id"}:
+                continue
+            grouped[semantic_type].append(
                 {
                     "table": table_name,
-                    "column": column_name,
-                    "type": "unknown",
+                    "column": column.get("name", ""),
+                    "type": column.get("type", ""),
                     "confidence": "medium",
                 }
             )
-        glossary[term] = {
-            "description": term_data["description"],
-            "mapped_columns": mapped_columns,
-            "example_questions": term_data.get("example_questions", []),
-        }
-    return glossary
-
-
-def _find_columns_for_term(knowledge_base: dict, term_data: dict) -> List[Dict[str, Any]]:
-    """
-    Find columns in the knowledge base that match a business term.
-    
-    Args:
-        knowledge_base: The knowledge base dict
-        term_data: The term data with column_patterns and table_patterns
-    
-    Returns:
-        List of matching column mappings with confidence scores
-    """
-    mappings = []
-    column_patterns = term_data.get("column_patterns", [])
-    table_patterns = term_data.get("table_patterns", [])
-    preferred_columns = term_data.get("preferred_columns", [])
-    seen = set()
-
-    for preferred_table, preferred_column in preferred_columns:
-        table_data = knowledge_base.get(preferred_table)
-        if not table_data:
-            continue
-        for col in table_data.get("columns", []):
-            if col.get("name") != preferred_column:
-                continue
-            key = (preferred_table, preferred_column)
-            seen.add(key)
-            mappings.append({
-                "table": preferred_table,
-                "column": preferred_column,
-                "type": col.get("type", ""),
-                "confidence": "high",
-            })
-    
-    for table_name, table_data in knowledge_base.items():
-        # Check if table matches table patterns
-        table_match = any(pattern.lower() in table_name.lower() for pattern in table_patterns)
-        
-        for col in table_data.get("columns", []):
-            col_name = col.get("name", "")
-            col_type = col.get("type", "")
-            
-            # Check if column matches column patterns
-            col_match = any(pattern.lower() in col_name.lower() for pattern in column_patterns)
-            
-            # Determine confidence
-            confidence = "low"
-            if table_match and col_match:
-                confidence = "high"
-            elif col_match:
-                confidence = "medium"
-            
-            if col_match:
-                key = (table_name, col_name)
-                if key in seen:
-                    continue
-                seen.add(key)
-                mappings.append({
-                    "table": table_name,
-                    "column": col_name,
-                    "type": col_type,
-                    "confidence": confidence
-                })
-    
-    return mappings
+    return grouped
 
 
 def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = False) -> Dict[str, Any]:
     """
-    Generate a business glossary from the knowledge base.
-    
-    If AI enrichment is available (business_description, business_terms in columns),
-    use those to build the glossary. Otherwise, fall back to rule-based mappings.
-    
-    Args:
-        knowledge_base: The knowledge base dict (may be AI-enriched)
-        use_ai_enrichment: Whether to use AI enrichment data if available
-    
-    Returns:
-        Business glossary dict
+    Generate a business glossary from the current knowledge base.
+
+    The glossary is built from:
+    1. Table names and table descriptions
+    2. Column names and semantic types
+    3. AI-enriched business terms already attached to columns/tables
+    4. Generic semantic rollups such as money/date/quantity
     """
     logger.info("Generating business glossary")
-    
-    glossary = {}
-    
-    # Check if knowledge base has AI enrichment
-    has_ai_enrichment = False
-    for table_data in knowledge_base.values():
-        for col in table_data.get("columns", []):
-            if "business_terms" in col and col["business_terms"]:
-                has_ai_enrichment = True
-                break
-        if has_ai_enrichment:
-            break
-    
-    if use_ai_enrichment and has_ai_enrichment:
-        # Build glossary from AI enrichment data
-        logger.info("Using AI enrichment data for glossary generation")
-        
-        for table_name, table_data in knowledge_base.items():
-            for col in table_data.get("columns", []):
-                business_terms = col.get("business_terms", [])
-                business_description = col.get("business_description", "")
-                
-                for term in business_terms:
-                    term_lower = term.lower()
-                    
-                    if term_lower not in glossary:
-                        glossary[term_lower] = {
-                            "description": business_description or f"Business term: {term}",
-                            "mapped_columns": [],
-                            "example_questions": []
-                        }
-                    
-                    # Add column mapping
-                    col_type = col.get("type", "")
-                    metric_type = col.get("metric_type", "general")
-                    
-                    glossary[term_lower]["mapped_columns"].append({
-                        "table": table_name,
-                        "column": col.get("name", ""),
-                        "type": col_type,
-                        "metric_type": metric_type,
-                        "confidence": "high"  # AI enrichment is high confidence
-                    })
-        
-        # Add example questions from table-level enrichment
-        for table_name, table_data in knowledge_base.items():
-            possible_questions = table_data.get("possible_business_questions", [])
-            for question in possible_questions:
-                # Try to match question to existing terms
-                question_lower = question.lower()
-                for term in glossary:
-                    if term in question_lower:
-                        if question not in glossary[term]["example_questions"]:
-                            glossary[term]["example_questions"].append(question)
-    
-    else:
-        # Fall back to rule-based mappings
-        logger.info("Using rule-based mappings for glossary generation")
-        
-        for term, term_data in _combined_rule_mappings().items():
-            mappings = _find_columns_for_term(knowledge_base, term_data)
-            
-            if mappings:
-                glossary[term] = {
-                    "description": term_data["description"],
-                    "mapped_columns": mappings,
-                    "example_questions": term_data["example_questions"]
-                }
-    
+
+    if not knowledge_base:
+        return {}
+
+    glossary: dict[str, dict[str, Any]] = {}
+
+    for table_name, table_data in knowledge_base.items():
+        human_table = _humanize(table_name)
+        singular_table = _singularize(human_table)
+        table_description = (
+            str(table_data.get("business_description", "")).strip()
+            or str(table_data.get("business_purpose", "")).strip()
+            or f"Table for {human_table}."
+        )
+        table_mappings = _representative_mappings(table_name, table_data)
+        table_questions = list(table_data.get("possible_business_questions", [])) or _example_questions_for_table(table_name)
+
+        _add_entry(
+            glossary,
+            human_table,
+            description=table_description,
+            mappings=table_mappings,
+            example_questions=table_questions,
+            business_terms=_table_alias_terms(table_name),
+        )
+        if singular_table != human_table:
+            _add_entry(
+                glossary,
+                singular_table,
+                description=table_description,
+                mappings=table_mappings,
+                example_questions=table_questions,
+                business_terms=_table_alias_terms(table_name),
+            )
+
+        for column in table_data.get("columns", []):
+            column_name = str(column.get("name", "")).strip()
+            if not column_name:
+                continue
+
+            semantic_type = str(column.get("semantic_type", "general")).lower()
+            human_column = _humanize(column_name)
+            column_description = (
+                str(column.get("business_description", "")).strip()
+                or _generic_description_for_column(table_name, column)
+            )
+            mapping = {
+                "table": table_name,
+                "column": column_name,
+                "type": column.get("type", ""),
+                "confidence": "high" if column.get("business_terms") else "medium",
+            }
+
+            aliases = _semantic_aliases(human_column, semantic_type)
+            aliases.extend(_column_synonym_aliases(column_name))
+            if use_ai_enrichment:
+                aliases.extend(str(term).strip() for term in column.get("business_terms", []) if str(term).strip())
+            else:
+                aliases.extend(str(term).strip() for term in column.get("business_terms", []) if str(term).strip())
+
+            for alias in _unique_preserve_order(aliases):
+                _add_entry(
+                    glossary,
+                    alias,
+                    description=column_description,
+                    mappings=[mapping],
+                    example_questions=_example_questions_for_column(table_name, column),
+                    business_terms=[human_column, table_name, human_table],
+                )
+
+    for semantic_type, mappings in _build_semantic_rollups(knowledge_base).items():
+        base_entry = _GENERIC_FALLBACK_GLOSSARY.get(semantic_type)
+        if not base_entry:
+            continue
+        _add_entry(
+            glossary,
+            semantic_type,
+            description=base_entry["description"],
+            mappings=mappings[:8],
+            example_questions=base_entry.get("example_questions", []),
+            business_terms=base_entry.get("business_terms", []),
+        )
+        for alias in base_entry.get("business_terms", []):
+            _add_entry(
+                glossary,
+                alias,
+                description=base_entry["description"],
+                mappings=mappings[:8],
+                example_questions=base_entry.get("example_questions", []),
+                business_terms=[semantic_type],
+            )
+
     logger.info(f"Generated glossary with {len(glossary)} terms")
     return glossary
 
 
 def save_business_glossary(glossary: Dict[str, Any], output_path: str = "semantic/business_glossary.json") -> None:
-    """
-    Save the business glossary to a JSON file.
-    
-    Args:
-        glossary: The glossary dict
-        output_path: Path to save the glossary
-    """
+    """Save the business glossary to a JSON file."""
     try:
         save_json(glossary, output_path)
         logger.info(f"Business glossary saved to {output_path}")
@@ -600,16 +414,12 @@ def save_business_glossary(glossary: Dict[str, Any], output_path: str = "semanti
 def load_business_glossary(glossary_path: str = "semantic/business_glossary.json") -> Dict[str, Any]:
     """
     Load the business glossary from a JSON file.
-    
-    Args:
-        glossary_path: Path to the glossary file
-    
-    Returns:
-        Glossary dict loaded from disk, or a hardcoded fallback glossary when the
-        file is missing, invalid, or unreadable.
+
+    Returns a generic fallback glossary when the file is missing, invalid, or
+    unreadable. The fallback intentionally contains no fixed table mappings.
     """
     from utils.file_utils import load_json
-    
+
     try:
         glossary = load_json(glossary_path)
         logger.info(f"Business glossary loaded from {glossary_path}")
@@ -631,47 +441,43 @@ def load_business_glossary(glossary_path: str = "semantic/business_glossary.json
 def search_business_glossary(search_term: str, glossary: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """
     Search the business glossary for a term.
-    
+
     Searches across:
     - Glossary term names
     - Descriptions
+    - Business-term aliases
     - Mapped table names
     - Mapped column names
     - Example questions
-    
-    Args:
-        search_term: The term to search for
-        glossary: The glossary dict (loads from file if not provided)
-    
-    Returns:
-        Dict of matching glossary entries
     """
     if glossary is None:
         glossary = load_business_glossary()
-    
+
     if not glossary:
         logger.warning("Business glossary is empty or not loaded")
         return {}
-    
-    search_lower = search_term.lower()
+
+    search_lower = _normalize(search_term)
     matches = {}
-    
+
     for term, term_data in glossary.items():
         try:
-            # Search in term name
-            if search_lower in str(term):
+            if search_lower in str(term).lower():
                 matches[term] = term_data
                 continue
-            
-            # Search in description
+
             description = term_data.get("description", "")
-            if isinstance(description, str):
-                description = description.lower()
-                if search_lower in description:
+            if isinstance(description, str) and search_lower in description.lower():
+                matches[term] = term_data
+                continue
+
+            for business_term in term_data.get("business_terms", []):
+                if isinstance(business_term, str) and search_lower in business_term.lower():
                     matches[term] = term_data
-                    continue
-            
-            # Search in mapped columns
+                    break
+            if term in matches:
+                continue
+
             for mapping in term_data.get("mapped_columns", []):
                 table = mapping.get("table", "")
                 if isinstance(table, str) and search_lower in table.lower():
@@ -681,15 +487,16 @@ def search_business_glossary(search_term: str, glossary: Dict[str, Any] | None =
                 if isinstance(column, str) and search_lower in column.lower():
                     matches[term] = term_data
                     break
-            
-            # Search in example questions
+            if term in matches:
+                continue
+
             for question in term_data.get("example_questions", []):
                 if isinstance(question, str) and search_lower in question.lower():
                     matches[term] = term_data
                     break
-        except Exception as e:
-            logger.warning(f"Error processing term '{term}': {e}")
+        except Exception as exc:
+            logger.warning(f"Error processing term '{term}': {exc}")
             continue
-    
+
     logger.info(f"Glossary search for '{search_term}' found {len(matches)} matches")
     return matches

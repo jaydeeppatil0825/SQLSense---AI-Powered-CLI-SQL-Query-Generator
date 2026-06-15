@@ -1,8 +1,10 @@
 """
-ERP-oriented knowledge base enrichment helpers.
+Generic knowledge-base enrichment helpers.
 
-This module normalizes saved metadata so the knowledge base stays useful even
-when AI enrichment is noisy or partially wrong.
+This module keeps the saved knowledge base consistent and useful without
+injecting database-specific business assumptions. The knowledge base remains
+the source of truth; this layer only adds generic semantic typing, table
+metadata, and relationship inference.
 """
 
 from __future__ import annotations
@@ -12,73 +14,54 @@ import re
 
 
 VALID_MODULES = (
-    "sales",
-    "purchase",
-    "inventory",
-    "finance",
-    "HR/payroll",
-    "manufacturing",
-    "CRM/support",
-    "master data",
+    "reference",
+    "transaction",
+    "event",
+    "snapshot",
+    "general",
 )
 
 LOW_CONFIDENCE_RELATIONSHIP_THRESHOLD = 0.75
+_ALLOWED_SEMANTIC_TYPES = {
+    "money",
+    "quantity",
+    "date",
+    "status",
+    "id",
+    "name",
+    "text",
+    "boolean",
+    "percentage",
+    "code",
+    "general",
+}
 
 _SEMANTIC_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
-    ("document_number", ("invoice_number", "invoice_no", "bill_no", "voucher_no", "order_number", "order_no", "document_no", "document_number", "receipt_no", "challan_no")),
-    ("reference_number", ("reference_number", "reference_no", "ref_number", "ref_no", "txn_ref", "transaction_ref", "external_ref")),
-    ("warehouse", ("warehouse", "warehouse_id", "warehouse_code", "store", "location_bin", "bin_location")),
-    ("customer", ("customer", "customer_id", "customer_name", "client", "buyer", "party_customer")),
-    ("vendor", ("vendor", "supplier", "seller", "creditor", "vendor_id", "supplier_id")),
-    ("employee", ("employee", "employee_id", "staff", "payroll", "department_head")),
-    ("tax", ("gst", "vat", "tax", "cess", "duty", "withholding_tax")),
-    ("account", ("ledger", "account", "coa", "gl_code", "gl_account", "cost_center")),
-    ("status", ("status", "state", "stage", "approval", "payment_status", "order_status")),
-    ("date", ("date", "month", "year", "created_at", "updated_at", "posted_at", "due_date", "invoice_date", "order_date", "payment_date")),
-    ("quantity", ("quantity", "qty", "units", "stock", "available_stock", "reorder_level", "on_hand")),
-    ("money", ("amount", "price", "cost", "value", "rate", "total", "balance", "salary", "wage", "revenue", "debit", "credit", "paid", "due")),
-    ("item_product", ("product", "item", "sku", "material", "part", "fg_item", "rm_item")),
+    ("id", ("id", "identifier", "uuid", "guid", "pk")),
+    ("code", ("code", "ref", "reference", "number", "no", "sequence", "seq")),
+    ("name", ("name", "title", "label")),
+    ("text", ("description", "desc", "note", "notes", "comment", "comments", "remark", "remarks", "message", "content", "body", "address", "email")),
+    ("boolean", ("is_", "has_", "can_", "should_", "must_", "enabled", "disabled", "locked", "visible", "hidden", "verified")),
+    ("status", ("status", "state", "stage", "approval", "active", "inactive", "pending", "open", "closed", "completed", "cancelled", "canceled", "failed")),
+    ("money", ("amount", "price", "cost", "total", "balance", "value", "fee", "charge", "discount", "salary", "wage", "revenue", "income", "expense", "profit", "loss", "debit", "credit", "paid", "due", "outstanding", "tax")),
+    ("date", ("date", "time", "timestamp", "created", "updated", "modified", "posted", "start", "end", "effective", "expiry", "month", "year")),
+    ("quantity", ("quantity", "qty", "count", "units", "stock", "level", "available", "reserved", "ordered", "shipped", "received", "produced", "consumed", "weight", "volume", "capacity", "size", "reorder")),
+    ("percentage", ("percent", "percentage", "pct", "ratio")),
 ]
 
 _MODULE_RULES: dict[str, tuple[str, ...]] = {
-    "sales": ("sale", "sales", "order", "quotation", "invoice", "dispatch", "shipment", "receivable"),
-    "purchase": ("purchase", "procurement", "vendor_invoice", "supplier_invoice", "po", "grn", "payable"),
-    "inventory": ("inventory", "stock", "warehouse", "bin", "movement", "receipt", "issue"),
-    "finance": ("ledger", "account", "journal", "payment", "receipt", "tax", "gst", "debit", "credit", "balance"),
-    "HR/payroll": ("employee", "salary", "payroll", "department", "attendance", "leave"),
-    "manufacturing": ("production", "bom", "material", "work_order", "routing", "machine"),
-    "CRM/support": ("customer", "lead", "opportunity", "ticket", "support", "complaint", "service"),
-    "master data": ("master", "category", "product", "item", "vendor", "supplier", "customer", "employee", "department", "warehouse"),
+    "reference": ("master", "lookup", "catalog", "directory", "reference", "type", "category"),
+    "transaction": ("order", "invoice", "payment", "sale", "purchase", "entry", "transaction", "ledger", "bill"),
+    "event": ("log", "event", "audit", "history", "activity", "message", "ticket"),
+    "snapshot": ("inventory", "stock", "balance", "summary", "snapshot", "status"),
 }
 
 _MODULE_PURPOSES: dict[str, str] = {
-    "sales": "Stores sales orders, receivables, and revenue transactions.",
-    "purchase": "Stores vendor purchases, procurement, and payable transactions.",
-    "inventory": "Tracks stock balances, warehouse inventory, and material movement.",
-    "finance": "Captures accounting entries, payments, taxes, and balances.",
-    "HR/payroll": "Tracks employees, departments, salaries, and payroll records.",
-    "manufacturing": "Tracks BOMs, production activity, and material consumption.",
-    "CRM/support": "Tracks customers, support tickets, and service activity.",
-    "master data": "Stores reference and master entities used across ERP modules.",
-}
-
-_MASTER_DATA_TABLE_NAMES = {
-    "vendors",
-    "vendor",
-    "suppliers",
-    "supplier",
-    "customers",
-    "customer",
-    "items",
-    "item",
-    "products",
-    "product",
-    "warehouses",
-    "warehouse",
-    "categories",
-    "category",
-    "departments",
-    "department",
+    "reference": "Stores reusable reference records.",
+    "transaction": "Stores transactional records.",
+    "event": "Stores time-based activity records.",
+    "snapshot": "Stores current-state or balance records.",
+    "general": "Stores database records.",
 }
 
 _GENERIC_RELATIONSHIP_COLUMNS = {
@@ -127,22 +110,25 @@ def _humanize_identifier(value: str) -> str:
 
 
 def classify_column_metadata(column_name: str, table_name: str = "") -> tuple[str, float, str]:
-    """
-    Return semantic type, confidence, and reason for a column.
-    """
+    """Return generic semantic type, confidence, and reason for a column."""
     normalized = _normalize_identifier(column_name)
     full_name = "_".join(part for part in (_normalize_identifier(table_name), normalized) if part)
 
     for semantic_type, patterns in _SEMANTIC_PATTERNS:
         for pattern in patterns:
             if pattern == normalized:
-                return semantic_type, 0.99, f"Exact ERP pattern match for '{pattern}'."
+                return semantic_type, 0.99, f"Exact generic pattern match for '{pattern}'."
+            if semantic_type == "boolean" and normalized.startswith(pattern):
+                return semantic_type, 0.97, f"Matched generic boolean prefix '{pattern}'."
             if pattern in normalized:
-                return semantic_type, 0.95, f"Matched ERP column pattern '{pattern}'."
+                return semantic_type, 0.94, f"Matched generic column pattern '{pattern}'."
             if pattern in full_name:
-                return semantic_type, 0.9, f"Matched ERP table context pattern '{pattern}'."
+                return semantic_type, 0.9, f"Matched generic table context pattern '{pattern}'."
 
-    return "general", 0.6, "No ERP-specific semantic pattern matched."
+    if normalized.endswith("_id"):
+        return "id", 0.9, "Column ends with _id."
+
+    return "general", 0.6, "No generic semantic pattern matched."
 
 
 def classify_semantic_type(column_name: str, table_name: str = "") -> str:
@@ -151,62 +137,49 @@ def classify_semantic_type(column_name: str, table_name: str = "") -> str:
 
 
 def detect_table_module(table_name: str, table_data: dict) -> tuple[str, str]:
-    """
-    Detect a stable ERP module and default business purpose for a table.
-    """
+    """Detect a generic table category and default business purpose."""
     normalized_table_name = _normalize_identifier(table_name)
-    if normalized_table_name in _MASTER_DATA_TABLE_NAMES:
-        return "master data", _MODULE_PURPOSES["master data"]
-    if any(keyword in normalized_table_name for keyword in ("purchase", "procurement", "grn")):
-        return "purchase", _MODULE_PURPOSES["purchase"]
-    if any(keyword in normalized_table_name for keyword in ("payment", "ledger", "account", "tax", "gst", "journal")):
-        return "finance", _MODULE_PURPOSES["finance"]
-    if any(keyword in normalized_table_name for keyword in ("inventory", "stock", "warehouse", "bin")):
-        return "inventory", _MODULE_PURPOSES["inventory"]
-    if any(keyword in normalized_table_name for keyword in ("salary", "payroll", "employee", "department")):
-        return "HR/payroll", _MODULE_PURPOSES["HR/payroll"]
-    if any(keyword in normalized_table_name for keyword in ("production", "bom", "material", "work_order")):
-        return "manufacturing", _MODULE_PURPOSES["manufacturing"]
-    if any(keyword in normalized_table_name for keyword in ("customer", "support", "ticket", "lead", "crm")):
-        return "CRM/support", _MODULE_PURPOSES["CRM/support"]
-    if any(keyword in normalized_table_name for keyword in ("sales", "invoice", "order", "quotation", "dispatch", "shipment")):
-        return "sales", _MODULE_PURPOSES["sales"]
-
     search_space = [normalized_table_name]
     search_space.extend(_normalize_identifier(column.get("name", "")) for column in table_data.get("columns", []))
     search_text = " ".join(search_space)
 
-    best_module = "master data"
-    best_score = 0
-    for module_name, keywords in _MODULE_RULES.items():
-        score = sum(1 for keyword in keywords if keyword in search_text)
-        if module_name == "master data":
-            score = max(score - 1, 0)
-        if score > best_score:
-            best_module = module_name
-            best_score = score
+    primary_keys = table_data.get("primary_keys", [])
+    foreign_keys = table_data.get("foreign_keys", [])
+    has_dates = any(
+        str(column.get("semantic_type", "")).lower() == "date"
+        or "date" in _normalize_identifier(column.get("name", ""))
+        for column in table_data.get("columns", [])
+    )
 
-    return best_module, _MODULE_PURPOSES.get(best_module, _MODULE_PURPOSES["master data"])
+    if normalized_table_name.endswith(("_log", "_history", "_events")):
+        return "event", _MODULE_PURPOSES["event"]
+    if any(keyword in search_text for keyword in _MODULE_RULES["transaction"]):
+        return "transaction", _MODULE_PURPOSES["transaction"]
+    if any(keyword in search_text for keyword in _MODULE_RULES["snapshot"]):
+        return "snapshot", _MODULE_PURPOSES["snapshot"]
+    if any(keyword in search_text for keyword in _MODULE_RULES["reference"]):
+        return "reference", _MODULE_PURPOSES["reference"]
+    if foreign_keys and has_dates:
+        return "transaction", _MODULE_PURPOSES["transaction"]
+    if foreign_keys:
+        return "event", _MODULE_PURPOSES["event"]
+    if primary_keys and len(primary_keys) == 1 and len(table_data.get("columns", [])) <= 8:
+        return "reference", _MODULE_PURPOSES["reference"]
+    return "general", _MODULE_PURPOSES["general"]
 
 
 def build_rule_based_business_purpose(table_name: str, module_name: str) -> str:
     entity = _humanize_identifier(_singularize(table_name))
 
-    if module_name == "sales":
-        return f"Stores {entity} records for sales operations."
-    if module_name == "purchase":
-        return f"Stores {entity} records for purchase operations."
-    if module_name == "inventory":
-        return f"Stores {entity} records for inventory tracking."
-    if module_name == "finance":
-        return f"Stores {entity} records for finance workflows."
-    if module_name == "HR/payroll":
-        return f"Stores {entity} records for HR and payroll."
-    if module_name == "manufacturing":
-        return f"Stores {entity} records for manufacturing workflows."
-    if module_name == "CRM/support":
-        return f"Stores {entity} records for customer and support workflows."
-    return f"Stores {entity} reference records."
+    if module_name == "reference":
+        return f"Stores reference records for {entity}."
+    if module_name == "transaction":
+        return f"Stores transaction records for {entity}."
+    if module_name == "event":
+        return f"Stores activity records for {entity}."
+    if module_name == "snapshot":
+        return f"Stores current-state records for {entity}."
+    return f"Stores records for {entity}."
 
 
 def is_meaningful_business_text(value: str) -> bool:
@@ -324,13 +297,13 @@ def _relationship_score(
         reasons.append(f"sample data overlaps ({overlap_count} shared values)")
 
     local_semantic = str(local_column.get("semantic_type", "")).lower()
-    target_module = str(target_data.get("module", "")).lower()
-    if local_semantic == "vendor" and target_module in {"purchase", "master data"}:
+    target_semantics = {
+        str(column.get("semantic_type", "")).lower()
+        for column in target_data.get("columns", [])
+    }
+    if local_semantic in {"id", "code"} and {"id", "code"} & target_semantics:
         score += 0.05
-    if local_semantic == "customer" and target_module in {"sales", "crm/support", "master data"}:
-        score += 0.05
-    if local_semantic == "warehouse" and target_module in {"inventory", "master data"}:
-        score += 0.05
+        reasons.append("identifier semantics align")
 
     return score, reasons
 
@@ -345,9 +318,7 @@ def _relationship_key(relationship: dict) -> tuple[str, str, str, str]:
 
 
 def detect_relationships(knowledge_base: dict) -> list[dict]:
-    """
-    Detect ERP relationships using real FKs plus rule-based inference.
-    """
+    """Detect relationships using real FKs plus generic inference."""
     relationships: list[dict] = []
     seen: set[tuple[str, str, str, str]] = set()
 
@@ -423,14 +394,12 @@ def detect_relationships(knowledge_base: dict) -> list[dict]:
 
 
 def summarize_knowledge_base(knowledge_base: dict) -> dict:
-    """
-    Build a CLI-friendly summary of detected ERP metadata.
-    """
+    """Build a CLI-friendly summary of detected metadata."""
     module_counts: dict[str, int] = {}
     relationship_map: dict[tuple[str, str, str, str], dict] = {}
 
     for table_name, table_data in (knowledge_base or {}).items():
-        module_name = table_data.get("module", "master data")
+        module_name = table_data.get("module", "general")
         module_counts[module_name] = module_counts.get(module_name, 0) + 1
 
         for relationship in table_data.get("relationships", []):
@@ -457,7 +426,10 @@ def summarize_knowledge_base(knowledge_base: dict) -> dict:
 
 def enrich_knowledge_base_for_erp(knowledge_base: dict) -> dict:
     """
-    Return a copy of the knowledge base with clean ERP metadata attached.
+    Return a copy of the knowledge base with clean generic metadata attached.
+
+    The historical function name is kept for compatibility with the rest of the
+    project, but the enrichment is now database-agnostic.
     """
     enriched = deepcopy(knowledge_base or {})
 
@@ -490,10 +462,16 @@ def enrich_knowledge_base_for_erp(knowledge_base: dict) -> dict:
         table_data["possible_business_questions"] = clean_questions[:2]
 
         for column in table_data.get("columns", []):
-            semantic_type, confidence, reason = classify_column_metadata(
-                column.get("name", ""),
-                table_name=table_name,
-            )
+            existing_semantic_type = str(column.get("semantic_type", "")).lower()
+            if existing_semantic_type in _ALLOWED_SEMANTIC_TYPES - {"general"}:
+                semantic_type = str(column.get("semantic_type", "")).lower()
+                confidence = float(column.get("confidence", 0.75) or 0.75)
+                reason = str(column.get("reason", "Preserved existing semantic type."))
+            else:
+                semantic_type, confidence, reason = classify_column_metadata(
+                    column.get("name", ""),
+                    table_name=table_name,
+                )
             column["semantic_type"] = semantic_type
             column["confidence"] = round(confidence, 2)
             column["reason"] = reason

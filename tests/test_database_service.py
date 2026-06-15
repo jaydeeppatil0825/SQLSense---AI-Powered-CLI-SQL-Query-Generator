@@ -97,3 +97,39 @@ def test_build_knowledge_base_reports_partial_ai_enrichment(monkeypatch):
         "partial",
         "AI enrichment completed for 1 table(s); fallback used for 1 table(s).",
     )
+
+
+def test_build_knowledge_base_keeps_generated_glossary_active_and_builds_vector_index(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    metadata = MetaData()
+    Table(
+        "orders",
+        metadata,
+        Column("order_id", Integer, primary_key=True),
+        Column("final_amount", Integer),
+    )
+    metadata.create_all(engine)
+
+    active_glossary = {
+        "sales": {
+            "description": "Sales amount",
+            "mapped_columns": [{"table": "orders", "column": "final_amount", "confidence": "high"}],
+            "example_questions": ["show total sales"],
+        }
+    }
+
+    service = DatabaseService()
+    service.engine = engine
+
+    monkeypatch.setattr("core.database_service.save_json", lambda data, path: None)
+    monkeypatch.setattr("core.database_service.save_business_glossary", lambda glossary, path: None)
+    monkeypatch.setattr("core.database_service.generate_business_glossary", lambda kb, use_ai_enrichment=False: active_glossary)
+
+    success, message, knowledge_base = service.build_knowledge_base(use_ai_enrichment=False)
+
+    assert success is True
+    assert "orders" in knowledge_base
+    assert service.get_business_glossary() == active_glossary
+    retriever = service.get_vector_retriever()
+    assert retriever is not None
+    assert "orders" in retriever.get_relevant_tables("show order sales", top_k=5)

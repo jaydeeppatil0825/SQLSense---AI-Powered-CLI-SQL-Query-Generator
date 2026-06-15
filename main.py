@@ -404,6 +404,20 @@ def handle_ask_question(state: SessionState) -> None:
                 ]
                 print(f"    selected columns: {', '.join(column_descriptions)}")
 
+    # Display vector retrieval information
+    if query_context.get("vector_used"):
+        print("\n  Vector Retrieval:")
+        print("  - route: vector-enhanced")
+        vector_results = query_context.get("vector_results", {})
+        if vector_results.get("table_names"):
+            print(f"  - top vector tables: {', '.join(vector_results['table_names'][:5])}")
+        if vector_results.get("glossary_terms"):
+            glossary_names = [t.get('term', '') for t in vector_results['glossary_terms'][:3]]
+            print(f"  - top glossary terms: {', '.join(glossary_names)}")
+    else:
+        print("\n  Vector Retrieval:")
+        print("  - route: rule-based (vector unavailable or not needed)")
+
     if query_context.get("confidence") is not None:
         print(f"\n  Planning Confidence: {query_context['confidence']}")
     if query_context.get("generation_confidence") is not None:

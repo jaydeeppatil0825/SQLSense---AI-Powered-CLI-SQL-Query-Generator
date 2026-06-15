@@ -1,560 +1,266 @@
 """
 ai/simple_query_generator.py
-=============================
-Deterministic SQL generator for simple, single-table questions.
+============================
+Deterministic SQL generator for simple, mostly single-table questions.
 
-Classifier order (most specific → least specific):
-  1. count
-  2. latest / recent
-  3. status filter
-  4. total aggregation
-  5. average aggregation
-  6. show all  ← last so it never overrides a more specific intent
+This module is intentionally generic:
+- No fixed table aliases
+- No database-specific table mappings
+- No demo-specific join recipes
+
+It relies on the active knowledge base, active glossary, and the reduced schema
+selected by the query planner.
 """
 
 from __future__ import annotations
 
 import re
+from typing import Any
 
-from ai.erp_query_generator import generate_erp_sql
-from semantic.business_glossary import load_business_glossary
-
-
-# ── Complex-intent keywords ───────────────────────────────────────────────────
-# If ANY of these appear in the question → return None, let AI handle it.
 
 _COMPLEX_KEYWORDS = {
-    "by", "group", "top", "highest", "lowest", "monthly",
-    "month", "year", "yearly", "trend", "compare", "comparison",
-    "category", "city", "customer by", "product by", "join",
-    "revenue by", "sales by", "per", "breakdown", "distribution",
-    "ranking", "rank", "versus", "vs", "between", "range",
-    "report", "summary", "detail", "details",
+    " by ",
+    " group ",
+    " top ",
+    " highest ",
+    " lowest ",
+    " monthly ",
+    " trend ",
+    " compare ",
+    " comparison ",
+    " versus ",
+    " vs ",
+    " breakdown ",
+    " distribution ",
+    " ranking ",
+    " join ",
 }
 
-_COMPLEX_RE = re.compile(
-    r"\b(" + "|".join(re.escape(k) for k in sorted(_COMPLEX_KEYWORDS, key=len, reverse=True)) + r")\b",
-    re.IGNORECASE,
-)
-
-# Words that indicate a more specific intent than "show all".
-# If any of these are present, _try_show_all returns None.
-_NOT_SHOW_ALL = re.compile(
-    r"\b(total|sum|average|avg|count|how\s+many|latest|recent|newest|"
-    r"active|inactive|paid|unpaid|pending|cancelled|canceled|"
-    r"delivered|shipped|processing|open|closed|resolved|high|low)\b",
-    re.IGNORECASE,
-)
-
-
-# ── Table alias map ───────────────────────────────────────────────────────────
-
-_TABLE_ALIASES: dict[str, str] = {
-    "customer": "customers", "customers": "customers",
-    "client": "customers", "clients": "customers",
-    "buyer": "customers", "buyers": "customers",
-    "user": "customers", "users": "customers",
-    "product": "products", "products": "products",
-    "item": "products", "items": "products", "sku": "products",
-    "order": "orders", "orders": "orders",
-    "booking": "orders", "bookings": "orders",
-    "invoice": "orders", "invoices": "orders",
-    "payment": "payments", "payments": "payments",
-    "transaction": "payments", "transactions": "payments",
-    "employee": "employees", "employees": "employees",
-    "staff": "employees", "worker": "employees", "workers": "employees",
-    "ticket": "support_tickets", "tickets": "support_tickets",
-    "support ticket": "support_tickets", "support tickets": "support_tickets",
-    "issue": "support_tickets", "issues": "support_tickets",
-    "order item": "order_items", "order items": "order_items",
-    "line item": "order_items", "line items": "order_items",
-}
-
-# ── Business-term → (default table, candidate columns) ──────────────────────
-# Used when no table name appears in the question.
-# Order matters: first match with an existing table+column wins.
-
-_BUSINESS_TERM_TABLE: list[tuple[str, str, list[str]]] = [
-    # (trigger_word_in_question, default_table, candidate_columns)
-    ("salary",       "employees",   ["salary"]),
-    ("wage",         "employees",   ["salary"]),
-    ("paid amount",  "payments",    ["paid_amount"]),
-    ("paid",         "payments",    ["paid_amount"]),
-    ("discount",     "orders",      ["discount_amount"]),
-    ("tax",          "orders",      ["tax_amount"]),
-    ("quantity",     "order_items", ["quantity"]),
-    ("unit price",   "products",    ["unit_price"]),
-    ("product price","products",    ["unit_price", "cost_price"]),
-    ("price",        "products",    ["unit_price", "cost_price"]),
-    ("revenue",      "orders",      ["final_amount", "total_amount"]),
-    ("sales",        "orders",      ["final_amount", "total_amount"]),
-    ("order value",  "orders",      ["final_amount", "total_amount"]),
-    ("amount",       "orders",      ["final_amount", "total_amount", "paid_amount"]),
-    ("total",        "orders",      ["final_amount", "total_amount"]),
-]
-
-# ── Candidate columns ─────────────────────────────────────────────────────────
-
-_DATE_COLUMNS = [
-    "order_date", "payment_date", "created_at", "created_date",
-    "signup_date", "joining_date", "resolved_date", "updated_at",
-]
-
-_AMOUNT_COLUMNS: dict[str, list[str]] = {
-    "sales":         ["final_amount", "total_amount", "paid_amount", "amount", "line_total"],
-    "revenue":       ["final_amount", "total_amount", "paid_amount", "amount"],
-    "paid":          ["paid_amount", "final_amount", "total_amount"],
-    "discount":      ["discount_amount"],
-    "tax":           ["tax_amount"],
-    "salary":        ["salary"],
-    "wage":          ["salary"],
-    "product price": ["unit_price", "cost_price"],
-    "unit price":    ["unit_price"],
-    "price":         ["unit_price", "final_amount", "total_amount"],
-    "amount":        ["final_amount", "total_amount", "paid_amount", "amount", "line_total"],
-    "value":         ["final_amount", "total_amount", "unit_price"],
-    "cost":          ["cost_price", "unit_price"],
-    "total":         ["final_amount", "total_amount", "paid_amount", "amount"],
-    "quantity":      ["quantity"],
-}
-
-# Status filters: (trigger_word, column_name, SQL_value)
-_STATUS_FILTERS: list[tuple[str, str, str]] = [
-    ("paid",       "payment_status", "Paid"),
-    ("unpaid",     "payment_status", "Pending"),
-    ("pending",    "payment_status", "Pending"),
-    ("refunded",   "payment_status", "Refunded"),
-    ("delivered",  "order_status",   "Delivered"),
-    ("cancelled",  "order_status",   "Cancelled"),
-    ("canceled",   "order_status",   "Cancelled"),
-    ("processing", "order_status",   "Processing"),
-    ("shipped",    "order_status",   "Shipped"),
-    ("active",     "status",         "Active"),
-    ("inactive",   "status",         "Inactive"),
-    ("open",       "ticket_status",  "Open"),
-    ("closed",     "ticket_status",  "Closed"),
-    ("resolved",   "ticket_status",  "Resolved"),
-    ("high",       "priority",       "High"),
-    ("low",        "priority",       "Low"),
-]
-
-
-# ── Helper functions ──────────────────────────────────────────────────────────
-
-_MONTHS: dict[str, int] = {
-    "january": 1, "jan": 1,
-    "february": 2, "feb": 2,
-    "march": 3, "mar": 3,
-    "april": 4, "apr": 4,
-    "may": 5,
-    "june": 6, "jun": 6,
-    "july": 7, "jul": 7,
-    "august": 8, "aug": 8,
-    "september": 9, "sep": 9, "sept": 9,
-    "october": 10, "oct": 10,
-    "november": 11, "nov": 11,
-    "december": 12, "dec": 12,
+_DATE_PATTERNS = ("date", "time", "timestamp", "created", "updated", "modified")
+_STATUS_VALUE_FALLBACKS = {
+    "pending": ["Pending", "pending", "Unpaid", "unpaid", "Open", "open"],
+    "unpaid": ["Unpaid", "unpaid", "Pending", "pending"],
+    "paid": ["Paid", "paid", "Closed", "closed"],
+    "open": ["Open", "open"],
+    "closed": ["Closed", "closed"],
+    "active": ["Active", "active", "Enabled", "enabled"],
+    "inactive": ["Inactive", "inactive", "Disabled", "disabled"],
+    "cancelled": ["Cancelled", "cancelled", "Canceled", "canceled"],
+    "canceled": ["Canceled", "canceled", "Cancelled", "cancelled"],
+    "approved": ["Approved", "approved"],
 }
 
 
-def _has_tables(knowledge_base: dict, *tables: str) -> bool:
-    return all(table in knowledge_base for table in tables)
+def _normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().lower())
 
 
-def _has_cols(knowledge_base: dict, table: str, *columns: str) -> bool:
-    table_cols = set(_get_columns(table, knowledge_base))
-    return all(column in table_cols for column in columns)
+def _normalize_identifier(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", _normalize(text)).strip("_")
 
 
-def _amount_col(knowledge_base: dict) -> str | None:
-    return _first_existing_col("orders", ["final_amount", "total_amount", "amount"], knowledge_base)
+def _humanize(text: str) -> str:
+    return _normalize_identifier(text).replace("_", " ").strip()
 
 
-def _customer_name_col(knowledge_base: dict) -> str | None:
-    return _first_existing_col("customers", ["customer_name", "name"], knowledge_base)
+def _singularize(text: str) -> str:
+    value = _humanize(text)
+    if value.endswith("ies") and len(value) > 3:
+        return value[:-3] + "y"
+    if value.endswith("ses") and len(value) > 3:
+        return value[:-2]
+    if value.endswith("s") and not value.endswith("ss") and len(value) > 1:
+        return value[:-1]
+    return value
 
 
-def _product_name_col(knowledge_base: dict) -> str | None:
-    return _first_existing_col("products", ["product_name", "name"], knowledge_base)
+def _tokenize(text: str) -> list[str]:
+    raw_tokens = [token for token in re.split(r"[^a-z0-9]+", _normalize(text)) if token]
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in raw_tokens:
+        for candidate in (token, _singularize(token)):
+            if candidate and candidate not in seen:
+                tokens.append(candidate)
+                seen.add(candidate)
+    return tokens
 
 
-def _order_month_range(q: str) -> tuple[str, str] | None:
-    year_match = re.search(r"\b(20\d{2}|19\d{2})\b", q)
-    if not year_match:
+def _column_type_is_numeric(column_type: str) -> bool:
+    normalized = _normalize(column_type)
+    return any(token in normalized for token in ("int", "decimal", "numeric", "float", "double", "real"))
+
+
+def _table_columns(table_data: dict[str, Any]) -> list[dict[str, Any]]:
+    return list(table_data.get("columns", []))
+
+
+def _find_glossary_matches(question: str, glossary: dict | None) -> list[tuple[str, dict[str, Any]]]:
+    if not glossary:
+        return []
+
+    normalized_question = _normalize(question)
+    question_terms = set(_tokenize(question))
+    matches = []
+    for term, term_data in glossary.items():
+        normalized_term = _normalize(term)
+        if normalized_term and normalized_term in normalized_question:
+            matches.append((term, term_data))
+            continue
+        aliases = term_data.get("business_terms", []) or []
+        if any(set(_tokenize(alias)) <= question_terms for alias in aliases if _tokenize(alias)):
+            matches.append((term, term_data))
+    return matches
+
+
+def _score_table(
+    question: str,
+    table_name: str,
+    table_data: dict[str, Any],
+    glossary_matches: list[tuple[str, dict[str, Any]]],
+) -> float:
+    score = 0.0
+    normalized_question = _normalize(question)
+    question_terms = set(_tokenize(question))
+    table_terms = {
+        table_name.lower(),
+        _humanize(table_name),
+        _singularize(table_name),
+    }
+
+    if any(term and term in normalized_question for term in table_terms):
+        score += 3.0
+
+    column_terms = {
+        _normalize(column.get("name", ""))
+        for column in _table_columns(table_data)
+        if column.get("name")
+    }
+    overlap = len(question_terms & {token for term in column_terms for token in _tokenize(term)})
+    score += overlap * 0.25
+
+    for _, term_data in glossary_matches:
+        for mapping in term_data.get("mapped_columns", []):
+            if mapping.get("table") == table_name:
+                score += 1.5
+                break
+
+    return score
+
+
+def _pick_table(
+    question: str,
+    knowledge_base: dict,
+    query_plan: dict | None,
+    glossary_matches: list[tuple[str, dict[str, Any]]],
+) -> str | None:
+    if not knowledge_base:
         return None
-    year = int(year_match.group(1))
 
-    month_number = None
-    for month_name, value in _MONTHS.items():
-        if re.search(r"\b" + re.escape(month_name) + r"\b", q):
-            month_number = value
-            break
+    if query_plan:
+        selected = list(query_plan.get("selected_table_names") or [])
+        if len(selected) == 1 and selected[0] in knowledge_base:
+            return selected[0]
 
-    if month_number is None:
+    if len(knowledge_base) == 1:
+        return next(iter(knowledge_base))
+
+    scored = []
+    for table_name, table_data in knowledge_base.items():
+        score = _score_table(question, table_name, table_data, glossary_matches)
+        if score > 0:
+            scored.append((score, table_name))
+    if not scored:
         return None
-
-    next_year = year + 1 if month_number == 12 else year
-    next_month = 1 if month_number == 12 else month_number + 1
-    return (
-        f"{year:04d}-{month_number:02d}-01",
-        f"{next_year:04d}-{next_month:02d}-01",
-    )
+    scored.sort(reverse=True)
+    return scored[0][1]
 
 
-def _amount_threshold(q: str) -> str | None:
-    match = re.search(
-        r"\b(?:above|over|greater\s+than|more\s+than)\s+([0-9][0-9,]*(?:\.\d+)?)\b",
-        q,
-        re.IGNORECASE,
-    )
-    if not match:
-        return None
-    return match.group(1).replace(",", "")
-
-
-def _item_sales_expr(knowledge_base: dict) -> str | None:
-    if _has_cols(knowledge_base, "order_items", "line_total"):
-        return "oi.line_total"
-    if _has_cols(knowledge_base, "order_items", "quantity", "unit_price"):
-        return "oi.quantity * oi.unit_price"
-    if _has_cols(knowledge_base, "order_items", "quantity") and _has_cols(knowledge_base, "products", "unit_price"):
-        return "oi.quantity * p.unit_price"
+def _pick_date_column(table_data: dict[str, Any]) -> str | None:
+    for column in _table_columns(table_data):
+        if str(column.get("semantic_type", "")).lower() == "date":
+            return str(column.get("name", ""))
+    for column in _table_columns(table_data):
+        name = _normalize_identifier(column.get("name", ""))
+        if any(pattern in name for pattern in _DATE_PATTERNS):
+            return str(column.get("name", ""))
     return None
 
 
-def _try_pcsoft_business_sql(user_question: str, knowledge_base: dict) -> str | None:
-    """Deterministic SQL for common PCSoft business questions."""
-    q = user_question.lower().strip()
-    limit = _extract_limit_from_question(q)
-    amount_col = _amount_col(knowledge_base)
-    customer_name_col = _customer_name_col(knowledge_base)
-    product_name_col = _product_name_col(knowledge_base)
-
-    if _has_tables(knowledge_base, "orders") and amount_col:
-        if re.search(r"\b(total\s+sales|total\s+revenue|sum\s+sales)\b", q) and not re.search(r"\bby\b", q):
-            return f"SELECT SUM({amount_col}) AS total_sales FROM orders;"
-
-        if re.search(r"\b(average\s+order\s+value|avg\s+order\s+value)\b", q):
-            return f"SELECT AVG({amount_col}) AS average_order_value FROM orders;"
-
-        if re.search(r"\b(highest|maximum|max)\b", q) and "order" in q and "amount" in q:
-            return f"SELECT MAX({amount_col}) AS highest_order_amount FROM orders;"
-
-        if re.search(r"\b(lowest|minimum|min)\b", q) and "order" in q and "amount" in q:
-            return f"SELECT MIN({amount_col}) AS lowest_order_amount FROM orders;"
-
-        threshold = _amount_threshold(q)
-        if threshold and ("high value" in q or "order" in q):
-            return (
-                f"SELECT * FROM orders WHERE {amount_col} > {threshold} "
-                f"ORDER BY {amount_col} DESC LIMIT {limit};"
-            )
-
-        month_range = _order_month_range(q)
-        if month_range and "sales" in q and _has_cols(knowledge_base, "orders", "order_date"):
-            start_date, end_date = month_range
-            return (
-                f"SELECT SUM({amount_col}) AS total_sales FROM orders "
-                f"WHERE order_date >= '{start_date}' AND order_date < '{end_date}';"
-            )
-
-        if month_range and "order" in q and _has_cols(knowledge_base, "orders", "order_date"):
-            start_date, end_date = month_range
-            return (
-                f"SELECT * FROM orders WHERE order_date >= '{start_date}' "
-                f"AND order_date < '{end_date}' LIMIT {limit};"
-            )
-
-        if re.search(r"\b(monthly|by\s+month|per\s+month)\b", q) and re.search(r"\b(sales|revenue)\b", q):
-            if _has_cols(knowledge_base, "orders", "order_date"):
-                return (
-                    "SELECT DATE_FORMAT(order_date, '%Y-%m') AS month, "
-                    f"SUM({amount_col}) AS total_sales FROM orders "
-                    "GROUP BY DATE_FORMAT(order_date, '%Y-%m') "
-                    "ORDER BY month LIMIT 50;"
-                )
-
-        if re.search(r"\border(s)?\s+by\s+status\b", q) and _has_cols(knowledge_base, "orders", "order_status"):
-            return (
-                "SELECT order_status, COUNT(*) AS total_orders "
-                "FROM orders GROUP BY order_status "
-                "ORDER BY total_orders DESC LIMIT 50;"
-            )
-
-        if re.search(r"\btotal\s+sales\s+by\s+payment\s+status\b", q) and _has_cols(knowledge_base, "orders", "payment_status"):
-            return (
-                f"SELECT payment_status, SUM({amount_col}) AS total_sales "
-                "FROM orders GROUP BY payment_status "
-                "ORDER BY total_sales DESC LIMIT 50;"
-            )
-
-    if _has_tables(knowledge_base, "customers", "orders") and amount_col:
-        can_join_customer_orders = (
-            _has_cols(knowledge_base, "orders", "customer_id")
-            and _has_cols(knowledge_base, "customers", "customer_id")
-        )
-
-        if can_join_customer_orders and customer_name_col and re.search(r"\border(s)?\s+with\s+customer\s+names?\b", q):
-            select_cols = ["o.order_id", f"c.{customer_name_col} AS customer_name"]
-            for optional_col in ["order_date", "order_status", "payment_status", amount_col]:
-                if _col_exists("orders", optional_col, knowledge_base):
-                    select_cols.append(f"o.{optional_col}")
-            return (
-                f"SELECT {', '.join(select_cols)} FROM orders o "
-                "JOIN customers c ON o.customer_id = c.customer_id "
-                f"LIMIT {limit};"
-            )
-
-        if can_join_customer_orders and customer_name_col and re.search(r"\btop\s+\d+\s+customers?\b", q) and re.search(r"\b(sales|revenue)\b", q):
-            return (
-                f"SELECT c.customer_id, c.{customer_name_col} AS customer_name, "
-                f"SUM(o.{amount_col}) AS total_sales FROM customers c "
-                "JOIN orders o ON c.customer_id = o.customer_id "
-                f"GROUP BY c.customer_id, c.{customer_name_col} "
-                f"ORDER BY total_sales DESC LIMIT {limit};"
-            )
-
-        if can_join_customer_orders and _has_cols(knowledge_base, "customers", "city") and re.search(r"\btotal\s+sales\s+by\s+city\b", q):
-            return (
-                f"SELECT c.city, SUM(o.{amount_col}) AS total_sales "
-                "FROM customers c JOIN orders o ON c.customer_id = o.customer_id "
-                "GROUP BY c.city ORDER BY total_sales DESC LIMIT 50;"
-            )
-
-        if can_join_customer_orders and _has_cols(knowledge_base, "customers", "customer_type") and re.search(r"\bsales\s+by\s+customer\s+type\b", q):
-            return (
-                f"SELECT c.customer_type, SUM(o.{amount_col}) AS total_sales "
-                "FROM customers c JOIN orders o ON c.customer_id = o.customer_id "
-                "GROUP BY c.customer_type ORDER BY total_sales DESC LIMIT 50;"
-            )
-
-        if _has_cols(knowledge_base, "customers", "city") and re.search(r"\bcustomers?\s+by\s+city\b", q):
-            return (
-                "SELECT city, COUNT(*) AS total_customers "
-                "FROM customers GROUP BY city "
-                "ORDER BY total_customers DESC LIMIT 50;"
-            )
-
-    if _has_tables(knowledge_base, "products", "order_items"):
-        can_join_products_items = (
-            _has_cols(knowledge_base, "products", "product_id")
-            and _has_cols(knowledge_base, "order_items", "product_id")
-        )
-        item_sales_expr = _item_sales_expr(knowledge_base)
-
-        if _has_cols(knowledge_base, "products", "category") and re.search(r"\bproducts?\s+by\s+category\b", q):
-            return (
-                "SELECT category, COUNT(*) AS total_products "
-                "FROM products GROUP BY category "
-                "ORDER BY total_products DESC LIMIT 50;"
-            )
-
-        if can_join_products_items and item_sales_expr and _has_cols(knowledge_base, "products", "category") and re.search(r"\bsales\s+by\s+product\s+category\b|\bsales\s+by\s+category\b", q):
-            return (
-                f"SELECT p.category, SUM({item_sales_expr}) AS total_sales "
-                "FROM products p JOIN order_items oi ON p.product_id = oi.product_id "
-                "GROUP BY p.category ORDER BY total_sales DESC LIMIT 50;"
-            )
-
-        if can_join_products_items and product_name_col and _has_cols(knowledge_base, "order_items", "quantity") and re.search(r"\btop(?:\s+\d+)?\s+selling\s+products?\b", q):
-            return (
-                f"SELECT p.product_id, p.{product_name_col} AS product_name, "
-                "SUM(oi.quantity) AS total_quantity "
-                "FROM products p JOIN order_items oi ON p.product_id = oi.product_id "
-                f"GROUP BY p.product_id, p.{product_name_col} "
-                f"ORDER BY total_quantity DESC LIMIT {limit};"
-            )
-
-    if _has_tables(knowledge_base, "payments", "orders", "customers"):
-        can_join_payment_customer = (
-            _has_cols(knowledge_base, "payments", "order_id")
-            and _has_cols(knowledge_base, "orders", "order_id", "customer_id")
-            and _has_cols(knowledge_base, "customers", "customer_id")
-        )
-        if can_join_payment_customer and customer_name_col and re.search(r"\bpayment\s+details?\s+with\s+customer\s+names?\b", q):
-            select_cols = ["p.payment_id", "p.order_id", f"c.{customer_name_col} AS customer_name"]
-            for optional_col in ["payment_date", "payment_method", "paid_amount", "payment_status"]:
-                if _col_exists("payments", optional_col, knowledge_base):
-                    select_cols.append(f"p.{optional_col}")
-            return (
-                f"SELECT {', '.join(select_cols)} FROM payments p "
-                "JOIN orders o ON p.order_id = o.order_id "
-                "JOIN customers c ON o.customer_id = c.customer_id "
-                f"LIMIT {limit};"
-            )
-
-        if can_join_payment_customer and customer_name_col and re.search(r"\bcustomers?\s+with\s+pending\s+payments?\b", q):
-            status_alias = "p" if _col_exists("payments", "payment_status", knowledge_base) else "o"
-            return (
-                f"SELECT DISTINCT c.customer_id, c.{customer_name_col} AS customer_name "
-                "FROM customers c "
-                "JOIN orders o ON c.customer_id = o.customer_id "
-                "JOIN payments p ON o.order_id = p.order_id "
-                f"WHERE {status_alias}.payment_status = 'Pending' LIMIT 50;"
-            )
-
-    if _has_tables(knowledge_base, "support_tickets"):
-        if re.search(r"\bopen\s+support\s+tickets?\b", q) and _has_cols(knowledge_base, "support_tickets", "ticket_status"):
-            return "SELECT * FROM support_tickets WHERE ticket_status = 'Open' LIMIT 50;"
-
-        if re.search(r"\bsupport\s+tickets?\s+by\s+priority\b", q) and _has_cols(knowledge_base, "support_tickets", "priority"):
-            return (
-                "SELECT priority, COUNT(*) AS total_tickets "
-                "FROM support_tickets GROUP BY priority "
-                "ORDER BY total_tickets DESC LIMIT 50;"
-            )
-
-        if re.search(r"\bsupport\s+tickets?\s+by\s+status\b", q) and _has_cols(knowledge_base, "support_tickets", "ticket_status"):
-            return (
-                "SELECT ticket_status, COUNT(*) AS total_tickets "
-                "FROM support_tickets GROUP BY ticket_status "
-                "ORDER BY total_tickets DESC LIMIT 50;"
-            )
-
-        if (
-            _has_tables(knowledge_base, "customers")
-            and _has_cols(knowledge_base, "support_tickets", "customer_id")
-            and _has_cols(knowledge_base, "customers", "customer_id")
-            and customer_name_col
-            and re.search(r"\bcustomers?\s+who\s+raised\s+support\s+tickets?\b", q)
-        ):
-            return (
-                f"SELECT DISTINCT c.customer_id, c.{customer_name_col} AS customer_name "
-                "FROM customers c "
-                "JOIN support_tickets st ON c.customer_id = st.customer_id "
-                "LIMIT 50;"
-            )
-
+def _pick_status_column(table_data: dict[str, Any]) -> dict[str, Any] | None:
+    for column in _table_columns(table_data):
+        if str(column.get("semantic_type", "")).lower() == "status":
+            return column
+    for column in _table_columns(table_data):
+        name = _normalize_identifier(column.get("name", ""))
+        if any(token in name for token in ("status", "state", "stage")):
+            return column
     return None
 
 
-def _get_columns(table_name: str, knowledge_base: dict) -> list[str]:
-    table = knowledge_base.get(table_name, {})
-    return [col["name"] for col in table.get("columns", [])]
+def _status_value_for_question(question: str, column: dict[str, Any]) -> str | None:
+    normalized_question = _normalize(question)
+    sample_values = [str(value) for value in (column.get("sample_values") or []) if value is not None]
+    sample_set = set(sample_values)
 
-
-def _col_exists(table_name: str, col_name: str, knowledge_base: dict) -> bool:
-    return col_name in _get_columns(table_name, knowledge_base)
-
-
-def _get_glossary_column_mapping(business_term: str) -> tuple[str, str] | None:
-    """
-    Look up a business term in the glossary and return (table, column) mapping.
-    
-    Args:
-        business_term: The business term to look up (e.g., "sales", "revenue")
-    
-    Returns:
-        Tuple of (table_name, column_name) if found, None otherwise
-    """
-    try:
-        glossary = load_business_glossary("semantic/business_glossary.json")
-        
-        if not glossary:
-            return None
-        
-        # Search for the term in the glossary
-        term_lower = business_term.lower()
-        
-        # Direct match
-        if term_lower in glossary:
-            term_data = glossary[term_lower]
-            mapped_columns = term_data.get("mapped_columns", [])
-            if mapped_columns:
-                # Return the highest confidence mapping
-                for mapping in mapped_columns:
-                    if mapping.get("confidence") == "high":
-                        return (mapping.get("table", ""), mapping.get("column", ""))
-                # Fallback to first mapping
-                return (mapped_columns[0].get("table", ""), mapped_columns[0].get("column", ""))
-        
-        # Search in business_terms
-        for term, term_data in glossary.items():
-            for business_term_entry in term_data.get("business_terms", []):
-                if business_term_entry.lower() == term_lower:
-                    mapped_columns = term_data.get("mapped_columns", [])
-                    if mapped_columns:
-                        return (mapped_columns[0].get("table", ""), mapped_columns[0].get("column", ""))
-        
-        return None
-    except Exception:
-        return None
-
-
-def _first_existing_col(table_name: str, candidates: list[str], knowledge_base: dict) -> str | None:
-    for col in candidates:
-        if _col_exists(table_name, col, knowledge_base):
-            return col
+    for trigger, fallbacks in _STATUS_VALUE_FALLBACKS.items():
+        if re.search(r"\b" + re.escape(trigger) + r"\b", normalized_question):
+            for value in fallbacks:
+                if value in sample_set:
+                    return value
+            return fallbacks[0]
     return None
 
 
-def find_table_from_question(user_question: str, knowledge_base: dict) -> str | None:
-    """
-    Find which table the question is about.
-    Tries multi-word aliases first, then single-word, then direct name match.
-    Returns None if no table found in the knowledge base.
-    """
-    q = user_question.lower().strip()
-    kb_tables = set(knowledge_base.keys())
-
-    # Multi-word aliases first (longest first to avoid partial matches).
-    for alias, table in sorted(_TABLE_ALIASES.items(), key=lambda x: -len(x[0])):
-        if " " in alias and alias in q and table in kb_tables:
-            return table
-
-    # Single-word aliases.
-    for word in re.split(r"\W+", q):
-        if word and word in _TABLE_ALIASES:
-            table = _TABLE_ALIASES[word]
-            if table in kb_tables:
-                return table
-
-    # Direct table name in question.
-    for table in kb_tables:
-        if table.lower() in q or table.lower().rstrip("s") in q:
-            return table
-
-    return None
+def _glossary_mapped_columns(
+    table_name: str,
+    glossary_matches: list[tuple[str, dict[str, Any]]],
+) -> list[str]:
+    mapped_columns = []
+    for _, term_data in glossary_matches:
+        for mapping in term_data.get("mapped_columns", []):
+            if mapping.get("table") == table_name and mapping.get("column"):
+                mapped_columns.append(str(mapping["column"]))
+    return mapped_columns
 
 
-def _find_table_by_business_term(user_question: str, knowledge_base: dict) -> tuple[str, str, list[str]] | None:
-    """
-    When no table name is in the question, try to infer table + columns
-    from business terms like 'sales', 'salary', 'paid amount'.
-    Returns (table_name, trigger_term, candidate_columns) or None.
-    
-    First tries the business glossary if available, then falls back to
-    hardcoded mappings.
-    """
-    q = user_question.lower()
-    kb_tables = set(knowledge_base.keys())
+def _pick_measure_column(
+    question: str,
+    table_data: dict[str, Any],
+    glossary_columns: list[str],
+    query_plan: dict | None,
+) -> str | None:
+    columns = _table_columns(table_data)
+    column_lookup = {str(column.get("name", "")): column for column in columns}
 
-    # Exact multi-word phrases are more specific than single glossary tokens.
-    # Example: "paid amount" must map to payments.paid_amount, not the word
-    # "paid" mapping to payment_status.
-    for trigger, default_table, cols in _BUSINESS_TERM_TABLE:
-        if " " in trigger and trigger in q and default_table in kb_tables:
-            return (default_table, trigger, cols)
+    for column_name in glossary_columns:
+        column = column_lookup.get(column_name)
+        if not column:
+            continue
+        semantic_type = str(column.get("semantic_type", "")).lower()
+        if semantic_type in {"money", "quantity", "percentage"}:
+            return column_name
 
-    # Fall back to hardcoded single-word mappings.
-    for trigger, default_table, cols in _BUSINESS_TERM_TABLE:
-        if " " not in trigger and re.search(r"\b" + re.escape(trigger) + r"\b", q) and default_table in kb_tables:
-            return (default_table, trigger, cols)
+    semantic_hints = set((query_plan or {}).get("semantic_hints") or [])
+    preferred_semantics = []
+    if "money" in semantic_hints:
+        preferred_semantics.append("money")
+    if "quantity" in semantic_hints:
+        preferred_semantics.append("quantity")
+    if "percentage" in semantic_hints:
+        preferred_semantics.append("percentage")
+    preferred_semantics.extend(["money", "quantity", "percentage"])
 
-    # Try business glossary next for schema-generated terms.
-    for word in re.split(r"\W+", q):
-        if word:
-            glossary_mapping = _get_glossary_column_mapping(word)
-            if glossary_mapping:
-                table, column = glossary_mapping
-                if table in kb_tables:
-                    return (table, word, [column])
+    for semantic_type in preferred_semantics:
+        for column in columns:
+            if str(column.get("semantic_type", "")).lower() == semantic_type:
+                return str(column.get("name", ""))
+
+    for column in columns:
+        if _column_type_is_numeric(str(column.get("type", ""))):
+            return str(column.get("name", ""))
 
     return None
-
-
-def _is_complex_question(user_question: str) -> bool:
-    return bool(_COMPLEX_RE.search(user_question))
 
 
 def _extract_limit_from_question(user_question: str) -> int:
@@ -569,199 +275,122 @@ def _extract_limit_from_question(user_question: str) -> int:
     return 50
 
 
-def _allow_status_filter(query_plan: dict | None) -> bool:
-    if not query_plan:
+def _is_complex_question(user_question: str, query_plan: dict | None) -> bool:
+    normalized = f" {_normalize(user_question)} "
+    if any(keyword in normalized for keyword in _COMPLEX_KEYWORDS):
         return True
-    return (
-        query_plan.get("intent") == "list"
-        and not query_plan.get("metric")
-        and not query_plan.get("dimension")
-        and not query_plan.get("date_range")
-    )
-
-
-def _allow_show_all_fallback(query_plan: dict | None) -> bool:
     if not query_plan:
+        return False
+    if query_plan.get("intent") in {"top_n", "trend", "comparison"}:
         return True
-    return (
-        query_plan.get("intent") == "list"
-        and not query_plan.get("metric")
-        and not query_plan.get("dimension")
-        and not query_plan.get("filters")
-        and not query_plan.get("date_range")
-    )
+    if query_plan.get("dimension") and query_plan.get("intent") not in {"list", "count"}:
+        return True
+    if len(query_plan.get("grouping") or []) > 0:
+        return True
+    return False
 
 
-# ── Query classifiers ─────────────────────────────────────────────────────────
-
-def _try_count(q: str, table: str, knowledge_base: dict) -> str | None:
-    if re.search(r"\b(count|how\s+many|total\s+number|number\s+of)\b", q, re.IGNORECASE):
-        alias = f"total_{table}"
-        return f"SELECT COUNT(*) AS {alias} FROM {table};"
-    return None
+def _try_count(table_name: str) -> str:
+    alias = f"total_{_normalize_identifier(table_name) or 'records'}"
+    return f"SELECT COUNT(*) AS {alias} FROM {table_name};"
 
 
-def _try_latest(q: str, table: str, knowledge_base: dict) -> str | None:
-    if not re.search(r"\b(latest|recent|newest|last|most\s+recent)\b", q, re.IGNORECASE):
+def _try_latest(table_name: str, table_data: dict[str, Any], question: str) -> str | None:
+    date_column = _pick_date_column(table_data)
+    if not date_column:
         return None
-    date_col = _first_existing_col(table, _DATE_COLUMNS, knowledge_base)
-    if not date_col:
+    limit = _extract_limit_from_question(question)
+    return f"SELECT * FROM {table_name} ORDER BY {date_column} DESC LIMIT {limit};"
+
+
+def _try_status_filter(table_name: str, table_data: dict[str, Any], question: str) -> str | None:
+    column = _pick_status_column(table_data)
+    if not column:
         return None
-    limit = _extract_limit_from_question(q)
-    return f"SELECT * FROM {table} ORDER BY {date_col} DESC LIMIT {limit};"
-
-
-def _try_status_filter(q: str, table: str, knowledge_base: dict) -> str | None:
-    table_cols = set(_get_columns(table, knowledge_base))
-    for trigger, col, value in _STATUS_FILTERS:
-        # Use whole-word matching so "paid" doesn't match "prepaid"
-        if re.search(r"\b" + re.escape(trigger) + r"\b", q, re.IGNORECASE):
-            if col in table_cols:
-                return f"SELECT * FROM {table} WHERE {col} = '{value}' LIMIT 50;"
-    return None
-
-
-def _try_total_aggregation(q: str, table: str, knowledge_base: dict, candidate_cols: list[str] | None = None, business_term: str | None = None) -> str | None:
-    if not re.search(r"\b(total|sum)\b", q, re.IGNORECASE):
+    value = _status_value_for_question(question, column)
+    if not value:
         return None
+    return f"SELECT * FROM {table_name} WHERE {column.get('name')} = '{value}' LIMIT 50;"
 
-    # Use provided candidate columns (from business-term lookup) or scan by keyword.
-    col = None
-    col_alias = None
 
-    if candidate_cols:
-        col = _first_existing_col(table, candidate_cols, knowledge_base)
-        if col:
-            # Use the business term for the alias (e.g. "sales" → total_sales),
-            # falling back to the column name if no term was provided.
-            term_for_alias = (business_term or col).replace(" ", "_")
-            col_alias = f"total_{term_for_alias}"
+def _try_total_or_average(
+    table_name: str,
+    table_data: dict[str, Any],
+    question: str,
+    glossary_columns: list[str],
+    query_plan: dict | None,
+) -> str | None:
+    normalized_question = _normalize(question)
+    if re.search(r"\b(total|sum)\b", normalized_question):
+        func = "SUM"
+        alias_prefix = "total"
+    elif re.search(r"\b(average|avg|mean)\b", normalized_question):
+        func = "AVG"
+        alias_prefix = "average"
     else:
-        for term, candidates in _AMOUNT_COLUMNS.items():
-            if re.search(r"\b" + re.escape(term) + r"\b", q, re.IGNORECASE):
-                col = _first_existing_col(table, candidates, knowledge_base)
-                if col:
-                    col_alias = f"total_{term.replace(' ', '_')}"
-                    break
-
-    if not col:
-        return None
-    return f"SELECT SUM({col}) AS {col_alias} FROM {table};"
-
-
-def _try_average_aggregation(q: str, table: str, knowledge_base: dict, candidate_cols: list[str] | None = None, business_term: str | None = None) -> str | None:
-    if not re.search(r"\b(average|avg|mean)\b", q, re.IGNORECASE):
         return None
 
-    col = None
-    col_alias = None
-
-    if candidate_cols:
-        col = _first_existing_col(table, candidate_cols, knowledge_base)
-        if col:
-            term_for_alias = (business_term or col).replace(" ", "_")
-            col_alias = f"average_{term_for_alias}"
-    else:
-        for term, candidates in _AMOUNT_COLUMNS.items():
-            if re.search(r"\b" + re.escape(term) + r"\b", q, re.IGNORECASE):
-                col = _first_existing_col(table, candidates, knowledge_base)
-                if col:
-                    col_alias = f"average_{term.replace(' ', '_')}"
-                    break
-
-    if not col:
+    measure_column = _pick_measure_column(question, table_data, glossary_columns, query_plan)
+    if not measure_column:
         return None
-    return f"SELECT AVG({col}) AS {col_alias} FROM {table};"
+
+    alias = f"{alias_prefix}_{_normalize_identifier(measure_column)}"
+    return f"SELECT {func}({measure_column}) AS {alias} FROM {table_name};"
 
 
-def _try_show_all(q: str, table: str, knowledge_base: dict) -> str | None:
-    # Do NOT fire if a more specific intent is present.
-    if _NOT_SHOW_ALL.search(q):
-        return None
-    # Fire on explicit "show/list/get all" OR just mentioning the table with no other intent.
-    if re.search(r"\b(show|list|display|get|fetch|view|see|give)\b", q, re.IGNORECASE):
-        return f"SELECT * FROM {table} LIMIT 50;"
+def _try_show_all(table_name: str, question: str) -> str | None:
+    normalized_question = _normalize(question)
+    if re.search(r"\b(show|list|display|get|fetch|view|see|give)\b", normalized_question):
+        return f"SELECT * FROM {table_name} LIMIT 50;"
     return None
 
-
-# ── Public entry point ────────────────────────────────────────────────────────
 
 def generate_simple_sql(
     user_question: str,
     knowledge_base: dict,
     query_plan: dict | None = None,
+    business_glossary: dict | None = None,
 ) -> str | None:
     """
-    Try to generate SQL for a simple single-table question using Python logic.
+    Try to generate SQL for a simple question using dynamic KB-driven logic.
 
-    Returns ready-to-execute SQL or None (let AI handle complex queries).
-
-    Classifier order (most specific first):
-      1. count
-      2. latest/recent
-      3. status filter
-      4. total aggregation
-      5. average aggregation
-      6. show all   ← only if no more specific intent detected
+    Returns ready-to-execute SQL or None so the AI path can handle richer
+    grouped, trend, comparison, or multi-table questions.
     """
     if not user_question or not knowledge_base:
         return None
 
-    erp_sql = generate_erp_sql(user_question, knowledge_base, query_plan=query_plan)
-    if erp_sql:
-        return erp_sql
-
-    business_sql = _try_pcsoft_business_sql(user_question, knowledge_base)
-    if business_sql:
-        return business_sql
-
-    # Complex questions go to AI.
-    if _is_complex_question(user_question):
+    if _is_complex_question(user_question, query_plan):
         return None
 
-    q = user_question.lower().strip()
-    allow_status_filter = _allow_status_filter(query_plan)
-    allow_show_all = _allow_show_all_fallback(query_plan)
+    glossary_matches = _find_glossary_matches(user_question, business_glossary)
+    table_name = _pick_table(user_question, knowledge_base, query_plan, glossary_matches)
+    if not table_name or table_name not in knowledge_base:
+        return None
 
-    # Try to find the table from the question text.
-    table = find_table_from_question(user_question, knowledge_base)
-    business_candidates: list[str] | None = None
-    business_term: str | None = None
+    table_data = knowledge_base[table_name]
+    glossary_columns = _glossary_mapped_columns(table_name, glossary_matches)
+    normalized_question = _normalize(user_question)
+    intent = (query_plan or {}).get("intent")
 
-    # If no table found, try business-term mapping.
-    if not table:
-        result = _find_table_by_business_term(user_question, knowledge_base)
-        if result:
-            table, business_term, business_candidates = result
-        else:
-            return None   # cannot identify table → AI handles it
+    if intent == "count" or re.search(r"\b(count|how many|number of)\b", normalized_question):
+        return _try_count(table_name)
 
-    # Run classifiers in order (most specific first).
-    # When the table was found via a business term that implies aggregation
-    # (e.g. "paid amount", "total sales"), run aggregation classifiers BEFORE
-    # the status filter so "Show total paid amount" → SUM, not WHERE status='Paid'.
-    if business_candidates:
-        classifiers = [
-            lambda q, t, kb: _try_count(q, t, kb),
-            lambda q, t, kb: _try_latest(q, t, kb),
-            lambda q, t, kb: _try_total_aggregation(q, t, kb, business_candidates, business_term),
-            lambda q, t, kb: _try_average_aggregation(q, t, kb, business_candidates, business_term),
-            lambda q, t, kb: _try_status_filter(q, t, kb) if allow_status_filter else None,
-            lambda q, t, kb: _try_show_all(q, t, kb) if allow_show_all else None,
-        ]
-    else:
-        classifiers = [
-            lambda q, t, kb: _try_count(q, t, kb),
-            lambda q, t, kb: _try_latest(q, t, kb),
-            lambda q, t, kb: _try_status_filter(q, t, kb) if allow_status_filter else None,
-            lambda q, t, kb: _try_total_aggregation(q, t, kb, None, None),
-            lambda q, t, kb: _try_average_aggregation(q, t, kb, None, None),
-            lambda q, t, kb: _try_show_all(q, t, kb) if allow_show_all else None,
-        ]
+    if re.search(r"\b(latest|recent|newest|last|most recent)\b", normalized_question):
+        latest_sql = _try_latest(table_name, table_data, user_question)
+        if latest_sql:
+            return latest_sql
 
-    for classifier in classifiers:
-        result = classifier(q, table, knowledge_base)
-        if result:
-            return result
+    if any(re.search(r"\b" + re.escape(trigger) + r"\b", normalized_question) for trigger in _STATUS_VALUE_FALLBACKS):
+        status_sql = _try_status_filter(table_name, table_data, user_question)
+        if status_sql:
+            return status_sql
 
-    return None
+    aggregate_sql = _try_total_or_average(table_name, table_data, user_question, glossary_columns, query_plan)
+    if aggregate_sql:
+        return aggregate_sql
+
+    if intent in {"pending_outstanding", "low_stock"}:
+        return None
+
+    return _try_show_all(table_name, user_question)
