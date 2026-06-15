@@ -258,6 +258,7 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
             re.IGNORECASE,
         )
         referenced_tables = []
+        saw_from_or_join = bool(table_refs)
         for ref, alias in table_refs:
             # Skip subquery aliases, CTE names, and common SQL keywords.
             skip = reserved_alias_words
@@ -274,6 +275,9 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
             alias_to_table[canonical_table] = canonical_table
             if alias and alias.lower() not in skip:
                 alias_to_table[alias] = canonical_table
+
+        if saw_from_or_join and not referenced_tables:
+            return False, "SQL is missing a valid table name after FROM or JOIN."
 
         if re.search(r"\bSELECT\s+(?:\w+\.)?\*", stripped, re.IGNORECASE):
             for table_name in referenced_tables:

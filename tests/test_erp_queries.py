@@ -1,3 +1,4 @@
+import pytest
 from datetime import date
 
 from core.app_service import AppService
@@ -142,20 +143,67 @@ def _service():
     return service
 
 
-def test_erp_total_sales_this_month():
+def _current_month_bounds() -> tuple[str, str]:
+    start_date = date.today().replace(day=1)
+    if start_date.month == 12:
+        end_date = start_date.replace(year=start_date.year + 1, month=1)
+    else:
+        end_date = start_date.replace(month=start_date.month + 1)
+    return start_date.isoformat(), end_date.isoformat()
+
+
+def _stub_ai(monkeypatch, sql: str, retry_sql: str | None = None, capture: dict | None = None):
+    def fake_generate_sql(user_question, knowledge_base, backend=None, query_plan=None, selected_tables=None):
+        if capture is not None:
+            capture["user_question"] = user_question
+            capture["query_plan"] = query_plan
+            capture["selected_tables"] = selected_tables
+        return sql
+
+    def fake_generate_sql_with_retry(
+        user_question,
+        knowledge_base,
+        backend,
+        first_attempt_sql,
+        validation_reason,
+        query_plan=None,
+        selected_tables=None,
+    ):
+        if capture is not None:
+            capture["retry_reason"] = validation_reason
+        return retry_sql or sql
+
+    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
+    monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_generate_sql_with_retry)
+
+
+def test_erp_total_sales_this_month(monkeypatch):
     service = _service()
+    start_date, end_date = _current_month_bounds()
+    _stub_ai(
+        monkeypatch,
+        "SELECT SUM(final_amount) AS total_sales FROM sales_invoices "
+        f"WHERE invoice_date >= '{start_date}' "
+        f"AND invoice_date < '{end_date}';"
+    )
     success, message, sql, error = service.process_question("show total sales this month", ai_backend="local")
 
     assert success is True
     assert "SELECT *" not in sql.upper()
     assert "SUM(final_amount) AS total_sales" in sql
     assert "FROM sales_invoices" in sql
-    assert f"invoice_date >= '{date.today().replace(day=1).isoformat()}'" in sql
+    assert f"invoice_date >= '{start_date}'" in sql
     assert service.get_last_query_context()["selected_table_names"] != list(_erp_knowledge_base().keys())
 
 
-def test_erp_purchase_by_vendor():
+def test_erp_purchase_by_vendor(monkeypatch):
     service = _service()
+    _stub_ai(
+        monkeypatch,
+        "SELECT v.vendor_name AS vendor_name, SUM(p.total_amount) AS total_purchase "
+        "FROM purchase_orders p JOIN vendors v ON p.vendor_id = v.vendor_id "
+        "GROUP BY v.vendor_name ORDER BY total_purchase DESC LIMIT 50;"
+    )
     success, message, sql, error = service.process_question("show purchase by vendor", ai_backend="local")
 
     assert success is True
@@ -165,8 +213,14 @@ def test_erp_purchase_by_vendor():
     assert "GROUP BY v.vendor_name" in sql
 
 
-def test_erp_purchase_amount_by_supplier_is_not_generic():
+def test_erp_purchase_amount_by_supplier_is_not_generic(monkeypatch):
     service = _service()
+    _stub_ai(
+        monkeypatch,
+        "SELECT v.vendor_name AS vendor_name, SUM(p.total_amount) AS total_purchase "
+        "FROM purchase_orders p JOIN vendors v ON p.vendor_id = v.vendor_id "
+        "GROUP BY v.vendor_name ORDER BY total_purchase DESC LIMIT 50;"
+    )
     success, message, sql, error = service.process_question("show purchase amount by supplier", ai_backend="local")
 
     assert success is True
@@ -175,8 +229,14 @@ def test_erp_purchase_amount_by_supplier_is_not_generic():
     assert "JOIN vendors v" in sql
 
 
-def test_erp_current_stock_by_warehouse():
+def test_erp_current_stock_by_warehouse(monkeypatch):
     service = _service()
+    _stub_ai(
+        monkeypatch,
+        "SELECT w.warehouse_name AS warehouse_name, SUM(s.stock_qty) AS current_stock "
+        "FROM inventory_balance s JOIN warehouses w ON s.warehouse_id = w.warehouse_id "
+        "GROUP BY w.warehouse_name ORDER BY w.warehouse_name LIMIT 50;"
+    )
     success, message, sql, error = service.process_question("show current stock by warehouse", ai_backend="local")
 
     assert success is True
@@ -186,8 +246,14 @@ def test_erp_current_stock_by_warehouse():
     assert "SUM(s.stock_qty) AS current_stock" in sql
 
 
-def test_erp_low_stock_items():
+def test_erp_low_stock_items(monkeypatch):
     service = _service()
+    _stub_ai(
+        monkeypatch,
+        "SELECT i.item_name AS item_name, s.stock_qty AS current_stock, s.reorder_level AS reorder_level "
+        "FROM inventory_balance s JOIN items i ON s.item_id = i.item_id "
+        "WHERE s.stock_qty <= s.reorder_level ORDER BY s.stock_qty ASC LIMIT 50;"
+    )
     success, message, sql, error = service.process_question("show low stock items", ai_backend="local")
 
     assert success is True
@@ -196,8 +262,13 @@ def test_erp_low_stock_items():
     assert "WHERE s.stock_qty <= s.reorder_level" in sql
 
 
-def test_erp_unpaid_invoices():
+def test_erp_unpaid_invoices(monkeypatch):
     service = _service()
+    _stub_ai(
+        monkeypatch,
+        "SELECT invoice_id, invoice_date, status, outstanding_amount "
+        "FROM sales_invoices WHERE status IN ('Pending', 'Unpaid', 'Outstanding') LIMIT 50;"
+    )
     success, message, sql, error = service.process_question("show unpaid invoices", ai_backend="local")
 
     assert success is True
@@ -207,8 +278,14 @@ def test_erp_unpaid_invoices():
     assert "'Unpaid'" in sql
 
 
-def test_erp_customer_outstanding_balance():
+def test_erp_customer_outstanding_balance(monkeypatch):
     service = _service()
+    _stub_ai(
+        monkeypatch,
+        "SELECT c.customer_name AS customer_name, SUM(f.outstanding_amount) AS outstanding_balance "
+        "FROM sales_invoices f JOIN customers c ON f.customer_id = c.customer_id "
+        "GROUP BY c.customer_name ORDER BY outstanding_balance DESC LIMIT 50;"
+    )
     success, message, sql, error = service.process_question("show customer outstanding balance", ai_backend="local")
 
     assert success is True
@@ -217,8 +294,15 @@ def test_erp_customer_outstanding_balance():
     assert "SUM(f.outstanding_amount) AS outstanding_balance" in sql
 
 
-def test_erp_vendor_pending_payments():
+def test_erp_vendor_pending_payments(monkeypatch):
     service = _service()
+    _stub_ai(
+        monkeypatch,
+        "SELECT v.vendor_name AS vendor_name, SUM(p.amount_due) AS pending_amount "
+        "FROM vendor_payments p JOIN vendors v ON p.vendor_id = v.vendor_id "
+        "WHERE p.payment_status IN ('Pending', 'Unpaid', 'Outstanding') "
+        "GROUP BY v.vendor_name ORDER BY pending_amount DESC LIMIT 50;"
+    )
     success, message, sql, error = service.process_question("show vendor pending payments", ai_backend="local")
 
     assert success is True
@@ -227,8 +311,13 @@ def test_erp_vendor_pending_payments():
     assert "SUM(p.amount_due) AS pending_amount" in sql
 
 
-def test_erp_salary_by_department():
+def test_erp_salary_by_department(monkeypatch):
     service = _service()
+    _stub_ai(
+        monkeypatch,
+        "SELECT department, SUM(salary) AS total_salary "
+        "FROM employees GROUP BY department ORDER BY total_salary DESC LIMIT 50;"
+    )
     success, message, sql, error = service.process_question("show salary by department", ai_backend="local")
 
     assert success is True
@@ -237,8 +326,13 @@ def test_erp_salary_by_department():
     assert "SUM(salary) AS total_salary" in sql
 
 
-def test_erp_tax_collected_by_month():
+def test_erp_tax_collected_by_month(monkeypatch):
     service = _service()
+    _stub_ai(
+        monkeypatch,
+        "SELECT DATE_FORMAT(invoice_date, '%Y-%m') AS month, SUM(gst_amount) AS total_tax "
+        "FROM sales_invoices GROUP BY DATE_FORMAT(invoice_date, '%Y-%m') ORDER BY month LIMIT 50;"
+    )
     success, message, sql, error = service.process_question("show tax collected by month", ai_backend="local")
 
     assert success is True
@@ -247,8 +341,14 @@ def test_erp_tax_collected_by_month():
     assert "SUM(gst_amount) AS total_tax" in sql
 
 
-def test_erp_production_by_bom():
+def test_erp_production_by_bom(monkeypatch):
     service = _service()
+    _stub_ai(
+        monkeypatch,
+        "SELECT b.bom_name AS bom_name, SUM(p.produced_qty) AS produced_quantity "
+        "FROM production_orders p JOIN boms b ON p.bom_id = b.bom_id "
+        "GROUP BY b.bom_name ORDER BY produced_quantity DESC LIMIT 50;"
+    )
     success, message, sql, error = service.process_question("show production by bom", ai_backend="local")
 
     assert success is True
@@ -276,3 +376,40 @@ def test_generic_select_fallback_marks_low_generation_confidence():
     query_context = service.get_last_query_context()
     assert query_context["generation_confidence"] <= 0.35
     assert any("business-specific SQL query" in warning for warning in query_context["warnings"])
+
+
+def test_business_question_passes_plan_and_selected_tables_to_ai(monkeypatch):
+    service = _service()
+    captured: dict = {}
+    _stub_ai(
+        monkeypatch,
+        "SELECT DATE_FORMAT(invoice_date, '%Y-%m') AS month, SUM(gst_amount) AS total_tax "
+        "FROM sales_invoices GROUP BY DATE_FORMAT(invoice_date, '%Y-%m') ORDER BY month LIMIT 50;",
+        capture=captured,
+    )
+
+    success, message, sql, error = service.process_question("show tax collected by month", ai_backend="local")
+
+    assert success is True
+    assert captured["query_plan"]["metric"] == "tax"
+    assert captured["query_plan"]["intent"] == "trend"
+    assert captured["selected_tables"]
+    assert any(entry["table"] == "sales_invoices" for entry in captured["selected_tables"])
+
+
+def test_business_question_uses_rule_based_fallback_when_ai_is_too_generic(monkeypatch):
+    service = _service()
+    captured: dict = {}
+    _stub_ai(
+        monkeypatch,
+        "SELECT * FROM sales_invoices LIMIT 50;",
+        retry_sql="SELECT * FROM sales_invoices LIMIT 50;",
+        capture=captured,
+    )
+
+    success, message, sql, error = service.process_question("show total sales this month", ai_backend="local")
+
+    assert success is True
+    assert message == "SQL generated successfully (rule-based fallback)"
+    assert "SUM(final_amount) AS total_sales" in sql
+    assert "retry_reason" in captured

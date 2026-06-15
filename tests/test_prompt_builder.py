@@ -140,5 +140,7 @@ def test_prompt_includes_selected_columns_and_plan_execution_rules():
     system_message = messages[0]["content"]
 
     assert "Treat the structured query plan as authoritative" in system_message
+    assert "AI target for this question:" in system_message
+    assert "Use the metric 'sales' as the main business measure." in system_message
     assert "selected columns: order_date[date], status[status]" in system_message
     assert "Detected ERP relationships to prefer for JOINs" in system_message

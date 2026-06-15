@@ -1,5 +1,4 @@
 """Core flow tests for ask-question and execute-last-SQL behavior."""
-
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 
 from core.app_service import AppService
@@ -36,14 +35,22 @@ def _service_with_orders():
     return service
 
 
-def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql():
+def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypatch):
     service = _service_with_orders()
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda user_question, knowledge_base, backend=None, query_plan=None, selected_tables=None: "SELECT SUM(final_amount) AS total_sales FROM orders;",
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda user_question, knowledge_base, backend, first_attempt_sql, validation_reason, query_plan=None, selected_tables=None: "SELECT SUM(final_amount) AS total_sales FROM orders;",
+    )
 
     success, message, sql, error = service.process_question("show total sales", ai_backend="local")
 
     assert success is True
     assert error is None
-    assert sql == "SELECT SUM(final_amount) AS total_sales FROM orders;"
+    assert sql == "SELECT SUM(final_amount) AS total_sales FROM orders LIMIT 50;"
     assert service.get_last_sql() == sql
 
     exec_success, exec_message, rows = service.execute_sql(service.get_last_sql(), revalidate=True)
