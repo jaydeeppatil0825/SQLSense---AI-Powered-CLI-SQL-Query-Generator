@@ -569,6 +569,29 @@ def _extract_limit_from_question(user_question: str) -> int:
     return 50
 
 
+def _allow_status_filter(query_plan: dict | None) -> bool:
+    if not query_plan:
+        return True
+    return (
+        query_plan.get("intent") == "list"
+        and not query_plan.get("metric")
+        and not query_plan.get("dimension")
+        and not query_plan.get("date_range")
+    )
+
+
+def _allow_show_all_fallback(query_plan: dict | None) -> bool:
+    if not query_plan:
+        return True
+    return (
+        query_plan.get("intent") == "list"
+        and not query_plan.get("metric")
+        and not query_plan.get("dimension")
+        and not query_plan.get("filters")
+        and not query_plan.get("date_range")
+    )
+
+
 # ── Query classifiers ─────────────────────────────────────────────────────────
 
 def _try_count(q: str, table: str, knowledge_base: dict) -> str | None:
@@ -697,6 +720,8 @@ def generate_simple_sql(
         return None
 
     q = user_question.lower().strip()
+    allow_status_filter = _allow_status_filter(query_plan)
+    allow_show_all = _allow_show_all_fallback(query_plan)
 
     # Try to find the table from the question text.
     table = find_table_from_question(user_question, knowledge_base)
@@ -721,17 +746,17 @@ def generate_simple_sql(
             lambda q, t, kb: _try_latest(q, t, kb),
             lambda q, t, kb: _try_total_aggregation(q, t, kb, business_candidates, business_term),
             lambda q, t, kb: _try_average_aggregation(q, t, kb, business_candidates, business_term),
-            lambda q, t, kb: _try_status_filter(q, t, kb),
-            lambda q, t, kb: _try_show_all(q, t, kb),
+            lambda q, t, kb: _try_status_filter(q, t, kb) if allow_status_filter else None,
+            lambda q, t, kb: _try_show_all(q, t, kb) if allow_show_all else None,
         ]
     else:
         classifiers = [
             lambda q, t, kb: _try_count(q, t, kb),
             lambda q, t, kb: _try_latest(q, t, kb),
-            lambda q, t, kb: _try_status_filter(q, t, kb),
+            lambda q, t, kb: _try_status_filter(q, t, kb) if allow_status_filter else None,
             lambda q, t, kb: _try_total_aggregation(q, t, kb, None, None),
             lambda q, t, kb: _try_average_aggregation(q, t, kb, None, None),
-            lambda q, t, kb: _try_show_all(q, t, kb),
+            lambda q, t, kb: _try_show_all(q, t, kb) if allow_show_all else None,
         ]
 
     for classifier in classifiers:

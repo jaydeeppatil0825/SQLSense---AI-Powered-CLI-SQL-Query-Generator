@@ -172,6 +172,22 @@ Safety rules (these are enforced by a validator after you respond):
 """.strip()
 
 
+_AI_PLAN_RULES = """
+Structured-plan execution rules:
+  - Treat the structured query plan as authoritative, not optional.
+  - Use the selected tables first. Do NOT ignore them and do NOT expand to unrelated tables unless a listed relationship requires it.
+  - Prefer the selected columns when choosing measures, dimensions, date filters, and status filters.
+  - For intent=total use SUM() on the best money or quantity column for the metric.
+  - For intent=count use COUNT(*), COUNT(column), or COUNT(DISTINCT column) as appropriate.
+  - For intent=top_n use GROUP BY + ORDER BY DESC + LIMIT.
+  - For intent=trend or grouping by month use DATE_FORMAT(date_column, '%Y-%m') and aggregate.
+  - For pending, unpaid, outstanding, overdue, or due questions use status, due, payment, or balance columns. Do NOT answer them with a plain table dump.
+  - For customer, vendor, warehouse, department, or month questions, include the right JOIN or GROUP BY so the SQL matches the business dimension.
+  - Do NOT use SELECT * for business questions involving totals, counts, balances, tax, stock, sales, purchase, salary, pending, outstanding, or grouped analysis.
+  - Only use SELECT * when the user clearly asks to list raw records from a table.
+""".strip()
+
+
 # ── LIMIT extraction ──────────────────────────────────────────────────────────
 
 def _extract_limit(user_question: str) -> int | None:
@@ -385,9 +401,130 @@ def _build_plan_section(query_plan: dict | None, selected_tables: list[dict] | N
             confidence = table_entry.get("confidence", "unknown")
             reason = table_entry.get("reason", "")
             lines.append(f"  - {table_name} (confidence={confidence}): {reason}")
+            selected_columns = table_entry.get("selected_columns", [])
+            if selected_columns:
+                column_parts = []
+                for column_entry in selected_columns[:6]:
+                    column_parts.append(
+                        f"{column_entry.get('column')}[{column_entry.get('semantic_type', 'general')}]"
+                    )
+                lines.append(f"    selected columns: {', '.join(column_parts)}")
 
     lines.append("")
     return lines
+
+
+def _build_ai_target_section(query_plan: dict | None, selected_tables: list[dict] | None) -> list[str]:
+    if not query_plan:
+        return []
+
+    lines = ["AI target for this question:"]
+    intent = query_plan.get("intent")
+    metric = query_plan.get("metric")
+    dimension = query_plan.get("dimension")
+    filters = query_plan.get("filters") or []
+    date_range = query_plan.get("date_range") or {}
+    grouping = query_plan.get("grouping") or []
+    sorting = query_plan.get("sorting") or {}
+
+    if metric:
+        lines.append(f"  - Use the metric '{metric}' as the main business measure.")
+    if intent == "total":
+        lines.append("  - Use SUM() for the final measure.")
+    elif intent == "count":
+        lines.append("  - Use COUNT() for the final measure.")
+    elif intent == "average":
+        lines.append("  - Use AVG() for the final measure.")
+    elif intent == "top_n":
+        lines.append("  - Rank results with ORDER BY DESC and apply LIMIT.")
+    elif intent == "trend":
+        lines.append("  - Aggregate over time and include GROUP BY for the time bucket.")
+    elif intent == "pending_outstanding":
+        lines.append("  - Apply unpaid, pending, due, or outstanding business filters.")
+    elif intent == "low_stock":
+        lines.append("  - Filter rows by a low-stock threshold before ordering.")
+
+    if dimension:
+        lines.append(f"  - Break down results by '{dimension}'.")
+    if grouping:
+        lines.append(f"  - Required grouping: {grouping}.")
+    if sorting:
+        lines.append(f"  - Preferred sorting: {sorting}.")
+    if filters:
+        lines.append(f"  - Required filters: {filters}.")
+    if date_range:
+        lines.append(f"  - Required date range: {date_range}.")
+
+    if selected_tables:
+        table_names = [table_entry.get("table", "") for table_entry in selected_tables if table_entry.get("table")]
+        if table_names:
+            lines.append(f"  - Prefer these tables: {', '.join(table_names)}.")
+        ranked_columns = []
+        for table_entry in selected_tables:
+            for column_entry in table_entry.get("selected_columns", [])[:3]:
+                ranked_columns.append(
+                    f"{table_entry.get('table')}.{column_entry.get('column')} "
+                    f"[{column_entry.get('semantic_type', 'general')}]"
+                )
+        if ranked_columns:
+            lines.append(f"  - Prefer these columns first: {', '.join(ranked_columns[:8])}.")
+
+    lines.append("  - Do not answer this with a generic SELECT * unless the question is clearly asking for raw records.")
+    lines.append("")
+    return lines
+
+
+def _build_relationship_section(knowledge_base: dict, selected_tables: list[dict] | None) -> list[str]:
+    table_names = {entry.get("table", "") for entry in (selected_tables or []) if entry.get("table")}
+    if not table_names:
+        table_names = set(knowledge_base.keys())
+
+    relationship_lines: list[str] = []
+    seen = set()
+    for table_name in sorted(table_names):
+        for fk in knowledge_base.get(table_name, {}).get("foreign_keys", []):
+            from_table = table_name
+            from_column = fk.get("column")
+            to_table = fk.get("referenced_table")
+            to_column = fk.get("referenced_column")
+            if not from_column or not to_table or not to_column:
+                continue
+            if to_table not in knowledge_base:
+                continue
+            signature = (from_table, from_column, to_table, to_column)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            relationship_lines.append(
+                f"  - {from_table}.{from_column} = {to_table}.{to_column} (confidence=1.0, source=foreign_key)"
+            )
+
+        for relationship in knowledge_base.get(table_name, {}).get("relationships", []):
+            from_table = relationship.get("from_table")
+            to_table = relationship.get("to_table")
+            if not from_table or not to_table:
+                continue
+            if from_table not in table_names and to_table not in table_names:
+                continue
+            signature = (
+                from_table,
+                relationship.get("from_column"),
+                to_table,
+                relationship.get("to_column"),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            relationship_lines.append(
+                f"  - {from_table}.{relationship.get('from_column')} = "
+                f"{to_table}.{relationship.get('to_column')} "
+                f"(confidence={relationship.get('confidence')}, source={relationship.get('source', 'rule')})"
+            )
+
+    if not relationship_lines:
+        return []
+
+    return ["Detected ERP relationships to prefer for JOINs:"] + relationship_lines + [""]
 
 
 # ── Worked examples (injected dynamically based on question topic) ────────────
@@ -541,6 +678,9 @@ def build_sql_prompt(
     system_parts.append(_QUERY_RULES)
     system_parts.append("")
 
+    system_parts.append(_AI_PLAN_RULES)
+    system_parts.append("")
+
     system_parts.append(_PCSOFT_RELATIONSHIP_GUIDANCE)
     system_parts.append("")
 
@@ -554,6 +694,8 @@ def build_sql_prompt(
     system_parts.append("")
 
     system_parts.extend(_build_plan_section(query_plan, selected_tables))
+    system_parts.extend(_build_ai_target_section(query_plan, selected_tables))
+    system_parts.extend(_build_relationship_section(knowledge_base, selected_tables))
 
     # 5b. Generic semantic type guidance (always included, works for any database)
     system_parts.append(

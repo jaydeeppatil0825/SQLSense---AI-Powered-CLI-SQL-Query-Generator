@@ -28,6 +28,7 @@ import re
 from dotenv import load_dotenv
 
 from ai.prompt_builder import build_sql_prompt
+from utils.logger import get_logger
 
 try:
     import requests
@@ -36,6 +37,7 @@ except ImportError:                     # pragma: no cover
 
 
 load_dotenv()
+logger = get_logger()
 
 
 # ── SQL extraction and cleanup ────────────────────────────────────────────────
@@ -436,34 +438,26 @@ def generate_sql_with_retry(
     Raises:
         Same exceptions as generate_sql().
     """
-    # Build a correction prompt that explains the failure.
+    base_messages = build_sql_prompt(
+        user_question,
+        knowledge_base,
+        query_plan=query_plan,
+        selected_tables=selected_tables,
+    )
     correction_system = (
-        "You are a MySQL SQL expert. "
-        "Your previous SQL was rejected. "
-        "Return ONLY a corrected executable MySQL SELECT statement. "
-        "No explanation. No markdown. No preamble. Just SQL."
+        "You are correcting a previously invalid MySQL SELECT statement. "
+        "Follow the structured plan, selected tables, selected columns, glossary, and relationships below exactly. "
+        "Return ONLY one corrected executable SELECT statement. "
+        "No explanation. No markdown. No comments. No extra text.\n\n"
+        f"{base_messages[0]['content']}"
     )
 
     correction_user = (
         f"Original question: {user_question}\n\n"
-        f"Your previous (rejected) SQL:\n{first_attempt_sql}\n\n"
-        f"Rejection reason: {validation_reason}\n\n"
-        "Fix the SQL and return ONLY the corrected SELECT statement. "
-        "Use only tables and columns from the schema below.\n\n"
+        f"Rejected SQL:\n{first_attempt_sql}\n\n"
+        f"Validation failure: {validation_reason}\n\n"
+        "Correct the SQL so it follows the plan, selected tables, trusted joins, and safety rules."
     )
-
-    # Append schema context so the model has column references.
-    from ai.prompt_builder import _build_schema_section  # local import to avoid circular
-    plan_lines = []
-    if query_plan:
-        plan_lines.append(f"Structured plan: {query_plan}")
-    if selected_tables:
-        plan_lines.append(f"Selected tables: {selected_tables}")
-
-    schema_lines = _build_schema_section(knowledge_base)
-    if plan_lines:
-        correction_user += "\n".join(plan_lines) + "\n\n"
-    correction_user += "\n".join(schema_lines)
 
     messages = [
         {"role": "system", "content": correction_system},

@@ -379,6 +379,16 @@ def handle_ask_question(state: SessionState) -> None:
 
     # ── Display the SQL ───────────────────────────────────────────────────
     query_context = state.app_service.get_last_query_context() or {}
+    query_plan = query_context.get("plan") or {}
+
+    if query_plan:
+        print("\n  Query Plan:")
+        print(f"  - intent: {query_plan.get('intent')}")
+        print(f"  - metric: {query_plan.get('metric')}")
+        print(f"  - dimension: {query_plan.get('dimension')}")
+        print(f"  - filters: {query_plan.get('filters')}")
+        print(f"  - date range: {query_plan.get('date_range')}")
+
     selected_tables = query_context.get("selected_tables", [])
     if selected_tables:
         print("\n  Selected Tables:")
@@ -386,9 +396,18 @@ def handle_ask_question(state: SessionState) -> None:
             print(f"  - {table_entry.get('table', '')} (confidence: {table_entry.get('confidence', 'unknown')})")
             if table_entry.get("reason"):
                 print(f"    reason: {table_entry['reason']}")
+            selected_columns = table_entry.get("selected_columns", [])
+            if selected_columns:
+                column_descriptions = [
+                    f"{column_entry.get('column')} [{column_entry.get('semantic_type', 'general')}]"
+                    for column_entry in selected_columns[:6]
+                ]
+                print(f"    selected columns: {', '.join(column_descriptions)}")
 
     if query_context.get("confidence") is not None:
         print(f"\n  Planning Confidence: {query_context['confidence']}")
+    if query_context.get("generation_confidence") is not None:
+        print(f"  Generation Confidence: {query_context['generation_confidence']}")
 
     if query_context.get("warnings"):
         print("\n  Warnings:")

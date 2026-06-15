@@ -246,6 +246,10 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
     if knowledge_base:
         kb_tables = {t.lower(): t for t in knowledge_base.keys()}
         alias_to_table: dict[str, str] = {}
+        reserved_alias_words = {
+            "select", "where", "on", "set", "values", "into", "group", "order",
+            "limit", "having", "left", "right", "inner", "outer", "join",
+        }
         # Extract bare table names after FROM / JOIN keywords.
         # Pattern: FROM/JOIN followed by optional schema prefix then table name.
         table_refs = re.findall(
@@ -256,7 +260,7 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
         referenced_tables = []
         for ref, alias in table_refs:
             # Skip subquery aliases, CTE names, and common SQL keywords.
-            skip = {"select", "where", "on", "set", "values", "into"}
+            skip = reserved_alias_words
             if ref.lower() in skip:
                 continue
             if ref.lower() not in kb_tables:

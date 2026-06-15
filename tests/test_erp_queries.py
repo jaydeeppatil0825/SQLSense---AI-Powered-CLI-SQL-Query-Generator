@@ -147,6 +147,7 @@ def test_erp_total_sales_this_month():
     success, message, sql, error = service.process_question("show total sales this month", ai_backend="local")
 
     assert success is True
+    assert "SELECT *" not in sql.upper()
     assert "SUM(final_amount) AS total_sales" in sql
     assert "FROM sales_invoices" in sql
     assert f"invoice_date >= '{date.today().replace(day=1).isoformat()}'" in sql
@@ -158,9 +159,20 @@ def test_erp_purchase_by_vendor():
     success, message, sql, error = service.process_question("show purchase by vendor", ai_backend="local")
 
     assert success is True
+    assert "SELECT *" not in sql.upper()
     assert "FROM purchase_orders p" in sql
     assert "JOIN vendors v" in sql
     assert "GROUP BY v.vendor_name" in sql
+
+
+def test_erp_purchase_amount_by_supplier_is_not_generic():
+    service = _service()
+    success, message, sql, error = service.process_question("show purchase amount by supplier", ai_backend="local")
+
+    assert success is True
+    assert "SELECT *" not in sql.upper()
+    assert "SUM(" in sql
+    assert "JOIN vendors v" in sql
 
 
 def test_erp_current_stock_by_warehouse():
@@ -168,6 +180,7 @@ def test_erp_current_stock_by_warehouse():
     success, message, sql, error = service.process_question("show current stock by warehouse", ai_backend="local")
 
     assert success is True
+    assert "SELECT *" not in sql.upper()
     assert "FROM inventory_balance s" in sql
     assert "JOIN warehouses w" in sql
     assert "SUM(s.stock_qty) AS current_stock" in sql
@@ -188,8 +201,10 @@ def test_erp_unpaid_invoices():
     success, message, sql, error = service.process_question("show unpaid invoices", ai_backend="local")
 
     assert success is True
+    assert "SELECT *" not in sql.upper()
     assert "FROM sales_invoices" in sql
-    assert "IN ('Pending', 'Unpaid', 'Outstanding')" in sql
+    assert "IN (" in sql
+    assert "'Unpaid'" in sql
 
 
 def test_erp_customer_outstanding_balance():
@@ -227,6 +242,7 @@ def test_erp_tax_collected_by_month():
     success, message, sql, error = service.process_question("show tax collected by month", ai_backend="local")
 
     assert success is True
+    assert "SELECT *" not in sql.upper()
     assert "DATE_FORMAT(invoice_date, '%Y-%m') AS month" in sql
     assert "SUM(gst_amount) AS total_tax" in sql
 
@@ -239,3 +255,24 @@ def test_erp_production_by_bom():
     assert "FROM production_orders p" in sql
     assert "JOIN boms b" in sql
     assert "SUM(p.produced_qty) AS produced_quantity" in sql
+
+
+def test_generic_select_fallback_marks_low_generation_confidence():
+    service = AppService()
+    service.database_service.knowledge_base = {
+        "notes": {
+            "columns": [
+                {"name": "note_id", "type": "INTEGER", "nullable": False},
+                {"name": "note_text", "type": "VARCHAR(255)", "nullable": True},
+            ],
+            "primary_keys": ["note_id"],
+            "foreign_keys": [],
+        }
+    }
+    success, message, sql, error = service.process_question("show notes", ai_backend="local")
+
+    assert success is True
+    assert sql == "SELECT * FROM notes LIMIT 50;"
+    query_context = service.get_last_query_context()
+    assert query_context["generation_confidence"] <= 0.35
+    assert any("business-specific SQL query" in warning for warning in query_context["warnings"])

@@ -5,6 +5,26 @@ from ai.prompt_builder import build_sql_prompt, _get_relevant_glossary_terms
 
 def _knowledge_base():
     return {
+        "customers": {
+            "primary_keys": ["id"],
+            "foreign_keys": [],
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "INTEGER",
+                    "nullable": False,
+                    "semantic_type": "customer",
+                    "sample_values": [1, 2],
+                },
+                {
+                    "name": "customer_name",
+                    "type": "VARCHAR(100)",
+                    "nullable": False,
+                    "semantic_type": "customer",
+                    "sample_values": ["Acme", "Globex"],
+                },
+            ],
+        },
         "orders": {
             "primary_keys": ["id"],
             "foreign_keys": [
@@ -86,3 +106,39 @@ def test_prompt_includes_cli_safety_and_pcsoft_relationship_guidance():
     assert "Do NOT include SQL comments" in system_message
     assert "orders.order_id = payments.order_id" in system_message
     assert "customers.customer_id = support_tickets.customer_id" in system_message
+
+
+def test_prompt_includes_selected_columns_and_plan_execution_rules():
+    selected_tables = [
+        {
+            "table": "orders",
+            "confidence": 0.92,
+            "reason": "matched sales metric",
+            "selected_columns": [
+                {"column": "order_date", "semantic_type": "date"},
+                {"column": "status", "semantic_type": "status"},
+            ],
+        }
+    ]
+    query_plan = {
+        "intent": "trend",
+        "metric": "sales",
+        "dimension": "month",
+        "filters": [],
+        "date_range": None,
+        "grouping": ["month"],
+        "sorting": {"direction": "asc", "by": "date"},
+        "limit": 50,
+    }
+
+    messages = build_sql_prompt(
+        "show monthly sales",
+        _knowledge_base(),
+        query_plan=query_plan,
+        selected_tables=selected_tables,
+    )
+    system_message = messages[0]["content"]
+
+    assert "Treat the structured query plan as authoritative" in system_message
+    assert "selected columns: order_date[date], status[status]" in system_message
+    assert "Detected ERP relationships to prefer for JOINs" in system_message

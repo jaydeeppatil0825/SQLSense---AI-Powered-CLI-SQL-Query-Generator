@@ -191,9 +191,16 @@ def _table_score(plan: dict, table_name: str, table_data: dict, glossary: dict |
             reasons.append(f"matched '{term}' in table metadata")
 
     metric = plan.get("metric")
+    table_name_lower = table_name.lower()
     if metric and table_data.get("module", "").lower().startswith(metric):
         score += 2.0
         reasons.append(f"module matched metric '{metric}'")
+    if metric == "sales" and any(token in table_name_lower for token in ("invoice", "sales_order", "sales")):
+        score += 1.5
+        reasons.append("table name matched a sales fact pattern")
+    if metric == "balance" and any(token in table_name_lower for token in ("invoice", "receivable", "payment")):
+        score += 1.8
+        reasons.append("table name matched a balance or receivable pattern")
 
     dimension = plan.get("dimension")
     for column in table_data.get("columns", []):
@@ -208,6 +215,9 @@ def _table_score(plan: dict, table_name: str, table_data: dict, glossary: dict |
 
         if metric in {"sales", "purchase", "payment", "salary", "tax", "balance"} and semantic_type in {"money", "tax", "account"}:
             score += 0.8
+            if metric == "balance" and any(token in column_name for token in ("outstanding", "due", "balance", "invoice_amount", "net_amount", "payment_amount")):
+                score += 1.0
+                reasons.append(f"matched balance column '{column_name}'")
         if metric in {"stock", "production"} and semantic_type in {"quantity", "item_product", "warehouse"}:
             score += 0.8
         if dimension and semantic_type == dimension:

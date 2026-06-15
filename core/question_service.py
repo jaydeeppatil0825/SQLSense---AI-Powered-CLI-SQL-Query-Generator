@@ -27,6 +27,118 @@ _UNSAFE_NL_RE = re.compile(
     r"\b(delete|drop|update|insert|alter|truncate|create|remove|destroy)\b",
     re.IGNORECASE,
 )
+_GENERIC_SELECT_RE = re.compile(
+    r"^\s*SELECT\s+\*\s+FROM\s+[A-Za-z_][A-Za-z0-9_]*"
+    r"(?:\s+(?:AS\s+)?[A-Za-z_][A-Za-z0-9_]*)?"
+    r"(?:\s+WHERE\b.*)?"
+    r"(?:\s+ORDER\s+BY\b.*)?"
+    r"(?:\s+LIMIT\s+\d+\s*)?;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _looks_like_generic_select(sql: str) -> bool:
+    return bool(_GENERIC_SELECT_RE.match(str(sql or "").strip()))
+
+
+def _estimate_generation_confidence(sql: str, query_context: dict[str, Any]) -> tuple[float, list[str], str]:
+    if _looks_like_generic_select(sql):
+        return (
+            0.35,
+            ["Could not generate a business-specific SQL query. Please review selected table or rebuild knowledge base."],
+            "generic_fallback",
+        )
+
+    sql_upper = sql.upper()
+    confidence = max(float(query_context.get("confidence") or 0.55), 0.55)
+    generation_type = "specific_select"
+    warnings: list[str] = []
+
+    if "SUM(" in sql_upper or "COUNT(" in sql_upper or "AVG(" in sql_upper:
+        confidence = max(confidence, 0.88)
+        generation_type = "aggregated_business_sql"
+    elif "GROUP BY" in sql_upper or "JOIN " in sql_upper:
+        confidence = max(confidence, 0.82)
+        generation_type = "joined_business_sql"
+    elif " WHERE " in sql_upper:
+        confidence = max(confidence, 0.72)
+
+    return round(min(confidence, 0.99), 2), warnings, generation_type
+
+
+def _attach_generation_feedback(query_context: dict[str, Any], sql: str) -> None:
+    generation_confidence, extra_warnings, generation_type = _estimate_generation_confidence(sql, query_context)
+    query_context["generation_confidence"] = generation_confidence
+    query_context["generation_type"] = generation_type
+    warnings = list(query_context.get("warnings") or [])
+    for warning in extra_warnings:
+        if warning not in warnings:
+            warnings.append(warning)
+    query_context["warnings"] = warnings
+
+
+def _is_business_question(query_context: dict[str, Any]) -> bool:
+    plan = query_context.get("plan") or {}
+    if plan.get("metric") or plan.get("dimension") or plan.get("filters") or plan.get("date_range"):
+        return True
+    if plan.get("intent") in {"total", "average", "top_n", "trend", "comparison", "pending_outstanding", "low_stock"}:
+        return True
+    if len(query_context.get("selected_table_names") or []) > 1:
+        return True
+    return False
+
+
+def _should_prefer_ai(query_context: dict[str, Any]) -> bool:
+    plan = query_context.get("plan") or {}
+    if _is_business_question(query_context):
+        return True
+    if plan.get("intent") == "count":
+        return False
+    if plan.get("intent") == "list" and not plan.get("filters") and not plan.get("grouping"):
+        return False
+    return False
+
+
+def _validate_business_sql_fit(sql: str, query_context: dict[str, Any]) -> tuple[bool, str]:
+    if not _is_business_question(query_context):
+        return True, "Not a business-specific question."
+
+    plan = query_context.get("plan") or {}
+    sql_upper = str(sql or "").upper()
+
+    if _looks_like_generic_select(sql):
+        return False, "Generic SELECT * is not acceptable for this business question."
+
+    intent = plan.get("intent")
+    if intent == "total" and "SUM(" not in sql_upper:
+        return False, "Total questions must use SUM()."
+    if intent == "count" and "COUNT(" not in sql_upper:
+        return False, "Count questions must use COUNT()."
+    if intent == "average" and "AVG(" not in sql_upper:
+        return False, "Average questions must use AVG()."
+    if intent == "top_n" and ("ORDER BY" not in sql_upper or "LIMIT" not in sql_upper):
+        return False, "Top-N questions must include ORDER BY and LIMIT."
+    if intent == "trend":
+        if "GROUP BY" not in sql_upper:
+            return False, "Trend questions must group the results."
+        if plan.get("dimension") == "month" and "DATE_FORMAT(" not in sql_upper:
+            return False, "Month trend questions should group by a month expression."
+    if intent == "pending_outstanding" and "WHERE" not in sql_upper and "HAVING" not in sql_upper:
+        return False, "Pending or outstanding questions must apply business filters."
+    if intent == "low_stock" and "WHERE" not in sql_upper:
+        return False, "Low-stock questions must filter by stock threshold."
+
+    metric = plan.get("metric")
+    if metric in {"sales", "purchase", "tax", "salary", "balance", "payment"}:
+        if not any(token in sql_upper for token in ("SUM(", "AVG(", "COUNT(", "MAX(", "MIN(")):
+            return False, f"{metric} questions should use a business aggregate."
+
+    dimension = plan.get("dimension")
+    if dimension in {"customer", "vendor", "warehouse", "department", "month", "status"}:
+        if "GROUP BY" not in sql_upper and "JOIN " not in sql_upper:
+            return False, f"Questions by {dimension} should group or join by that business dimension."
+
+    return True, "SQL matches the business query plan."
 
 
 class QuestionService:  
@@ -101,8 +213,65 @@ class QuestionService:
         scoped_knowledge_base = query_context.get("selected_knowledge_base", knowledge_base)
         full_knowledge_base = query_context.get("knowledge_base", knowledge_base)
         query_plan = query_context.get("plan")
-        
-        # Try simple SQL generator first
+        prefer_ai = _should_prefer_ai(query_context)
+        ai_failure_reason: str | None = None
+
+        def _validate_candidate_sql(candidate_sql: str, *, source_label: str) -> Tuple[bool, Optional[str], Optional[str]]:
+            _attach_generation_feedback(query_context, candidate_sql)
+            safety_ok, safety_reason = validate_sql(candidate_sql)
+            struct_ok, struct_reason = validate_sql_structure(candidate_sql, knowledge_base)
+            business_ok, business_reason = _validate_business_sql_fit(candidate_sql, query_context)
+
+            if safety_ok and struct_ok and business_ok:
+                logger.info(f"{source_label} SQL attempt passed validation")
+                self.conversation_memory.add_turn(
+                    user_question=question,
+                    is_follow_up=is_follow_up,
+                    rewritten_question=rewritten_question,
+                    generated_sql=candidate_sql,
+                )
+                return True, None, None
+
+            fail_reason = safety_reason if not safety_ok else struct_reason if not struct_ok else business_reason
+            return False, fail_reason, source_label
+
+        if prefer_ai:
+            logger.info("Using AI as the primary SQL generator for this business question")
+            try:
+                raw_sql = generate_sql(
+                    rewritten_question,
+                    scoped_knowledge_base,
+                    backend=ai_backend,
+                    query_plan=query_plan,
+                    selected_tables=query_context.get("selected_tables"),
+                )
+                logger.info(f"SQL generated by AI: {raw_sql[:100]}...")
+                candidate_sql = add_limit_if_missing(raw_sql.strip())
+                ai_ok, ai_reason, _ = _validate_candidate_sql(candidate_sql, source_label="AI")
+                if ai_ok:
+                    return True, "SQL generated successfully (AI)", candidate_sql, None
+
+                logger.warning(f"AI SQL did not meet validation requirements: {ai_reason}. Retrying...")
+                retry_raw = generate_sql_with_retry(
+                    user_question=rewritten_question,
+                    knowledge_base=scoped_knowledge_base,
+                    backend=ai_backend,
+                    first_attempt_sql=candidate_sql,
+                    validation_reason=ai_reason or "AI SQL did not satisfy business validation.",
+                    query_plan=query_plan,
+                    selected_tables=query_context.get("selected_tables"),
+                )
+                retry_sql = add_limit_if_missing(retry_raw.strip())
+                retry_ok, retry_reason, _ = _validate_candidate_sql(retry_sql, source_label="AI retry")
+                if retry_ok:
+                    return True, "SQL generated successfully (AI, corrected)", retry_sql, None
+                ai_failure_reason = retry_reason or ai_reason
+                logger.warning(f"AI retry did not meet validation requirements: {ai_failure_reason}")
+            except Exception as e:
+                ai_failure_reason = str(e)
+                logger.error(f"AI SQL generation failed: {e}")
+
+        # Rule-based fallback remains available for deterministic guardrails and AI recovery.
         simple_sql = generate_simple_sql(
             rewritten_question,
             scoped_knowledge_base,
@@ -114,100 +283,22 @@ class QuestionService:
                 full_knowledge_base,
                 query_plan=query_plan,
             )
-        
+
         if simple_sql:
-            logger.info("SQL generated using simple query generator")
-            is_valid, reason = validate_sql(simple_sql)
-            if not is_valid:
-                logger.error(f"Generated SQL failed safety check: {reason}")
-                return False, f"Generated SQL failed safety check: {reason}", None, None
-            
-            struct_ok, struct_reason = validate_sql_structure(simple_sql, knowledge_base)
-            if not struct_ok:
-                logger.error(f"Generated SQL failed structure check: {struct_reason}")
-                return False, f"Generated SQL failed structure check: {struct_reason}", None, None
-            
-            # Add turn to conversation memory
-            self.conversation_memory.add_turn(
-                user_question=question,
-                is_follow_up=is_follow_up,
-                rewritten_question=rewritten_question,
-                generated_sql=simple_sql,
-            )
-            
-            return True, "SQL generated successfully (simple generator)", simple_sql, None
-        
-        # Use AI SQL generation for complex questions
-        logger.info("Using AI for SQL generation")
-        try:
-            raw_sql = generate_sql(
-                rewritten_question,
-                scoped_knowledge_base,
-                backend=ai_backend,
-                query_plan=query_plan,
-                selected_tables=query_context.get("selected_tables"),
-            )
-            logger.info(f"SQL generated by AI: {raw_sql[:100]}...")
-        except Exception as e:
-            logger.error(f"SQL generation failed: {e}")
-            return False, f"SQL generation failed: {e}", None, None
-        
-        # Add LIMIT if missing
-        candidate_sql = add_limit_if_missing(raw_sql.strip())
-        
-        # Validate safety
-        safety_ok, safety_reason = validate_sql(candidate_sql)
-        # Validate structure
-        struct_ok, struct_reason = validate_sql_structure(candidate_sql, knowledge_base)
-        
-        if safety_ok and struct_ok:
-            logger.info("First SQL attempt passed validation")
-            # Add turn to conversation memory
-            self.conversation_memory.add_turn(
-                user_question=question,
-                is_follow_up=is_follow_up,
-                rewritten_question=rewritten_question,
-                generated_sql=candidate_sql,
-            )
-            return True, "SQL generated successfully (AI)", candidate_sql, None
-        
-        # Retry with correction prompt
-        fail_reason = safety_reason if not safety_ok else struct_reason
-        logger.warning(f"First SQL attempt failed: {fail_reason}. Retrying...")
-        
-        try:
-            retry_raw = generate_sql_with_retry(
-                user_question=rewritten_question,
-                knowledge_base=scoped_knowledge_base,
-                backend=ai_backend,
-                first_attempt_sql=candidate_sql,
-                validation_reason=fail_reason,
-                query_plan=query_plan,
-                selected_tables=query_context.get("selected_tables"),
-            )
-        except Exception as e:
-            logger.error(f"SQL generation failed after retry: {e}")
-            return False, f"SQL generation failed after retry: {e}", None, None
-        
-        retry_sql = add_limit_if_missing(retry_raw.strip())
-        retry_safety_ok, retry_safety_reason = validate_sql(retry_sql)
-        retry_struct_ok, retry_struct_reason = validate_sql_structure(retry_sql, knowledge_base)
-        
-        if retry_safety_ok and retry_struct_ok:
-            logger.info("Retry SQL attempt passed validation")
-            # Add turn to conversation memory
-            self.conversation_memory.add_turn(
-                user_question=question,
-                is_follow_up=is_follow_up,
-                rewritten_question=rewritten_question,
-                generated_sql=retry_sql,
-            )
-            return True, "SQL generated successfully (AI, corrected)", retry_sql, None
-        
-        # Both attempts failed
-        final_reason = retry_safety_reason if not retry_safety_ok else retry_struct_reason
-        logger.error(f"SQL generation failed after retry: {final_reason}")
-        return False, f"SQL generation failed: {final_reason}", None, None
+            logger.info("Using rule-based fallback SQL generator")
+            simple_ok, simple_reason, _ = _validate_candidate_sql(simple_sql, source_label="Rule-based fallback")
+            if simple_ok:
+                message = "SQL generated successfully (rule-based fallback)" if prefer_ai else "SQL generated successfully (simple generator)"
+                return True, message, simple_sql, None
+            logger.error(f"Fallback SQL failed validation: {simple_reason}")
+            return False, f"Generated SQL failed validation: {simple_reason}", None, None
+
+        if ai_failure_reason:
+            logger.error(f"SQL generation failed after AI and fallback checks: {ai_failure_reason}")
+            return False, f"SQL generation failed: {ai_failure_reason}", None, None
+
+        logger.error("Could not generate SQL from AI or fallback logic.")
+        return False, "Could not generate a valid SQL query for this question.", None, None
     
     def validate_sql(self, sql: str, knowledge_base: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
         """
