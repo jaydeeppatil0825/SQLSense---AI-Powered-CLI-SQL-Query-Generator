@@ -43,6 +43,8 @@ class VectorIndexBuilder:
             for relationship in table_data.get("relationships", []):
                 rel_doc = self._create_relationship_document(table_name, relationship)
                 documents.append(rel_doc)
+
+        self._attach_embeddings(documents)
         
         logger.info(f"Built {len(documents)} vector documents from knowledge base")
         return documents
@@ -62,9 +64,22 @@ class VectorIndexBuilder:
         for term, term_data in glossary.items():
             glossary_doc = self._create_glossary_document(term, term_data)
             documents.append(glossary_doc)
+
+        self._attach_embeddings(documents)
         
         logger.info(f"Built {len(documents)} vector documents from glossary")
         return documents
+
+    def _attach_embeddings(self, documents: List[Dict[str, Any]]) -> None:
+        """Embed a batch of vector documents in one pass when possible."""
+        if not documents:
+            return
+
+        texts = [str(document.get("text", "")) for document in documents]
+        embeddings = self.embedding_service.embed_batch(texts)
+        for document, embedding in zip(documents, embeddings):
+            document["embedding"] = embedding
+            document["tokenized_text"] = self.embedding_service.tokenize(document.get("text", ""))
     
     def _create_table_document(self, table_name: str, table_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a vector document for a table."""
@@ -97,9 +112,7 @@ class VectorIndexBuilder:
         document = {
             "text": text,
             "metadata": metadata,
-            "embedding": self.embedding_service.embed(text),
         }
-        document["tokenized_text"] = self.embedding_service.tokenize(text)
         return document
     
     def _create_column_document(self, table_name: str, column: Dict[str, Any]) -> Dict[str, Any]:
@@ -142,9 +155,7 @@ class VectorIndexBuilder:
         document = {
             "text": text,
             "metadata": metadata,
-            "embedding": self.embedding_service.embed(text),
         }
-        document["tokenized_text"] = self.embedding_service.tokenize(text)
         return document
     
     def _create_relationship_document(self, table_name: str, relationship: Dict[str, Any]) -> Dict[str, Any]:
@@ -182,9 +193,7 @@ class VectorIndexBuilder:
         document = {
             "text": text,
             "metadata": metadata,
-            "embedding": self.embedding_service.embed(text),
         }
-        document["tokenized_text"] = self.embedding_service.tokenize(text)
         return document
     
     def _create_glossary_document(self, term: str, term_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -226,7 +235,5 @@ class VectorIndexBuilder:
         document = {
             "text": text,
             "metadata": metadata,
-            "embedding": self.embedding_service.embed(text),
         }
-        document["tokenized_text"] = self.embedding_service.tokenize(text)
         return document

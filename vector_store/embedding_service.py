@@ -1,14 +1,15 @@
 """
 vector_store/embedding_service.py
-===============================
+=================================
 Embedding service for vector retrieval.
 
-Provides text embedding using sentence-transformers or falls back
-to deterministic token and character n-gram hashing when unavailable.
+Supports a real local sentence-transformers backend when available and falls
+back to deterministic token and character n-gram hashing when unavailable.
 """
 
-from typing import List
+from typing import List, Any
 import hashlib
+import os
 import re
 from utils.logger import get_logger
 
@@ -27,27 +28,91 @@ class EmbeddingService:
     def __init__(self):
         self._model = None
         self._use_fallback = True
+        self._backend = (os.getenv("EMBEDDING_BACKEND") or "local").strip().lower() or "local"
+        self._configured_model_name = (
+            os.getenv("EMBEDDING_MODEL") or "sentence-transformers/all-MiniLM-L6-v2"
+        ).strip() or "sentence-transformers/all-MiniLM-L6-v2"
+        self._active_backend = "fallback"
+        self._active_model_name = "deterministic-hash"
+        self._last_init_error = ""
+        self._dimension = 384
         self._init_model()
     
     def _init_model(self):
         """Initialize the embedding model if available."""
+        if self._backend != "local":
+            self._activate_fallback(f"Unsupported embedding backend '{self._backend}'")
+            return
+
         try:
             from sentence_transformers import SentenceTransformer
-            try:
-                # Try to load a lightweight model
-                self._model = SentenceTransformer('all-MiniLM-L6-v2')
-                self._use_fallback = False
-                logger.info("Using sentence-transformers for embeddings")
-            except Exception as e:
-                logger.warning(f"Failed to load sentence-transformers model: {e}, using fallback")
-                self._use_fallback = True
         except ImportError:
-            logger.info("sentence-transformers not available, using fallback embeddings")
-            self._use_fallback = True
+            self._activate_fallback("sentence-transformers not available")
+            return
+
+        try:
+            model_name = self._resolved_model_name()
+            self._model = SentenceTransformer(model_name)
+            self._use_fallback = False
+            self._active_backend = "local"
+            self._active_model_name = self._configured_model_name
+            model_dimension = getattr(self._model, "get_sentence_embedding_dimension", None)
+            if callable(model_dimension):
+                self._dimension = int(model_dimension() or 384)
+            logger.info(
+                f"Using local embedding backend '{self._active_backend}' with model '{self._active_model_name}'"
+            )
+        except Exception as e:
+            self._activate_fallback(f"Failed to load embedding model: {e}")
+
+    def _activate_fallback(self, reason: str) -> None:
+        self._model = None
+        self._use_fallback = True
+        self._active_backend = "fallback"
+        self._active_model_name = "deterministic-hash"
+        self._last_init_error = str(reason or "")
+        logger.info(f"{self._last_init_error}, using fallback embeddings")
+
+    def _resolved_model_name(self) -> str:
+        if self._configured_model_name.startswith("sentence-transformers/"):
+            return self._configured_model_name.split("/", 1)[1]
+        return self._configured_model_name
 
     def is_fallback_mode(self) -> bool:
         """Return True when deterministic fallback embeddings are active."""
         return self._use_fallback or self._model is None
+
+    def get_backend_name(self) -> str:
+        """Return the active embedding backend name."""
+        return self._active_backend
+
+    def get_model_name(self) -> str:
+        """Return the active embedding model name."""
+        return self._active_model_name
+
+    def get_configured_backend(self) -> str:
+        """Return the configured embedding backend name."""
+        return self._backend
+
+    def get_configured_model_name(self) -> str:
+        """Return the configured embedding model name."""
+        return self._configured_model_name
+
+    def get_last_init_error(self) -> str:
+        """Return the latest embedding initialization or fallback reason."""
+        return self._last_init_error
+
+    def get_status(self) -> dict[str, Any]:
+        """Return embedding backend status for CLI/debug reporting."""
+        return {
+            "configured_backend": self.get_configured_backend(),
+            "configured_model": self.get_configured_model_name(),
+            "backend": self.get_backend_name(),
+            "model": self.get_model_name(),
+            "fallback_used": self.is_fallback_mode(),
+            "dimension": self.get_dimension(),
+            "init_error": self.get_last_init_error(),
+        }
 
     def tokenize(self, text: str) -> List[str]:
         """Normalize text into deterministic retrieval tokens."""
@@ -111,14 +176,14 @@ class EmbeddingService:
             List of float values representing the embedding
         """
         if not text:
-            return [0.0] * 384  # Default dimension
+            return [0.0] * self.get_dimension()
         
         text = str(text).strip()
         
         if not self._use_fallback and self._model:
             try:
-                embedding = self._model.encode(text, convert_to_numpy=False)
-                return embedding.tolist()
+                embedding = self._model.encode(text, convert_to_numpy=False, normalize_embeddings=True)
+                return embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
             except Exception as e:
                 logger.warning(f"Model embedding failed: {e}, using fallback")
                 return self._fallback_embed(text)
@@ -132,7 +197,7 @@ class EmbeddingService:
         This keeps retrieval usable when sentence-transformers is not installed
         and avoids Python's process-randomized hash().
         """
-        dimension = 384
+        dimension = self.get_dimension()
         embedding = [0.0] * dimension
 
         for feature in self._fallback_features(text):
@@ -155,8 +220,21 @@ class EmbeddingService:
         Returns:
             List of embedding vectors
         """
+        if not texts:
+            return []
+
+        if not self._use_fallback and self._model:
+            try:
+                embeddings = self._model.encode(texts, convert_to_numpy=False, normalize_embeddings=True)
+                return [
+                    embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
+                    for embedding in embeddings
+                ]
+            except Exception as e:
+                logger.warning(f"Batch model embedding failed: {e}, using fallback")
+
         return [self.embed(text) for text in texts]
     
     def get_dimension(self) -> int:
         """Return the embedding dimension."""
-        return 384 if self._use_fallback else 384  # Both use 384
+        return self._dimension

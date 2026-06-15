@@ -36,6 +36,7 @@ class VectorRetriever:
         self.embedding_service = embedding_service or EmbeddingService()
         self.documents: List[Dict[str, Any]] = []
         self._index_built = False
+        self._last_search_info: Dict[str, Any] = {}
     
     def add_documents(self, documents: List[Dict[str, Any]]) -> None:
         """
@@ -69,6 +70,14 @@ class VectorRetriever:
         """
         if not self._index_built:
             logger.warning("Vector index not built, returning empty results")
+            self._last_search_info = {
+                "query": query,
+                "doc_type": doc_type,
+                "result_count": 0,
+                "backend": self.embedding_service.get_backend_name(),
+                "model": self.embedding_service.get_model_name(),
+                "fallback_used": self.embedding_service.is_fallback_mode(),
+            }
             return []
         
         query_embedding = self.embedding_service.embed(query)
@@ -107,6 +116,16 @@ class VectorRetriever:
                 "text": doc.get("text", ""),
             })
         
+        self._last_search_info = {
+            "query": query,
+            "doc_type": doc_type or "all",
+            "result_count": len(results),
+            "backend": self.embedding_service.get_backend_name(),
+            "model": self.embedding_service.get_model_name(),
+            "fallback_used": use_fallback,
+            "min_score": min_score,
+            "top_k": top_k,
+        }
         logger.info(f"Vector search for '{query}' returned {len(results)} results")
         return results
     
@@ -226,9 +245,49 @@ class VectorRetriever:
                 seen.add(term)
         
         return terms
-    
+
+    def get_relevant_relationships(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """
+        Get relevant relationships for a query.
+        
+        Args:
+            query: Search query
+            top_k: Number of relationships to return
+        
+        Returns:
+            List of relationship metadata dicts sorted by relevance
+        """
+        results = self.search(query, top_k=top_k, doc_type="relationship", min_score=0.2)
+        relationships = []
+        seen = set()
+
+        for result in results:
+            metadata = result.get("metadata", {})
+            signature = (
+                metadata.get("from_table"),
+                metadata.get("from_column"),
+                metadata.get("to_table"),
+                metadata.get("to_column"),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            relationships.append(metadata)
+
+        return relationships
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return retriever status for CLI/debug reporting."""
+        return {
+            "index_built": self._index_built,
+            "document_count": len(self.documents),
+            "embedding": self.embedding_service.get_status(),
+            "last_search": dict(self._last_search_info),
+        }
+
     def clear(self) -> None:
         """Clear all documents from the index."""
         self.documents = []
         self._index_built = False
+        self._last_search_info = {}
         logger.info("Vector index cleared")

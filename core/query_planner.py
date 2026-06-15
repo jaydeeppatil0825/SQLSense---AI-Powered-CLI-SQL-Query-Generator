@@ -205,6 +205,8 @@ def _retrieve_with_vector(
             "table_names": active_retriever.get_relevant_tables(question, top_k=5),
             "columns": active_retriever.get_relevant_columns(question, top_k=10),
             "glossary_terms": active_retriever.get_relevant_glossary_terms(question, top_k=5),
+            "relationships": active_retriever.get_relevant_relationships(question, top_k=5),
+            "retriever_status": active_retriever.get_status(),
             "used_vector": True,
         }
     except Exception as exc:
@@ -213,6 +215,8 @@ def _retrieve_with_vector(
             "table_names": [],
             "columns": [],
             "glossary_terms": [],
+            "relationships": [],
+            "retriever_status": {},
             "used_vector": False,
             "error": str(exc),
         }
@@ -637,4 +641,5 @@ def build_query_context(
         "confidence": overall_confidence,
         "knowledge_base": enriched_kb,
         "vector_results": vector_results,
+        "vector_used": bool(vector_results and vector_results.get("used_vector")),
     }

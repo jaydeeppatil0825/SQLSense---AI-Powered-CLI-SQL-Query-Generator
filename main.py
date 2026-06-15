@@ -325,6 +325,17 @@ def handle_build_knowledge_base(state: SessionState) -> None:
 
     print(f"  [OK] Knowledge base saved successfully -> semantic/knowledge_base.json")
     print(f"  [OK] Business glossary saved -> semantic/business_glossary.json")
+    vector_status = state.app_service.get_vector_status()
+    embedding_status = vector_status.get("embedding", {})
+    retriever_status = vector_status.get("retriever", {})
+    print("\n  Vector / Embedding Status:")
+    print(f"  - index status: {vector_status.get('index_status')}")
+    print(f"  - embedding backend: {embedding_status.get('backend')}")
+    print(f"  - embedding model: {embedding_status.get('model')}")
+    print(f"  - fallback used: {embedding_status.get('fallback_used')}")
+    print(f"  - indexed documents: {retriever_status.get('document_count', 0)}")
+    if embedding_status.get("init_error"):
+        print(f"  - backend note: {embedding_status.get('init_error')}")
     print("  Returning to main menu.")
 
 
@@ -409,14 +420,46 @@ def handle_ask_question(state: SessionState) -> None:
         print("\n  Vector Retrieval:")
         print("  - route: vector-enhanced")
         vector_results = query_context.get("vector_results", {})
+        retriever_status = vector_results.get("retriever_status", {})
+        embedding_status = retriever_status.get("embedding", {})
+        last_search = retriever_status.get("last_search", {})
+        if embedding_status:
+            print(f"  - embedding backend: {embedding_status.get('backend')}")
+            print(f"  - embedding model: {embedding_status.get('model')}")
+            print(f"  - fallback used: {embedding_status.get('fallback_used')}")
+        if last_search:
+            print(f"  - vector result count: {last_search.get('result_count', 0)}")
         if vector_results.get("table_names"):
             print(f"  - top vector tables: {', '.join(vector_results['table_names'][:5])}")
+        if vector_results.get("columns"):
+            top_columns = [
+                f"{entry.get('table_name')}.{entry.get('column_name')}"
+                for entry in vector_results["columns"][:5]
+                if entry.get("table_name") and entry.get("column_name")
+            ]
+            if top_columns:
+                print(f"  - top vector columns: {', '.join(top_columns)}")
         if vector_results.get("glossary_terms"):
             glossary_names = [t.get('term', '') for t in vector_results['glossary_terms'][:3]]
             print(f"  - top glossary terms: {', '.join(glossary_names)}")
+        if vector_results.get("relationships"):
+            relationship_names = [
+                f"{entry.get('from_table')}.{entry.get('from_column')} -> {entry.get('to_table')}.{entry.get('to_column')}"
+                for entry in vector_results["relationships"][:3]
+                if entry.get("from_table") and entry.get("to_table")
+            ]
+            if relationship_names:
+                print(f"  - top relationships: {', '.join(relationship_names)}")
     else:
         print("\n  Vector Retrieval:")
         print("  - route: rule-based (vector unavailable or not needed)")
+        vector_results = query_context.get("vector_results", {})
+        retriever_status = vector_results.get("retriever_status", {})
+        embedding_status = retriever_status.get("embedding", {})
+        if embedding_status:
+            print(f"  - embedding backend: {embedding_status.get('backend')}")
+            print(f"  - embedding model: {embedding_status.get('model')}")
+            print(f"  - fallback used: {embedding_status.get('fallback_used')}")
 
     if query_context.get("confidence") is not None:
         print(f"\n  Planning Confidence: {query_context['confidence']}")

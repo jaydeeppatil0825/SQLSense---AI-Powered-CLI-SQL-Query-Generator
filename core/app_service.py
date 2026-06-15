@@ -107,6 +107,10 @@ class AppService:
     def get_last_build_summary(self) -> Dict[str, Any]:
         """Get the latest knowledge-base build summary."""
         return self.database_service.get_last_build_summary()
+
+    def get_vector_status(self) -> Dict[str, Any]:
+        """Get vector/embedding status for CLI reporting."""
+        return self.database_service.get_vector_status()
     
     # Question processing
     def process_question(

@@ -381,6 +381,19 @@ class DatabaseService:
             self.refresh_vector_index()
         return self.vector_retriever
 
+    def get_embedding_status(self) -> Dict[str, Any]:
+        """Return embedding backend status for CLI/debug reporting."""
+        return self.embedding_service.get_status()
+
+    def get_vector_status(self) -> Dict[str, Any]:
+        """Return vector index and retriever status for CLI/debug reporting."""
+        retriever_status = self.vector_retriever.get_status() if self.vector_retriever else {}
+        return {
+            "index_status": self.vector_index_status,
+            "embedding": self.get_embedding_status(),
+            "retriever": retriever_status,
+        }
+
     def get_last_ai_enrichment_result(self) -> tuple[str, str]:
         """Return the last AI enrichment status and clean CLI message."""
         return self.last_ai_enrichment_status, self.last_ai_enrichment_message

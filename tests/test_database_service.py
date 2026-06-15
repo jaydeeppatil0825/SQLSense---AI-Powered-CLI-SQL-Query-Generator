@@ -133,3 +133,10 @@ def test_build_knowledge_base_keeps_generated_glossary_active_and_builds_vector_
     retriever = service.get_vector_retriever()
     assert retriever is not None
     assert "orders" in retriever.get_relevant_tables("show order sales", top_k=5)
+    embedding_status = service.get_embedding_status()
+    vector_status = service.get_vector_status()
+    assert embedding_status["configured_backend"] == "local"
+    assert "backend" in embedding_status
+    assert vector_status["index_status"] == "ready"
+    assert vector_status["retriever"]["index_built"] is True
+    assert vector_status["retriever"]["document_count"] >= 3
