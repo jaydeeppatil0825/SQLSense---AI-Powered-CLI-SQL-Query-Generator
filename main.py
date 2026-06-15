@@ -295,6 +295,34 @@ def handle_build_knowledge_base(state: SessionState) -> None:
     else:
         print("  [OK] AI enrichment skipped/fallback used")
 
+    build_summary = state.app_service.get_last_build_summary()
+    if build_summary:
+        print("\n  Build Summary:")
+        modules_detected = build_summary.get("modules_detected", {})
+        if modules_detected:
+            module_parts = [f"{module}={count}" for module, count in sorted(modules_detected.items())]
+            print(f"  - modules detected: {', '.join(module_parts)}")
+        print(f"  - relationships detected: {build_summary.get('relationship_count', 0)}")
+
+        low_confidence_relationships = build_summary.get("low_confidence_relationships", [])
+        if low_confidence_relationships:
+            print("  - low confidence relationships:")
+            for relationship in low_confidence_relationships[:5]:
+                print(
+                    "    "
+                    f"{relationship.get('from_table')}.{relationship.get('from_column')} -> "
+                    f"{relationship.get('to_table')}.{relationship.get('to_column')} "
+                    f"(confidence: {relationship.get('confidence')}, source: {relationship.get('source')})"
+                )
+        else:
+            print("  - low confidence relationships: none")
+
+        missing_relationship_tables = build_summary.get("tables_with_missing_relationships", [])
+        if missing_relationship_tables:
+            print(f"  - tables with missing relationships: {', '.join(missing_relationship_tables)}")
+        else:
+            print("  - tables with missing relationships: none")
+
     print(f"  [OK] Knowledge base saved successfully -> semantic/knowledge_base.json")
     print(f"  [OK] Business glossary saved -> semantic/business_glossary.json")
     print("  Returning to main menu.")

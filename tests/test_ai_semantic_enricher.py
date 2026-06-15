@@ -132,6 +132,7 @@ def test_enrich_knowledge_base_sends_chat_messages(monkeypatch):
     assert captured["response_format"]["type"] == "object"
     assert enriched["orders"]["business_description"] == "Customer orders"
     assert enriched["orders"]["columns"][0]["business_terms"] == ["sales", "revenue"]
+    assert enriched["orders"]["business_purpose"] == "Tracks sales"
 
 
 def test_enrich_timeout_fallback_log_is_sanitized(monkeypatch, caplog):
@@ -207,6 +208,44 @@ def test_enrich_knowledge_base_allows_partial_table_fallback(monkeypatch):
     assert "business_description" not in enriched["customers"]
     assert enriched_tables == ["orders"]
     assert fallback_tables == {"customers": "Local AI timed out"}
+
+
+def test_invalid_ai_business_purpose_uses_rule_based_fallback(monkeypatch):
+    knowledge_base = {
+        "vendor_payments": {
+            "module": "finance",
+            "columns": [
+                {"name": "payment_amount", "type": "DECIMAL(10,2)", "semantic_type": "money"}
+            ],
+        }
+    }
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        if "required" in response_format and "q" in response_format["required"]:
+            return json.dumps({
+                "d": "Vendor payments",
+                "p": ".99",
+                "q": ["What is unpaid?"],
+            })
+        return json.dumps({
+            "c": {
+                "payment_amount": {
+                    "d": "Paid amount",
+                    "b": ["payment"],
+                    "m": "money",
+                    "me": True,
+                    "di": False,
+                    "dt": False,
+                }
+            }
+        })
+
+    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
+
+    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
+
+    assert enriched["vendor_payments"]["business_purpose"] == "Stores vendor payment records for finance workflows."
+    assert enriched["vendor_payments"]["possible_business_questions"] == ["What is unpaid?"]
 
 
 def test_clean_ai_response_handles_empty_response():

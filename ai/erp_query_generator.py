@@ -101,13 +101,17 @@ def _find_name_column(table_data: dict, semantic_type: str, fallback_patterns: t
 def _find_join(knowledge_base: dict, left_table: str, right_table: str) -> tuple[str, str] | None:
     left_relationships = knowledge_base.get(left_table, {}).get("relationships", [])
     for relationship in left_relationships:
-        if relationship.get("to_table") == right_table:
+        if relationship.get("direction") == "outgoing" and relationship.get("to_table") == right_table:
             return relationship["from_column"], relationship["to_column"]
+        if relationship.get("direction") == "incoming" and relationship.get("from_table") == right_table:
+            return relationship["to_column"], relationship["from_column"]
 
     right_relationships = knowledge_base.get(right_table, {}).get("relationships", [])
     for relationship in right_relationships:
-        if relationship.get("to_table") == left_table:
+        if relationship.get("direction") == "outgoing" and relationship.get("to_table") == left_table:
             return relationship["to_column"], relationship["from_column"]
+        if relationship.get("direction") == "incoming" and relationship.get("from_table") == left_table:
+            return relationship["from_column"], relationship["to_column"]
 
     return None
 

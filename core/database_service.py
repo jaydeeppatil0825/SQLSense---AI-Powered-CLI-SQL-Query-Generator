@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 
 from db.connection import connect_engine, get_engine, SUPPORTED_DB_TYPES
 from semantic.knowledge_base_builder import build_knowledge_base
+from semantic.erp_metadata import enrich_knowledge_base_for_erp, summarize_knowledge_base
 from semantic.business_glossary import load_business_glossary, generate_business_glossary, save_business_glossary
 from ai.sql_generator import check_ollama_status
 from semantic.ai_semantic_enricher import (
@@ -38,6 +39,7 @@ class DatabaseService:
         self.db_config: Dict[str, Any] = {}
         self.last_ai_enrichment_status: str = "skipped"
         self.last_ai_enrichment_message: str = "AI enrichment skipped."
+        self.last_build_summary: Dict[str, Any] = {}
     
     def connect_database(
         self,
@@ -138,6 +140,7 @@ class DatabaseService:
         
         # Save knowledge base
         try:
+            knowledge_base = enrich_knowledge_base_for_erp(knowledge_base)
             save_json(knowledge_base, KNOWLEDGE_BASE_PATH)
             logger.info(f"Knowledge base saved to {KNOWLEDGE_BASE_PATH}")
         except Exception as e:
@@ -158,7 +161,7 @@ class DatabaseService:
                 enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
                 
                 if enriched_kb is not knowledge_base:
-                    final_knowledge_base = enriched_kb
+                    final_knowledge_base = enrich_knowledge_base_for_erp(enriched_kb)
                     enriched_tables, fallback_tables = get_last_enrichment_report()
                     if fallback_tables:
                         self.last_ai_enrichment_status = "partial"
@@ -213,6 +216,7 @@ class DatabaseService:
             logger.error(f"Failed to generate business glossary: {e}")
         
         self.knowledge_base = final_knowledge_base
+        self.last_build_summary = summarize_knowledge_base(final_knowledge_base)
         return True, "Knowledge base built successfully", final_knowledge_base
     
     def load_knowledge_base(self) -> tuple[bool, str, Optional[Dict[str, Any]]]:
@@ -294,3 +298,7 @@ class DatabaseService:
     def get_db_config(self) -> Dict[str, Any]:
         """Get the database configuration."""
         return self.db_config
+
+    def get_last_build_summary(self) -> Dict[str, Any]:
+        """Return the latest knowledge-base build summary."""
+        return dict(self.last_build_summary)

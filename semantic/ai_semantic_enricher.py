@@ -15,6 +15,7 @@ import json
 import re
 
 from ai.sql_generator import _call_ai_backend
+from semantic.erp_metadata import build_rule_based_business_purpose, sanitize_business_purpose, sanitize_short_text
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -209,9 +210,26 @@ def _parse_column_enrichment(response: str) -> dict:
 
 def _apply_table_enrichment(table_name: str, table_data: dict, enrichment: dict) -> None:
     """Apply enrichment data to one table in-place."""
-    table_data["business_description"] = enrichment.get("business_description", "")
-    table_data["business_purpose"] = enrichment.get("business_purpose", "")
-    table_data["possible_business_questions"] = enrichment.get("possible_business_questions", [])[:1]
+    module_name = table_data.get("module", "master data")
+    table_data["business_description"] = sanitize_short_text(
+        enrichment.get("business_description", ""),
+        fallback=table_data.get("business_description", ""),
+    )
+    table_data["business_purpose"] = sanitize_business_purpose(
+        enrichment.get("business_purpose", ""),
+        table_name,
+        module_name,
+    )
+    if table_data["business_purpose"] == build_rule_based_business_purpose(table_name, module_name):
+        logger.info(f"AI business purpose for '{table_name}' was invalid; using rule-based fallback.")
+
+    clean_questions = []
+    for question in enrichment.get("possible_business_questions", [])[:1]:
+        text = str(question or "").strip()
+        if not text or len(text) > 100 or not any(ch.isalpha() for ch in text):
+            continue
+        clean_questions.append(text)
+    table_data["possible_business_questions"] = clean_questions
 
 
 def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
@@ -221,9 +239,9 @@ def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
         if col_name not in col_map:
             continue
         col_info = col_map[col_name]
-        col["business_description"] = col_info.get("business_description", "")
+        col["business_description"] = sanitize_short_text(col_info.get("business_description", ""))
         col["business_terms"] = list(col_info.get("business_terms", []))[:2]
-        col["metric_type"] = col_info.get("metric_type", "general")
+        col["metric_type"] = sanitize_short_text(col_info.get("metric_type", "general"), fallback="general") or "general"
         col["is_measure"] = bool(col_info.get("is_measure", False))
         col["is_dimension"] = bool(col_info.get("is_dimension", False))
         col["is_date"] = bool(col_info.get("is_date", False))

@@ -75,8 +75,8 @@ def test_get_relevant_glossary_terms_uses_real_glossary_when_available():
     
     # Should contain the real glossary content from business_glossary.json
     assert "Business term glossary" in glossary_section
-    # The real glossary contains CUSTOMER term (as seen in the test failure)
-    assert "CUSTOMER" in glossary_section
+    assert "SALES" in glossary_section
+    assert "Maps to:" in glossary_section
 
 
 def test_prompt_includes_cli_safety_and_pcsoft_relationship_guidance():

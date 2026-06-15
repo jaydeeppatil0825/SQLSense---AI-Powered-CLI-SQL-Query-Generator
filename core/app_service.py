@@ -103,6 +103,10 @@ class AppService:
     def get_last_ai_enrichment_report(self) -> Tuple[list[str], dict[str, str]]:
         """Get enriched and fallback tables from the last AI enrichment run."""
         return self.database_service.get_last_ai_enrichment_report()
+
+    def get_last_build_summary(self) -> Dict[str, Any]:
+        """Get the latest knowledge-base build summary."""
+        return self.database_service.get_last_build_summary()
     
     # Question processing
     def process_question(

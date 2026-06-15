@@ -105,6 +105,14 @@ def _detect_dimension(question: str) -> str | None:
                 return dimension
 
     for dimension, phrases in _DIMENSION_TERMS.items():
+        if dimension == "month":
+            if "monthly" in normalized or "per month" in normalized:
+                return dimension
+            continue
+        if dimension == "date":
+            if "by date" in normalized or "per date" in normalized:
+                return dimension
+            continue
         if any(phrase in normalized for phrase in phrases):
             return dimension
     return None
@@ -116,17 +124,21 @@ def _detect_date_range(question: str) -> dict | None:
 
     if "this month" in normalized or "current month" in normalized:
         start_date = today.replace(day=1)
+        if start_date.month == 12:
+            end_date = start_date.replace(year=start_date.year + 1, month=1)
+        else:
+            end_date = start_date.replace(month=start_date.month + 1)
         return {
             "label": "this_month",
             "start": start_date.isoformat(),
-            "end_exclusive": None,
+            "end_exclusive": end_date.isoformat(),
         }
 
     if "this year" in normalized or "current year" in normalized:
         return {
             "label": "this_year",
             "start": f"{today.year}-01-01",
-            "end_exclusive": None,
+            "end_exclusive": f"{today.year + 1}-01-01",
         }
 
     return None
@@ -215,6 +227,94 @@ def _table_score(plan: dict, table_name: str, table_data: dict, glossary: dict |
     return score, reasons
 
 
+def _metric_semantic_targets(metric: str | None) -> set[str]:
+    if metric in {"sales", "purchase", "payment", "salary", "balance"}:
+        return {"money", "tax", "account", "status", "date"}
+    if metric == "tax":
+        return {"tax", "money", "date"}
+    if metric in {"stock", "production"}:
+        return {"quantity", "item_product", "warehouse", "date"}
+    return set()
+
+
+def _column_score(plan: dict, column: dict) -> tuple[float, list[str]]:
+    score = 0.0
+    reasons: list[str] = []
+    terms = _semantic_terms_from_plan(plan)
+    column_name = str(column.get("name", "")).lower()
+    semantic_type = str(column.get("semantic_type", "")).lower()
+    metric = plan.get("metric")
+    dimension = plan.get("dimension")
+
+    for term in terms:
+        if term and term in column_name:
+            score += 1.3
+            reasons.append(f"matched question term '{term}'")
+
+    if semantic_type in _metric_semantic_targets(metric):
+        score += 1.2
+        reasons.append(f"semantic type matched metric '{metric}'")
+
+    if dimension and semantic_type == dimension:
+        score += 1.5
+        reasons.append(f"semantic type matched dimension '{dimension}'")
+
+    if semantic_type == "date" and plan.get("date_range"):
+        score += 1.1
+        reasons.append("date filter needs a date column")
+
+    if semantic_type == "status" and any(filter_data.get("type") == "status" for filter_data in plan.get("filters", [])):
+        score += 1.1
+        reasons.append("status filter needs a status column")
+
+    if metric == "sales" and any(token in column_name for token in ("invoice_amount", "final_amount", "total_amount", "net_amount", "line_total")):
+        score += 1.6
+        reasons.append("sales metric prefers a sales amount column")
+    if metric == "purchase" and any(token in column_name for token in ("total_amount", "line_total", "unit_cost", "amount")):
+        score += 1.6
+        reasons.append("purchase metric prefers a purchase amount column")
+    if metric == "tax" and "tax" in column_name:
+        score += 1.8
+        reasons.append("tax metric prefers a tax column")
+    if metric == "balance" and any(token in column_name for token in ("outstanding", "due", "balance", "net_amount", "invoice_amount", "payment_amount")):
+        score += 1.4
+        reasons.append("balance metric prefers due or payment columns")
+    if metric == "stock" and any(token in column_name for token in ("quantity_on_hand", "stock_qty", "quantity", "reorder_level", "warehouse")):
+        score += 1.4
+        reasons.append("stock metric prefers stock quantity columns")
+
+    return score, reasons
+
+
+def _select_columns_for_table(plan: dict, table_data: dict) -> list[dict]:
+    scored_columns: list[tuple[str, float, list[str], str]] = []
+    for column in table_data.get("columns", []):
+        score, reasons = _column_score(plan, column)
+        if score <= 0:
+            continue
+        scored_columns.append(
+            (
+                str(column.get("name", "")),
+                score,
+                reasons,
+                str(column.get("semantic_type", "general")),
+            )
+        )
+
+    scored_columns.sort(key=lambda item: (-item[1], item[0]))
+    selected_columns = []
+    for column_name, score, reasons, semantic_type in scored_columns[:6]:
+        selected_columns.append(
+            {
+                "column": column_name,
+                "semantic_type": semantic_type,
+                "confidence": round(min(max(score / 3.0, 0.45), 0.99), 2),
+                "reason": "; ".join(dict.fromkeys(reasons)),
+            }
+        )
+    return selected_columns
+
+
 def _expand_selected_tables(knowledge_base: dict, selected_names: list[str], plan: dict) -> list[str]:
     selected = list(selected_names)
     dimension = plan.get("dimension")
@@ -222,7 +322,10 @@ def _expand_selected_tables(knowledge_base: dict, selected_names: list[str], pla
     for table_name in list(selected_names):
         table_data = knowledge_base.get(table_name, {})
         for relationship in table_data.get("relationships", []):
-            target_table = relationship.get("to_table")
+            if relationship.get("direction") == "incoming":
+                target_table = relationship.get("from_table")
+            else:
+                target_table = relationship.get("to_table")
             if target_table not in knowledge_base or target_table in selected:
                 continue
 
@@ -250,12 +353,14 @@ def _build_selected_table_entries(knowledge_base: dict, scored_tables: list[tupl
 
     for table_name in selected_names:
         score, reasons = score_lookup.get(table_name, (0.8, ["selected as a relationship bridge"]))
+        selected_columns = _select_columns_for_table(plan, knowledge_base.get(table_name, {}))
         entries.append(
             {
                 "table": table_name,
                 "confidence": round(min(max(score / 4.0, 0.55), 0.99), 2),
                 "reason": "; ".join(dict.fromkeys(reasons)) or "selected from semantic relationship graph",
                 "module": knowledge_base.get(table_name, {}).get("module", "master data"),
+                "selected_columns": selected_columns,
             }
         )
 
@@ -340,10 +445,19 @@ def build_query_context(
         sum(entry["confidence"] for entry in selected_tables) / max(len(selected_tables), 1),
         2,
     )
+    selected_columns = [
+        {
+            "table": entry["table"],
+            **column_entry,
+        }
+        for entry in selected_tables
+        for column_entry in entry.get("selected_columns", [])
+    ]
 
     return {
         "plan": plan,
         "selected_tables": selected_tables,
+        "selected_columns": selected_columns,
         "selected_table_names": selected_names,
         "selected_knowledge_base": reduced_kb,
         "warnings": warnings,
