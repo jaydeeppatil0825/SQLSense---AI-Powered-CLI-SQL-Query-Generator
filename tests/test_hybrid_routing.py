@@ -28,6 +28,130 @@ GENERIC_KB = {
 }
 
 
+NOISY_KB = {
+    "alpha_records": {
+        "module": "reference",
+        "columns": [
+            {"name": "record_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "record_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+        ],
+        "primary_keys": ["record_id"],
+        "foreign_keys": [],
+        "relationships": [
+            {
+                "from_table": "alpha_records",
+                "from_column": "record_id",
+                "to_table": "beta_events",
+                "to_column": "owner_id",
+                "confidence": 0.99,
+            }
+        ],
+    },
+    "beta_events": {
+        "module": "transaction",
+        "columns": [
+            {"name": "event_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "event_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            {"name": "amount_total", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+            {"name": "created_on", "type": "DATE", "nullable": True, "semantic_type": "date"},
+        ],
+        "primary_keys": ["event_id"],
+        "foreign_keys": [],
+        "relationships": [],
+    },
+    "gamma_locations": {
+        "module": "reference",
+        "columns": [
+            {"name": "location_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "location_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            {"name": "state_name", "type": "VARCHAR(100)", "nullable": True, "semantic_type": "status"},
+        ],
+        "primary_keys": ["location_id"],
+        "foreign_keys": [],
+        "relationships": [],
+    },
+}
+
+
+NOISY_GLOSSARY = {
+    "alpha records": {
+        "description": "Primary records",
+        "mapped_columns": [{"table": "alpha_records", "column": "record_name", "confidence": "high"}],
+        "business_terms": ["alpha record"],
+        "example_questions": ["Show all alpha records"],
+    },
+    "label": {
+        "description": "Display label",
+        "mapped_columns": [
+            {"table": "alpha_records", "column": "record_name", "confidence": "medium"},
+            {"table": "beta_events", "column": "event_name", "confidence": "medium"},
+            {"table": "gamma_locations", "column": "location_name", "confidence": "medium"},
+        ],
+        "business_terms": ["alpha records"],
+        "example_questions": ["Show labels"],
+    },
+    "amount": {
+        "description": "Measured value",
+        "mapped_columns": [
+            {"table": "alpha_records", "column": "record_id", "confidence": "low"},
+            {"table": "beta_events", "column": "amount_total", "confidence": "high"},
+        ],
+        "business_terms": ["alpha records"],
+        "example_questions": ["Show total amount"],
+    },
+    "date": {
+        "description": "Date value",
+        "mapped_columns": [
+            {"table": "alpha_records", "column": "record_id", "confidence": "low"},
+            {"table": "beta_events", "column": "created_on", "confidence": "high"},
+        ],
+        "business_terms": ["alpha records"],
+        "example_questions": ["Show latest alpha records"],
+    },
+    "state": {
+        "description": "State value",
+        "mapped_columns": [{"table": "gamma_locations", "column": "state_name", "confidence": "high"}],
+        "business_terms": ["alpha records"],
+        "example_questions": ["Show states"],
+    },
+    "primary entries": {
+        "description": "Alias for alpha records",
+        "mapped_columns": [{"table": "alpha_records", "column": "record_name", "confidence": "high"}],
+        "business_terms": ["primary entries"],
+        "example_questions": ["Show all primary entries"],
+    },
+}
+
+
+class _DummyVectorRetriever:
+    def __init__(self, table_name: str):
+        self.table_name = table_name
+
+    def get_relevant_tables(self, query, top_k=5):
+        return [self.table_name]
+
+    def get_relevant_table_details(self, query, top_k=5):
+        return [{"table_name": self.table_name, "score": 0.95}]
+
+    def get_relevant_columns(self, query, top_k=10):
+        return [{"table_name": self.table_name, "column_name": "record_name", "semantic_type": "name"}]
+
+    def get_relevant_glossary_terms(self, query, top_k=5):
+        return []
+
+    def get_relevant_relationships(self, query, top_k=5):
+        return []
+
+    def get_relevant_semantic_descriptions(self, query, top_k=8):
+        return []
+
+    def get_relevant_profiling_hints(self, query, top_k=8):
+        return []
+
+    def get_status(self):
+        return {"index_built": True, "document_count": 1}
+
+
 def _context(
     selected_table_names,
     *,
@@ -264,3 +388,58 @@ def test_query_planner_does_not_assign_business_specific_intents():
     assert first["plan"]["filters"]
     assert second["plan"]["intent"] == "list"
     assert second["plan"]["dimension"] == "warehouse"
+
+
+def test_simple_list_query_with_glossary_noise_selects_one_primary_table():
+    context = build_query_context(
+        "show all alpha records",
+        NOISY_KB,
+        NOISY_GLOSSARY,
+        use_vector_retrieval=False,
+    )
+
+    assert context["selected_table_names"] == ["alpha_records"]
+    assert len(context["selected_tables"]) == 1
+    assert context["selected_tables"][0]["table"] == "alpha_records"
+
+
+def test_simple_list_query_does_not_expand_bridge_tables():
+    context = build_query_context(
+        "show all alpha records",
+        NOISY_KB,
+        NOISY_GLOSSARY,
+        use_vector_retrieval=False,
+    )
+
+    assert "beta_events" not in context["selected_table_names"]
+
+
+def test_simple_list_query_routes_rule_based_despite_glossary_noise(monkeypatch):
+    service = QuestionService()
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple browse questions")),
+    )
+
+    success, message, sql, error = service.process_question(
+        "show all alpha records",
+        NOISY_KB,
+        business_glossary=NOISY_GLOSSARY,
+        ai_backend="local",
+    )
+
+    assert success is True
+    assert sql == "SELECT * FROM alpha_records LIMIT 50;"
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+
+
+def test_top_vector_table_beats_generic_glossary_aliases_for_simple_list():
+    context = build_query_context(
+        "show all primary entries",
+        NOISY_KB,
+        NOISY_GLOSSARY,
+        vector_retriever=_DummyVectorRetriever("alpha_records"),
+    )
+
+    assert context["selected_table_names"] == ["alpha_records"]
+    assert context["selected_tables"][0]["table"] == "alpha_records"

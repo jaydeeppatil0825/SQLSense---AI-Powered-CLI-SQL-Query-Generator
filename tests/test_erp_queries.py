@@ -2,6 +2,7 @@ import pytest
 from datetime import date
 
 from core.app_service import AppService
+from semantic.business_glossary import generate_business_glossary
 
 
 def _erp_knowledge_base():
@@ -140,6 +141,12 @@ def _erp_knowledge_base():
 def _service():
     service = AppService()
     service.database_service.knowledge_base = _erp_knowledge_base()
+    service.database_service.knowledge_base_origin = "built"
+    service.database_service.business_glossary = generate_business_glossary(
+        service.database_service.knowledge_base,
+        use_ai_enrichment=False,
+    )
+    service.database_service.refresh_vector_index()
     return service
 
 
@@ -195,6 +202,21 @@ def test_erp_total_sales_this_month(monkeypatch):
     assert f"invoice_date >= '{start_date}'" in sql
     assert service.get_last_query_context()["route_used"] == "rule-based"
     assert service.get_last_query_context()["selected_table_names"] != list(_erp_knowledge_base().keys())
+
+
+def test_erp_show_all_customers_uses_rule_based(monkeypatch):
+    service = _service()
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple customer listing")),
+    )
+
+    success, message, sql, error = service.process_question("show all customers", ai_backend="local")
+
+    assert success is True
+    assert sql == "SELECT * FROM customers LIMIT 50;"
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["selected_table_names"] == ["customers"]
 
 
 def test_erp_purchase_by_vendor(monkeypatch):
@@ -440,15 +462,20 @@ def test_ai_retry_receives_validator_error_and_dynamic_context(monkeypatch):
         captured["first_attempt_sql"] = first_attempt_sql
         captured["validation_reason"] = validation_reason
         captured["validation_context"] = validation_context
-        return "SELECT customer_name FROM customers LIMIT 50;"
+        return (
+            "SELECT c.customer_name AS customer_name, SUM(f.outstanding_amount) AS outstanding_balance "
+            "FROM sales_invoices f JOIN customers c ON f.customer_id = c.customer_id "
+            "WHERE f.outstanding_amount > 0 "
+            "GROUP BY c.customer_name ORDER BY outstanding_balance DESC LIMIT 50;"
+        )
 
     monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
     monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_generate_sql_with_retry)
 
-    success, message, sql, error = service.process_question("show customers", ai_backend="local")
+    success, message, sql, error = service.process_question("show customer outstanding balance", ai_backend="local")
 
     assert success is True
-    assert "SELECT customer_name FROM customers" in sql
+    assert "SUM(f.outstanding_amount) AS outstanding_balance" in sql
     assert "table name after FROM" in captured["validation_reason"]
     assert captured["validation_context"]["selected_tables"]
     assert "vector_tables" in captured["validation_context"]
@@ -476,12 +503,12 @@ def test_failed_retry_returns_clean_validation_failure_details(monkeypatch):
     monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
     monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_generate_sql_with_retry)
 
-    success, message, sql, error = service.process_question("show customers", ai_backend="local")
+    success, message, sql, error = service.process_question("show customer outstanding balance", ai_backend="local")
 
     assert success is False
     assert sql is None
     assert error is not None
-    assert "Question: show customers" in error
+    assert "Question: show customer outstanding balance" in error
     assert "Generated SQL: SELECT customer_name FROM LIMIT 50" in error
     assert "Validation reason:" in error
     assert "Relevant table candidates:" in error

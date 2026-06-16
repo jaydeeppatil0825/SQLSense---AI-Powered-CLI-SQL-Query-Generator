@@ -55,6 +55,16 @@ def _humanize(text: str) -> str:
     return _normalize_identifier(text).replace("_", " ").strip()
 
 
+def _singularize_token(token: str) -> str:
+    if token.endswith("ies") and len(token) > 3:
+        return token[:-3] + "y"
+    if token.endswith("ses") and len(token) > 3:
+        return token[:-2]
+    if token.endswith("s") and not token.endswith("ss") and len(token) > 1:
+        return token[:-1]
+    return token
+
+
 def _tokenize(text: str) -> list[str]:
     return [token for token in re.split(r"[^a-z0-9]+", _normalize(text)) if token]
 
@@ -216,6 +226,41 @@ def _primary_metric_hint(semantic_hints: set[str]) -> str | None:
     return next(iter(sorted(semantic_hints))) if semantic_hints else None
 
 
+def _is_simple_primary_table_question(plan: dict[str, Any]) -> bool:
+    if (
+        str(plan.get("intent") or "") == "count"
+        and not plan.get("dimension")
+        and not plan.get("grouping")
+        and not plan.get("filters")
+        and not plan.get("date_range")
+    ):
+        return True
+
+    return (
+        str(plan.get("intent") or "") in {"list", "count"}
+        and not plan.get("dimension")
+        and not plan.get("grouping")
+        and not plan.get("filters")
+        and not plan.get("date_range")
+        and not (set(plan.get("semantic_hints") or set()) & {"money", "quantity", "percentage", "date", "status"})
+    )
+
+
+def _table_name_matches_question(question: str, table_name: str) -> bool:
+    normalized_question = _normalize(question)
+    human_table = _humanize(table_name)
+    if human_table and human_table in normalized_question:
+        return True
+
+    question_terms = set(_tokenize(question))
+    table_terms: set[str] = set()
+    for token in _tokenize(table_name):
+        table_terms.add(token)
+        table_terms.add(_singularize_token(token))
+
+    return bool(table_terms & question_terms)
+
+
 def _infer_generic_semantic_type(column_name: str) -> str | None:
     tokens = set(_tokenize(column_name))
     if not tokens:
@@ -335,6 +380,7 @@ def _table_score(
 ) -> tuple[float, list[str]]:
     score = 0.0
     reasons: list[str] = []
+    normalized_question = _normalize(plan.get("question", ""))
     question_terms = set(plan.get("question_terms", []))
     table_text = _question_text_for_table(table_name, table_data).lower()
     table_tokens = set(_tokenize(table_text))
@@ -371,9 +417,18 @@ def _table_score(
             reasons.append("status filter needs a status column")
 
     for term, term_data in glossary_matches:
+        normalized_term = _normalize(term)
+        term_tokens = set(_tokenize(term))
+        direct_term_match = (
+            (normalized_term and normalized_term in normalized_question)
+            or (term_tokens and term_tokens <= question_terms)
+        )
+        glossary_boost = 1.1 if direct_term_match else 0.35
+        if _is_simple_primary_table_question(plan) and not direct_term_match:
+            glossary_boost = 0.15
         for mapping in term_data.get("mapped_columns", []):
             if mapping.get("table") == table_name:
-                score += 1.1
+                score += glossary_boost
                 reasons.append(f"glossary term '{term}' mapped to this table")
                 break
 
@@ -489,8 +544,43 @@ def _select_columns_for_table(
     return selected_columns
 
 
-def _expand_selected_tables(knowledge_base: dict, selected_names: list[str], dimension: str | None) -> list[str]:
+def _preferred_primary_tables_for_simple_question(
+    plan: dict[str, Any],
+    scored_tables: list[tuple[str, float, list[str]]],
+    vector_results: dict[str, Any] | None,
+) -> list[str] | None:
+    if not _is_simple_primary_table_question(plan) or not scored_tables:
+        return None
+
+    top_table, top_score, _ = scored_tables[0]
+    second_score = scored_tables[1][1] if len(scored_tables) > 1 else 0.0
+    question = str(plan.get("question") or "")
+    has_direct_match = _table_name_matches_question(question, top_table)
+    vector_table_names = list((vector_results or {}).get("table_names") or [])
+    has_top_vector_match = bool(vector_table_names and vector_table_names[0] == top_table)
+
+    if len(scored_tables) == 1 and (has_direct_match or has_top_vector_match):
+        return [top_table]
+
+    if second_score <= 0:
+        return [top_table] if (has_direct_match or has_top_vector_match) else None
+
+    if (has_direct_match or has_top_vector_match) and top_score >= (second_score * 1.5):
+        return [top_table]
+
+    return None
+
+
+def _expand_selected_tables(
+    knowledge_base: dict,
+    selected_names: list[str],
+    dimension: str | None,
+    plan: dict[str, Any] | None = None,
+) -> list[str]:
     selected = list(selected_names)
+    if plan and _is_simple_primary_table_question(plan):
+        return selected
+
     dimension_tokens = set(_tokenize(dimension or ""))
 
     for table_name in list(selected_names):
@@ -537,7 +627,20 @@ def _build_selected_table_entries(
     if not scored_tables:
         return []
 
-    top_tables = [entry for entry in scored_tables if entry[1] > 0.6][:3]
+    top_tables = []
+    preferred_primary_tables = _preferred_primary_tables_for_simple_question(
+        plan,
+        scored_tables,
+        vector_results,
+    )
+    if preferred_primary_tables:
+        top_tables = [
+            entry for entry in scored_tables
+            if entry[0] in preferred_primary_tables
+        ]
+
+    if not top_tables:
+        top_tables = [entry for entry in scored_tables if entry[1] > 0.6][:3]
     if not top_tables:
         top_tables = scored_tables[:3]
 
@@ -545,6 +648,7 @@ def _build_selected_table_entries(
         knowledge_base,
         [entry[0] for entry in top_tables],
         plan.get("dimension"),
+        plan=plan,
     )
     entries = []
     score_lookup = {table_name: (score, reasons) for table_name, score, reasons in scored_tables}
