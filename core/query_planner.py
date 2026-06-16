@@ -32,10 +32,11 @@ _QUESTION_STOP_WORDS = {
     "latest",
     "recent",
     "all",
-    "records",
+    "records", 
     "record",
     "data",
     "table",
+    
 }
 
 _MONEY_HINTS = {"amount", "total", "price", "cost", "balance", "value"}
@@ -83,7 +84,7 @@ def _extract_limit(question: str) -> int | None:
     if match:
         return int(match.group(1) or match.group(2))
     return None
-
+# if match return int (match)
 
 def _detect_intent(question: str) -> str:
     normalized = _normalize(question)
@@ -103,6 +104,7 @@ def _detect_intent(question: str) -> str:
     if re.search(r"\b(list|show|display|fetch|get)\b", normalized):
         return "list"
     return "list"
+
 
 
 def _detect_dimension(question: str) -> str | None:
@@ -733,6 +735,163 @@ def _infer_metric_from_glossary_matches(
     return ranked_semantics[0][1] if ranked_semantics else None
 
 
+def _build_fk_relationship_graph(knowledge_base: dict) -> dict:
+    """Build a graph of FK relationships between tables for join path computation."""
+    graph: dict[str, dict[str, list[str]]] = {}
+    
+    for table_name, table_data in knowledge_base.items():
+        if table_name not in graph:
+            graph[table_name] = {"outgoing": [], "incoming": []}
+        
+        for fk in table_data.get("foreign_keys", []):
+            from_table = fk.get("from_table")
+            to_table = fk.get("to_table")
+            from_column = fk.get("column")
+            to_column = fk.get("referenced_column")
+            
+            if from_table and to_table and from_table in knowledge_base and to_table in knowledge_base:
+                # Outgoing relationship: from_table -> to_table
+                if from_table not in graph:
+                    graph[from_table] = {"outgoing": [], "incoming": []}
+                if to_table not in graph:
+                    graph[to_table] = {"outgoing": [], "incoming": []}
+                
+                graph[from_table]["outgoing"].append({
+                    "to_table": to_table,
+                    "from_column": from_column,
+                    "to_column": to_column,
+                })
+                graph[to_table]["incoming"].append({
+                    "from_table": from_table,
+                    "from_column": from_column,
+                    "to_column": to_column,
+                })
+    
+    return graph
+
+
+def _find_shortest_path(graph: dict, start: str, end: str, max_depth: int = 5) -> list[dict] | None:
+    """Find shortest path between two tables using BFS."""
+    from collections import deque
+    
+    if start not in graph or end not in graph:
+        return None
+    
+    if start == end:
+        return []
+    
+    queue = deque([(start, [])])
+    visited = {start}
+    
+    while queue and len(queue[0][1]) < max_depth:
+        current, path = queue.popleft()
+        
+        # Check outgoing edges
+        for edge in graph[current].get("outgoing", []):
+            next_table = edge["to_table"]
+            if next_table == end:
+                return path + [edge]
+            if next_table not in visited:
+                visited.add(next_table)
+                queue.append((next_table, path + [edge]))
+        
+        # Check incoming edges
+        for edge in graph[current].get("incoming", []):
+            next_table = edge["from_table"]
+            if next_table == end:
+                return path + [{"to_table": next_table, "from_column": edge["to_column"], "to_column": edge["from_column"]}]
+            if next_table not in visited:
+                visited.add(next_table)
+                queue.append((next_table, path + [{"to_table": next_table, "from_column": edge["to_column"], "to_column": edge["from_column"]}]))
+    
+    return None
+
+
+def _compute_join_paths(selected_tables: list[str], knowledge_base: dict) -> list[dict]:
+    """Compute join paths between all selected tables using FK relationships."""
+    graph = _build_fk_relationship_graph(knowledge_base)
+    join_paths = []
+    
+    # Find paths between all pairs of selected tables
+    for i, table_a in enumerate(selected_tables):
+        for table_b in selected_tables[i+1:]:
+            path = _find_shortest_path(graph, table_a, table_b)
+            if path:
+                join_paths.append({
+                    "from_table": table_a,
+                    "to_table": table_b,
+                    "path": path,
+                    "length": len(path),
+                })
+    
+    return join_paths
+
+
+def _add_missing_tables_for_columns(
+    selected_tables: list[str],
+    selected_columns: list[dict],
+    knowledge_base: dict,
+) -> tuple[list[str], list[dict]]:
+    """Add tables to selected_tables if selected columns belong to tables not in selected_tables."""
+    column_tables = {col["table"] for col in selected_columns}
+    missing_tables = column_tables - set(selected_tables)
+    
+    if missing_tables:
+        for table in missing_tables:
+            if table in knowledge_base:
+                selected_tables.append(table)
+    
+    return selected_tables, selected_columns
+
+
+def _find_bridge_tables(
+    selected_tables: list[str],
+    knowledge_base: dict,
+    max_bridges: int = 3,
+) -> list[str]:
+    """Find bridge tables that connect disconnected selected tables."""
+    graph = _build_fk_relationship_graph(knowledge_base)
+    bridge_tables = []
+    
+    # Check if selected tables are connected
+    if len(selected_tables) < 2:
+        return bridge_tables
+    
+    # Build set of all reachable tables from first selected table using BFS
+    start_table = selected_tables[0]
+    reachable = {start_table}
+    queue = [start_table]
+    
+    while queue:
+        current = queue.pop(0)
+        for edge in graph.get(current, {}).get("outgoing", []):
+            if edge["to_table"] not in reachable:
+                reachable.add(edge["to_table"])
+                queue.append(edge["to_table"])
+        for edge in graph.get(current, {}).get("incoming", []):
+            if edge["from_table"] not in reachable:
+                reachable.add(edge["from_table"])
+                queue.append(edge["from_table"])
+    
+    # Find selected tables not reachable from start
+    disconnected = [t for t in selected_tables if t not in reachable]
+    
+    if not disconnected:
+        return bridge_tables
+    
+    # Find bridge tables to connect disconnected tables
+    for disconnected_table in disconnected[:max_bridges]:
+        path = _find_shortest_path(graph, start_table, disconnected_table, max_depth=5)
+        if path and len(path) > 0:
+            # Add intermediate tables as bridges (exclude the final target table)
+            for edge in path[:-1]:  # Exclude final edge
+                bridge = edge["to_table"]
+                if bridge not in selected_tables and bridge not in bridge_tables and bridge in knowledge_base:
+                    bridge_tables.append(bridge)
+    
+    return bridge_tables
+
+
 def build_query_context(
     question: str,
     knowledge_base: dict,
@@ -749,6 +908,9 @@ def build_query_context(
     limit = _extract_limit(normalized_question) or _default_limit_for_intent(intent)
     semantic_hints = _semantic_hints(normalized_question, intent)
     glossary_matches = _glossary_matches(question, business_glossary)
+    
+    logger.debug(f"[DEBUG] Question: {question}")
+    logger.debug(f"[DEBUG] Intent: {intent}, Dimension: {dimension}, Semantic hints: {semantic_hints}")
 
     vector_results = None
     if use_vector_retrieval:
@@ -758,6 +920,11 @@ def build_query_context(
             business_glossary,
             retriever=vector_retriever,
         )
+    
+    logger.debug(f"[DEBUG] Vector results: {vector_results.get('used_vector') if vector_results else False}")
+    if vector_results:
+        logger.debug(f"[DEBUG] Vector table candidates: {vector_results.get('table_names', [])}")
+        logger.debug(f"[DEBUG] Vector column candidates: {[col.get('column_name') for col in vector_results.get('columns', [])[:5]]}")
 
     sorting = None
     if intent == "top_n":
@@ -861,6 +1028,47 @@ def build_query_context(
     selected_names = [entry["table"] for entry in selected_tables if entry.get("table") in enriched_kb]
     if len(selected_names) != len(selected_tables):
         selected_tables = [entry for entry in selected_tables if entry.get("table") in enriched_kb]
+    
+    logger.debug(f"[DEBUG] Selected tables before join path computation: {selected_names}")
+    
+    # Build FK relationship graph from knowledge base
+    fk_graph = _build_fk_relationship_graph(enriched_kb)
+    logger.debug(f"[DEBUG] FK relationships loaded: {len(fk_graph)} tables with relationships")
+    for table_name, edges in list(fk_graph.items())[:3]:
+        logger.debug(f"[DEBUG]   {table_name}: {len(edges['outgoing'])} outgoing, {len(edges['incoming'])} incoming")
+    
+    # Compute join paths between selected tables
+    join_paths = _compute_join_paths(selected_names, enriched_kb)
+    logger.debug(f"[DEBUG] Computed {len(join_paths)} join paths between selected tables")
+    for jp in join_paths[:3]:
+        logger.debug(f"[DEBUG]   {jp['from_table']} -> {jp['to_table']} (length: {jp['length']})")
+    
+    # Find bridge tables if selected tables are disconnected
+    # DISABLED: This feature changes table selection behavior and may affect rule-based generator
+    # Re-enable after investigating impact on rule-based generator and test expectations
+    # bridge_tables = _find_bridge_tables(selected_names, enriched_kb)
+    # if bridge_tables:
+    #     logger.debug(f"[DEBUG] Found bridge tables: {bridge_tables}")
+    #     selected_names.extend(bridge_tables)
+    #     # Rebuild selected_tables entries for bridge tables
+    #     for bridge_table in bridge_tables:
+    #         if bridge_table in enriched_kb:
+    #             selected_columns = _select_columns_for_table(
+    #                 plan,
+    #                 bridge_table,
+    #                 enriched_kb[bridge_table],
+    #                 glossary_matches,
+    #                 vector_results,
+    #             )
+    #             selected_tables.append({
+    #                 "table": bridge_table,
+    #                 "confidence": 0.65,
+    #                 "reason": "added as bridge table to connect disconnected selected tables",
+    #                 "module": enriched_kb[bridge_table].get("module", "general"),
+    #                 "selected_columns": selected_columns,
+    #             })
+    
+    # logger.debug(f"[DEBUG] Selected tables after bridge table addition: {[entry['table'] for entry in selected_tables]}")
 
     if not selected_names:
         selected_names = list(enriched_kb.keys())
@@ -896,6 +1104,20 @@ def build_query_context(
         for entry in selected_tables
         for column_entry in entry.get("selected_columns", [])
     ]
+    
+    logger.debug(f"[DEBUG] Selected columns before missing table addition: {[(col['table'], col['column']) for col in selected_columns[:10]]}")
+    
+    # Add missing tables if selected columns belong to tables not in selected_tables
+    # DISABLED: This feature changes table selection behavior and may affect rule-based generator
+    # Re-enable after investigating impact on rule-based generator and test expectations
+    # selected_names, selected_columns = _add_missing_tables_for_columns(
+    #     selected_names,
+    #     selected_columns,
+    #     enriched_kb,
+    # )
+    
+    logger.debug(f"[DEBUG] Selected columns: {[(col['table'], col['column']) for col in selected_columns[:10]]}")
+    
     metric_from_selected_columns = _infer_metric_from_selected_columns(plan, selected_tables)
     metric_from_glossary = _infer_metric_from_glossary_matches(glossary_matches, enriched_kb)
     if metric_from_selected_columns in {"money", "quantity", "percentage"}:
@@ -916,4 +1138,6 @@ def build_query_context(
         "knowledge_base": enriched_kb,
         "vector_results": vector_results,
         "vector_used": bool(vector_results and vector_results.get("used_vector")),
+        "join_paths": join_paths,
+        "fk_relationships": fk_graph,
     }

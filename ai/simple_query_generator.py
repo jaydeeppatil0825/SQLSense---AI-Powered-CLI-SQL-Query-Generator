@@ -427,8 +427,17 @@ def _try_latest(
     date_column = _pick_date_column(table_data)
     if not date_column:
         return None
+    # Use explicit columns from schema instead of SELECT *
+    columns = _table_columns(table_data)
+    column_names = [str(col.get("name", "")) for col in columns if col.get("name")]
+    if not column_names:
+        # Fallback to SELECT * if no columns found
+        column_list = "*"
+    else:
+        column_list = ", ".join(column_names)
+    
     return (
-        f"SELECT * FROM {table_name}"
+        f"SELECT {column_list} FROM {table_name}"
         f"{_where_sql(where_clauses)}"
         f" ORDER BY {date_column} DESC LIMIT {limit};"
     )
@@ -473,8 +482,17 @@ def _try_show_all(
 ) -> str | None:
     normalized_question = _normalize(question)
     if re.search(r"\b(show|list|display|get|fetch|view|see|give)\b", normalized_question):
+        # Use explicit columns from schema instead of SELECT *
+        columns = _table_columns(table_data)
+        column_names = [str(col.get("name", "")) for col in columns if col.get("name")]
+        if not column_names:
+            # Fallback to SELECT * if no columns found
+            column_list = "*"
+        else:
+            column_list = ", ".join(column_names)
+        
         order_by_sql = _default_sort_clause(table_data, query_plan)
-        return f"SELECT * FROM {table_name}{_where_sql(where_clauses)}{order_by_sql} LIMIT {limit};"
+        return f"SELECT {column_list} FROM {table_name}{_where_sql(where_clauses)}{order_by_sql} LIMIT {limit};"
     return None
 
 

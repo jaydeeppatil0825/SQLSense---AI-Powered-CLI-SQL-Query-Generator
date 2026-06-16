@@ -186,6 +186,12 @@ def _extract_table_references(sql: str, knowledge_base: dict[str, Any]) -> tuple
             return False, f"Subqueries are not allowed after {keyword} in generated SQL.", [], {}
         if not _is_identifier(next_token):
             return False, f"SQL has an invalid table reference after {keyword}: '{next_token}'.", [], {}
+        
+        # Partial SQL guard: reject FROM LIMIT, FROM..., missing FROM table
+        if next_upper == "LIMIT":
+            return False, f"SQL has invalid FROM clause: FROM LIMIT. This is incomplete SQL.", [], {}
+        if next_token == "...":
+            return False, f"SQL has incomplete FROM clause with ellipsis placeholder.", [], {}
 
         table_name = _normalize_identifier(next_token)
         cursor += 1

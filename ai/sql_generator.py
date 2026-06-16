@@ -368,6 +368,7 @@ def generate_sql(
     query_plan: dict | None = None,
     selected_tables: list[dict] | None = None,
     business_glossary: dict | None = None,
+    join_paths: list[dict] | None = None,
 ) -> str:
     """
     Generate a SQL SELECT statement for *user_question* using *knowledge_base*
@@ -388,6 +389,7 @@ def generate_sql(
         user_question:  Plain-English question from the user.
         knowledge_base: Dict loaded from semantic/knowledge_base.json.
         backend:        Ignored for the active CLI workflow; local is used.
+        join_paths:     Computed join paths between selected tables.
 
     Returns:
         A cleaned SQL string (may still need limit injection / validation).
@@ -404,6 +406,7 @@ def generate_sql(
         query_plan=query_plan,
         selected_tables=selected_tables,
         business_glossary=business_glossary,
+        join_paths=join_paths,
     )
     raw_response = _call_ai_backend(messages, selected_backend)
     return _clean_sql_response(raw_response)
@@ -419,6 +422,7 @@ def generate_sql_with_retry(
     selected_tables: list[dict] | None = None,
     business_glossary: dict | None = None,
     validation_context: dict | None = None,
+    join_paths: list[dict] | None = None,
 ) -> str:
     """
     Retry AI SQL generation once after a failed first attempt.
@@ -428,7 +432,9 @@ def generate_sql_with_retry(
     - The invalid SQL that was produced
     - The reason it was rejected
     - The schema context
-    - A strict instruction to return only executable SQL
+    - Required tables and columns
+    - Relationship/join paths
+    - A strict instruction to return only executable SQL with no ellipsis or placeholder FROM
 
     Args:
         user_question:      Original user question.
@@ -437,6 +443,7 @@ def generate_sql_with_retry(
         first_attempt_sql:  The rejected SQL from the first attempt.
         validation_reason:  Why the first attempt was rejected.
         validation_context: Dynamic table, column, glossary, and relationship hints.
+        join_paths:         Computed join paths between selected tables.
 
     Returns:
         Cleaned SQL string from the retry attempt.
@@ -450,7 +457,9 @@ def generate_sql_with_retry(
         query_plan=query_plan,
         selected_tables=selected_tables,
         business_glossary=business_glossary,
+        join_paths=join_paths,
     )
+    
     correction_system = (
         "You are correcting a previously invalid MySQL SELECT statement. "
         "Follow the structured plan, selected tables, selected columns, glossary, and relationships below exactly. "
@@ -464,7 +473,11 @@ def generate_sql_with_retry(
         f"Rejected SQL:\n{first_attempt_sql}\n\n"
         f"Validation failure: {validation_reason}\n\n"
         f"Runtime schema and retrieval context:\n{validation_context or {}}\n\n"
-        "Correct the SQL so it follows the plan, selected tables, selected relationships, glossary context, and safety rules."
+        "Required tables: " + ", ".join([t.get('table', '') for t in (selected_tables or [])]) + "\n"
+        "Required columns: " + ", ".join([f"{c.get('table', '')}.{c.get('column', '')}" for c in (validation_context.get('selected_columns', []) if validation_context else [])]) + "\n"
+        "Relationship/join paths: " + str(join_paths or []) + "\n\n"
+        "Correct the SQL so it follows the plan, selected tables, selected relationships, glossary context, and safety rules. "
+        "Output complete SQL only, no ellipsis, no placeholder FROM, no incomplete JOIN."
     )
 
     messages = [

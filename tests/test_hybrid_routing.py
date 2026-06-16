@@ -429,7 +429,7 @@ def test_simple_list_query_routes_rule_based_despite_glossary_noise(monkeypatch)
     )
 
     assert success is True
-    assert sql == "SELECT * FROM alpha_records LIMIT 50;"
+    assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
     assert service.get_last_query_context()["route_used"] == "rule-based"
 
 

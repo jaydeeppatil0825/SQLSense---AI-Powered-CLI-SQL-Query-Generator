@@ -57,12 +57,12 @@ GLOSSARY = {
 
 def test_show_all_for_direct_table_name():
     sql = generate_simple_sql("Show client directory", GENERIC_KB)
-    assert sql == "SELECT * FROM client_directory LIMIT 50;"
+    assert sql == "SELECT client_id, client_name, status_flag, created_at FROM client_directory LIMIT 50;"
 
 
 def test_show_all_uses_dynamic_glossary_mapping():
     sql = generate_simple_sql("Show all customers", GENERIC_KB, business_glossary=GLOSSARY)
-    assert sql == "SELECT * FROM client_directory LIMIT 50;"
+    assert sql == "SELECT client_id, client_name, status_flag, created_at FROM client_directory LIMIT 50;"
 
 
 def test_without_glossary_old_business_aliases_do_not_resolve():
@@ -105,13 +105,13 @@ def test_total_uses_dynamic_date_filter_from_plan():
 
 def test_latest_uses_dynamic_date_column():
     sql = generate_simple_sql("Show latest 10 invoices", GENERIC_KB)
-    assert sql == "SELECT * FROM invoice_headers ORDER BY invoice_date DESC LIMIT 10;"
+    assert sql == "SELECT invoice_id, client_id, invoice_date, workflow_status, total_due FROM invoice_headers ORDER BY invoice_date DESC LIMIT 10;"
 
 
 def test_status_filter_uses_dynamic_status_column():
     query_plan = {"intent": "list", "filters": [{"type": "status", "value": "Pending", "term": "pending"}]}
     sql = generate_simple_sql("Show pending invoices", GENERIC_KB, query_plan=query_plan)
-    assert sql == "SELECT * FROM invoice_headers WHERE workflow_status = 'Pending' LIMIT 50;"
+    assert sql == "SELECT invoice_id, client_id, invoice_date, workflow_status, total_due FROM invoice_headers WHERE workflow_status = 'Pending' LIMIT 50;"
 
 
 def test_simple_generator_uses_quantity_columns_without_hardcoded_tables():
@@ -138,7 +138,7 @@ def test_complex_questions_return_none_for_ai_path():
 def test_list_uses_limit_from_query_plan():
     query_plan = {"intent": "list", "limit": 10}
     sql = generate_simple_sql("Show invoices", GENERIC_KB, query_plan=query_plan)
-    assert sql == "SELECT * FROM invoice_headers LIMIT 10;"
+    assert sql == "SELECT invoice_id, client_id, invoice_date, workflow_status, total_due FROM invoice_headers LIMIT 10;"
 
 
 def test_selected_table_metadata_overrides_heuristic_pick():

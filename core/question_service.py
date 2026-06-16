@@ -113,15 +113,32 @@ def _should_try_rule_based_first(query_context: dict[str, Any]) -> tuple[bool, s
     overall_confidence = float(query_context.get("confidence") or 0.0)
     top_confidence = float(selected_tables[0].get("confidence") or 0.0) if selected_tables else 0.0
     intent = str(plan.get("intent") or "list")
+    
+    # Debug logging for routing decision
+    logger.debug(f"[DEBUG ROUTING] Normalized question: {query_context.get('plan', {}).get('question', 'N/A')}")
+    logger.debug(f"[DEBUG ROUTING] Selected tables: {[t.get('table') for t in selected_tables]}")
+    logger.debug(f"[DEBUG ROUTING] Selected columns: {[(c.get('table'), c.get('column')) for c in query_context.get('selected_columns', [])[:5]]}")
+    logger.debug(f"[DEBUG ROUTING] Vector table candidates: {query_context.get('vector_results', {}).get('tables', [])[:3]}")
+    logger.debug(f"[DEBUG ROUTING] Overall confidence: {overall_confidence}")
+    logger.debug(f"[DEBUG ROUTING] Top confidence: {top_confidence}")
+    logger.debug(f"[DEBUG ROUTING] Intent: {intent}")
+    logger.debug(f"[DEBUG ROUTING] Dimension: {plan.get('dimension')}")
+    logger.debug(f"[DEBUG ROUTING] Grouping: {plan.get('grouping')}")
 
     if plan.get("intent") in {"top_n", "trend", "comparison"}:
+        logger.debug(f"[DEBUG ROUTING] Rule-based skipped: intent '{intent}' needs richer reasoning")
         return False, f"intent '{intent}' needs richer reasoning"
     if plan.get("dimension") or plan.get("grouping"):
+        logger.debug(f"[DEBUG ROUTING] Rule-based skipped: question asks for grouped or dimensional output")
         return False, "question asks for grouped or dimensional output"
     if not _has_clear_primary_table(query_context):
+        logger.debug(f"[DEBUG ROUTING] Rule-based skipped: planner could not isolate one primary table with enough confidence")
         return False, "planner could not isolate one primary table with enough confidence"
     if overall_confidence < 0.5 or top_confidence < 0.5:
+        logger.debug(f"[DEBUG ROUTING] Rule-based skipped: planner confidence is too low for deterministic SQL (overall: {overall_confidence}, top: {top_confidence})")
         return False, "planner confidence is too low for deterministic SQL"
+    
+    logger.debug(f"[DEBUG ROUTING] Rule-based selected: simple single-table question with sufficient planner confidence")
     return True, "simple single-table question with sufficient planner confidence"
 
 

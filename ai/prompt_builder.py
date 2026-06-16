@@ -200,7 +200,7 @@ def _build_schema_section(knowledge_base: dict) -> list[str]:
     return lines
 
 
-def _build_plan_section(query_plan: dict | None, selected_tables: list[dict] | None) -> list[str]:
+def _build_plan_section(query_plan: dict | None, selected_tables: list[dict] | None, join_paths: list[dict] | None = None) -> list[str]:
     if not query_plan and not selected_tables:
         return []
 
@@ -232,6 +232,15 @@ def _build_plan_section(query_plan: dict | None, selected_tables: list[dict] | N
                     for column_entry in selected_columns[:6]
                 ]
                 lines.append(f"    selected columns: {', '.join(column_parts)}")
+
+    if join_paths:
+        lines.append("Computed join paths between selected tables:")
+        for jp in join_paths:
+            path_str = " -> ".join([
+                f"{edge['to_table']}.{edge['to_column']}" 
+                for edge in jp['path']
+            ])
+            lines.append(f"  - {jp['from_table']} -> {jp['to_table']}: {path_str}")
 
     lines.append("")
     return lines
@@ -351,6 +360,7 @@ def build_sql_prompt(
     query_plan: dict | None = None,
     selected_tables: list[dict] | None = None,
     business_glossary: dict | None = None,
+    join_paths: list[dict] | None = None,
 ) -> list[dict]:
     """Build an OpenAI-compatible message list for SQL generation."""
     if not knowledge_base:
@@ -388,7 +398,7 @@ def build_sql_prompt(
     system_parts.append("")
     system_parts.append(_get_relevant_glossary_terms(user_question, knowledge_base, glossary=business_glossary))
     system_parts.append("")
-    system_parts.extend(_build_plan_section(query_plan, selected_tables))
+    system_parts.extend(_build_plan_section(query_plan, selected_tables, join_paths))
     system_parts.extend(_build_ai_target_section(query_plan, selected_tables))
     system_parts.extend(_build_relationship_section(knowledge_base, selected_tables))
     system_parts.append(_SEMANTIC_GUIDANCE)
