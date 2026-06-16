@@ -402,8 +402,8 @@
     "text": "Table: orders Module: transaction Purpose: Stores transaction records for order Description: Orders Columns: order_id, final_amount",
     "tokenized_text": [
       "table",
-      "orders",
       "order",
+      "orders",
       "module",
       "transaction",
       "purpose",
@@ -1233,8 +1233,8 @@
       "final",
       "amount",
       "table",
-      "orders",
       "order",
+      "orders",
       "type",
       "integer",
       "semantic",
@@ -1658,12 +1658,12 @@
       "maps",
       "column",
       "columns",
-      "orders",
       "order",
+      "orders",
       "final",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   }

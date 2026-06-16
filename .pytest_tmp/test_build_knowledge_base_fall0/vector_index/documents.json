@@ -402,8 +402,8 @@
     "text": "Table: orders Module: transaction Purpose: Stores transaction records for order Description: Orders Columns: order_id, final_amount",
     "tokenized_text": [
       "table",
-      "orders",
       "order",
+      "orders",
       "module",
       "transaction",
       "purpose",
@@ -1233,8 +1233,8 @@
       "final",
       "amount",
       "table",
-      "orders",
       "order",
+      "orders",
       "type",
       "integer",
       "semantic",
@@ -1662,8 +1662,8 @@
     "tokenized_text": [
       "business",
       "term",
-      "orders",
       "order",
+      "orders",
       "description",
       "also",
       "known",
@@ -1674,8 +1674,8 @@
       "amount",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "count"
     ]
   },
@@ -2112,8 +2112,8 @@
       "amount",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "count"
     ]
   },
@@ -2542,8 +2542,8 @@
       "maps",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -2966,16 +2966,16 @@
       "description",
       "monetary",
       "field",
-      "orders",
       "order",
+      "orders",
       "also",
       "known",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -3401,8 +3401,8 @@
       "description",
       "monetary",
       "field",
-      "orders",
       "order",
+      "orders",
       "final",
       "also",
       "known",
@@ -3411,8 +3411,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -3838,8 +3838,8 @@
       "description",
       "monetary",
       "field",
-      "orders",
       "order",
+      "orders",
       "final",
       "amount",
       "also",
@@ -3849,8 +3849,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -4273,8 +4273,8 @@
       "description",
       "monetary",
       "field",
-      "orders",
       "order",
+      "orders",
       "final",
       "amount",
       "also",
@@ -4283,8 +4283,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -4710,8 +4710,8 @@
       "description",
       "monetary",
       "field",
-      "orders",
       "order",
+      "orders",
       "final",
       "amount",
       "also",
@@ -4721,8 +4721,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -5147,11 +5147,11 @@
       "money",
       "description",
       "monetary",
-      "value",
       "values",
+      "value",
       "such",
-      "totals",
       "total",
+      "totals",
       "price",
       "prices",
       "balances",
@@ -5164,12 +5164,12 @@
       "maps",
       "column",
       "columns",
-      "orders",
       "order",
+      "orders",
       "final",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -5589,11 +5589,11 @@
       "price",
       "description",
       "monetary",
-      "value",
       "values",
+      "value",
       "such",
-      "totals",
       "total",
+      "totals",
       "prices",
       "balances",
       "balance",
@@ -5605,13 +5605,13 @@
       "maps",
       "column",
       "columns",
-      "orders",
       "order",
+      "orders",
       "final",
       "amount",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -6031,11 +6031,11 @@
       "cost",
       "description",
       "monetary",
-      "value",
       "values",
+      "value",
       "such",
-      "totals",
       "total",
+      "totals",
       "price",
       "prices",
       "balances",
@@ -6047,13 +6047,13 @@
       "maps",
       "column",
       "columns",
-      "orders",
       "order",
+      "orders",
       "final",
       "amount",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   }
 ]

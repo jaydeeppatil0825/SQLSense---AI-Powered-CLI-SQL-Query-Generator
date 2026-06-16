@@ -518,3 +518,82 @@ def test_failed_retry_returns_clean_validation_failure_details(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "rule-based"
     # Verify that the SQL is valid (not the unsafe DELETE)
     assert "DELETE" not in sql.upper()
+
+
+def test_pending_payment_by_customer_ai_retry_does_not_produce_from_limit(monkeypatch):
+    service = _service()
+    captured: dict = {}
+
+    def fake_generate_sql(user_question, knowledge_base, backend=None, query_plan=None, selected_tables=None, business_glossary=None, join_paths=None):
+        return "SELECT customer_name, amount_due FROM"
+
+    def fake_generate_sql_with_retry(
+        user_question,
+        knowledge_base,
+        backend,
+        first_attempt_sql,
+        validation_reason,
+        query_plan=None,
+        selected_tables=None,
+        business_glossary=None,
+        validation_context=None,
+        join_paths=None,
+    ):
+        captured["first_attempt_sql"] = first_attempt_sql
+        captured["validation_reason"] = validation_reason
+        captured["validation_context"] = validation_context
+        captured["join_paths"] = join_paths
+        return (
+            "SELECT c.customer_name AS customer_name, SUM(f.outstanding_amount) AS pending_amount "
+            "FROM sales_invoices f JOIN customers c ON f.customer_id = c.customer_id "
+            "WHERE f.status = 'Pending' "
+            "GROUP BY c.customer_name ORDER BY pending_amount DESC;"
+        )
+
+    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
+    monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_generate_sql_with_retry)
+    monkeypatch.setattr("ai.simple_query_generator.generate_simple_sql", lambda *args, **kwargs: None)
+
+    success, message, sql, error = service.process_question("tell me pending payment by customer", ai_backend="local")
+
+    assert success is True
+    assert "FROM LIMIT" not in captured["first_attempt_sql"]
+    assert "FROM sales_invoices" in sql
+    assert "JOIN" in sql
+    assert "LIMIT" not in sql.upper()
+    assert service.get_last_query_context()["route_used"] == "ai-retry"
+    assert captured["validation_context"]["selected_tables"]
+    assert captured["validation_context"]["fk_relationships"]
+    assert captured["validation_context"]["join_paths"] == captured["join_paths"]
+
+
+def test_invalid_complex_ai_sql_returns_clean_failure_without_execution(monkeypatch):
+    service = _service()
+
+    def fake_generate_sql(user_question, knowledge_base, backend=None, query_plan=None, selected_tables=None, business_glossary=None, join_paths=None):
+        return "SELECT customer_name FROM"
+
+    def fake_generate_sql_with_retry(
+        user_question,
+        knowledge_base,
+        backend,
+        first_attempt_sql,
+        validation_reason,
+        query_plan=None,
+        selected_tables=None,
+        business_glossary=None,
+        validation_context=None,
+        join_paths=None,
+    ):
+        return "SELECT customer_name FROM"
+
+    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
+    monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_generate_sql_with_retry)
+    monkeypatch.setattr("ai.simple_query_generator.generate_simple_sql", lambda *args, **kwargs: None)
+
+    success, message, sql, error = service.process_question("tell me pending payment by customer", ai_backend="local")
+
+    assert success is False
+    assert sql is None
+    assert "Generated SQL: SELECT customer_name FROM" in error
+    assert "Validation reason:" in error

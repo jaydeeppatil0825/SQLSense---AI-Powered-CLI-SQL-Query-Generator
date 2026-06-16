@@ -52,7 +52,7 @@ Structured-plan execution rules:
   - Prefer the selected columns when choosing measures, dimensions, date filters, and status filters.
   - For intent=total use SUM() on the best numeric measure.
   - For intent=count use COUNT(*), COUNT(column), or COUNT(DISTINCT column) as appropriate.
-  - For intent=top_n use GROUP BY + ORDER BY DESC + LIMIT.
+  - For intent=top_n use GROUP BY + ORDER BY DESC, and add LIMIT only when the question explicitly requests a row count.
   - For intent=trend or grouping by month use a date expression and aggregate.
   - When the plan includes filters, apply them instead of returning a raw table dump.
   - Do NOT use SELECT * for totals, counts, balances, grouped analysis, or other business-style questions unless the plan clearly indicates a raw record listing.
@@ -268,7 +268,7 @@ def _build_ai_target_section(query_plan: dict | None, selected_tables: list[dict
     elif intent == "average":
         lines.append("  - Use AVG() for the final measure.")
     elif intent == "top_n":
-        lines.append("  - Rank results with ORDER BY DESC and apply LIMIT.")
+        lines.append("  - Rank results with ORDER BY DESC.")
     elif intent == "trend":
         lines.append("  - Aggregate over time and include GROUP BY for the time bucket.")
     if dimension:
@@ -378,7 +378,7 @@ def build_sql_prompt(
     else:
         limit_instruction = (
             "The user did not specify a row count. "
-            "Add LIMIT 50 at the end of the query unless the query plan already specifies another limit."
+            "Do not add LIMIT unless the question explicitly requests a row count."
         )
 
     system_parts: list[str] = []

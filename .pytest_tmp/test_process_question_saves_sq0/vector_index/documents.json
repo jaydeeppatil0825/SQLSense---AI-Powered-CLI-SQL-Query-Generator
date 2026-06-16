@@ -402,8 +402,8 @@
     "text": "Table: orders Module: unknown Purpose:  Description:  Columns: order_id, final_amount",
     "tokenized_text": [
       "table",
-      "orders",
       "order",
+      "orders",
       "module",
       "unknown",
       "purpose",
@@ -1230,8 +1230,8 @@
       "final",
       "amount",
       "table",
-      "orders",
       "order",
+      "orders",
       "type",
       "integer",
       "semantic",
@@ -1670,8 +1670,8 @@
     "tokenized_text": [
       "business",
       "term",
-      "branch",
       "branches",
+      "branch",
       "description",
       "new",
       "york",
@@ -1689,8 +1689,8 @@
       "state",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "services",
       "service",
       "offered"
@@ -2147,8 +2147,8 @@
       "state",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "services",
       "service",
       "offered"
@@ -2599,10 +2599,10 @@
       "table_names": [
         "sales_orders",
         "purchase_orders",
-        "employees",
+        "branches",
         "warehouses",
         "expenses",
-        "branches"
+        "employees"
       ],
       "term": "branch id",
       "type": "glossary"
@@ -2627,15 +2627,15 @@
       "warehouse",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "purchase",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -3064,8 +3064,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -3529,14 +3529,14 @@
         }
       ],
       "table_names": [
-        "categories",
-        "products",
-        "employees",
         "suppliers",
+        "products",
+        "branches",
         "warehouses",
-        "departments",
         "customers",
-        "branches"
+        "employees",
+        "departments",
+        "categories"
       ],
       "term": "label",
       "type": "glossary"
@@ -3549,8 +3549,8 @@
       "description",
       "name",
       "field",
-      "branch",
       "branches",
+      "branch",
       "also",
       "known",
       "category",
@@ -3565,15 +3565,15 @@
       "employees",
       "employee",
       "role",
-      "products",
       "product",
+      "products",
       "suppliers",
       "supplier",
       "warehouses",
       "warehouse",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -4037,14 +4037,14 @@
         }
       ],
       "table_names": [
-        "categories",
-        "products",
-        "employees",
         "suppliers",
+        "products",
+        "branches",
         "warehouses",
-        "departments",
         "customers",
-        "branches"
+        "employees",
+        "departments",
+        "categories"
       ],
       "term": "title",
       "type": "glossary"
@@ -4057,8 +4057,8 @@
       "description",
       "name",
       "field",
-      "branch",
       "branches",
+      "branch",
       "also",
       "known",
       "category",
@@ -4073,15 +4073,15 @@
       "employees",
       "employee",
       "role",
-      "products",
       "product",
+      "products",
       "suppliers",
       "supplier",
       "warehouses",
       "warehouse",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -4512,10 +4512,10 @@
         }
       ],
       "table_names": [
+        "branches",
         "suppliers",
         "customers",
-        "warehouses",
-        "branches"
+        "warehouses"
       ],
       "term": "city",
       "type": "glossary"
@@ -4529,10 +4529,10 @@
       "text",
       "also",
       "known",
-      "branch",
       "branches",
-      "customer",
+      "branch",
       "customers",
+      "customer",
       "suppliers",
       "supplier",
       "warehouses",
@@ -4541,8 +4541,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -5019,14 +5019,14 @@
       ],
       "table_names": [
         "sales_orders",
-        "shipments",
         "purchase_orders",
-        "products",
-        "employees",
         "suppliers",
-        "invoices",
+        "shipments",
+        "products",
+        "branches",
         "customers",
-        "branches"
+        "employees",
+        "invoices"
       ],
       "term": "state",
       "type": "glossary"
@@ -5041,38 +5041,38 @@
       "states",
       "also",
       "known",
-      "branch",
       "branches",
-      "customer",
+      "branch",
       "customers",
+      "customer",
       "active",
       "status",
       "statu",
       "employees",
       "employee",
-      "products",
       "product",
+      "products",
       "suppliers",
       "supplier",
       "payment",
       "maps",
       "column",
       "columns",
-      "invoices",
       "invoice",
+      "invoices",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "purchase",
       "shipment",
       "shipments",
       "delivery",
       "example",
-      "questions",
       "question",
-      "pend",
-      "pending"
+      "questions",
+      "pending",
+      "pend"
     ]
   },
   {
@@ -5497,9 +5497,9 @@
         }
       ],
       "table_names": [
+        "branches",
         "suppliers",
-        "customers",
-        "branches"
+        "customers"
       ],
       "term": "california",
       "type": "glossary"
@@ -5515,20 +5515,20 @@
       "states",
       "also",
       "known",
-      "branch",
       "branches",
-      "customer",
+      "branch",
       "customers",
+      "customer",
       "suppliers",
       "supplier",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
-      "pend",
-      "pending"
+      "questions",
+      "pending",
+      "pend"
     ]
   },
   {
@@ -5946,8 +5946,8 @@
         }
       ],
       "table_names": [
-        "suppliers",
-        "branches"
+        "branches",
+        "suppliers"
       ],
       "term": "new york",
       "type": "glossary"
@@ -5964,18 +5964,18 @@
       "states",
       "also",
       "known",
-      "branch",
       "branches",
+      "branch",
       "suppliers",
       "supplier",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
-      "pend",
-      "pending"
+      "questions",
+      "pending",
+      "pend"
     ]
   },
   {
@@ -6401,14 +6401,14 @@
       "dates",
       "also",
       "known",
-      "branch",
       "branches",
+      "branch",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -6891,16 +6891,16 @@
         }
       ],
       "table_names": [
-        "sales_orders",
-        "shipments",
-        "purchase_orders",
-        "employees",
-        "invoices",
-        "inventory",
-        "customers",
         "payments",
+        "inventory",
+        "sales_orders",
+        "purchase_orders",
+        "shipments",
+        "returns",
         "branches",
-        "returns"
+        "customers",
+        "employees",
+        "invoices"
       ],
       "term": "time",
       "type": "glossary"
@@ -6912,17 +6912,17 @@
       "time",
       "description",
       "start",
-      "date",
       "dates",
+      "date",
       "also",
       "known",
       "open",
       "opening",
-      "branch",
       "branches",
+      "branch",
       "created",
-      "customer",
       "customers",
+      "customer",
       "hire",
       "employees",
       "employee",
@@ -6932,13 +6932,13 @@
       "column",
       "columns",
       "inventory",
-      "invoices",
       "invoice",
+      "invoices",
       "due",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "payments",
       "payment",
       "purchase",
@@ -6946,8 +6946,8 @@
       "shipment",
       "shipments",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -7430,16 +7430,16 @@
         }
       ],
       "table_names": [
-        "sales_orders",
-        "shipments",
-        "purchase_orders",
-        "employees",
-        "invoices",
-        "inventory",
-        "customers",
         "payments",
+        "inventory",
+        "sales_orders",
+        "purchase_orders",
+        "shipments",
+        "returns",
         "branches",
-        "returns"
+        "customers",
+        "employees",
+        "invoices"
       ],
       "term": "month",
       "type": "glossary"
@@ -7451,17 +7451,17 @@
       "month",
       "description",
       "start",
-      "date",
       "dates",
+      "date",
       "also",
       "known",
       "open",
       "opening",
-      "branch",
       "branches",
+      "branch",
       "created",
-      "customer",
       "customers",
+      "customer",
       "hire",
       "employees",
       "employee",
@@ -7471,13 +7471,13 @@
       "column",
       "columns",
       "inventory",
-      "invoices",
       "invoice",
+      "invoices",
       "due",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "payments",
       "payment",
       "purchase",
@@ -7485,8 +7485,8 @@
       "shipment",
       "shipments",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -7969,16 +7969,16 @@
         }
       ],
       "table_names": [
-        "sales_orders",
-        "shipments",
-        "purchase_orders",
-        "employees",
-        "invoices",
-        "inventory",
-        "customers",
         "payments",
+        "inventory",
+        "sales_orders",
+        "purchase_orders",
+        "shipments",
+        "returns",
         "branches",
-        "returns"
+        "customers",
+        "employees",
+        "invoices"
       ],
       "term": "year",
       "type": "glossary"
@@ -7990,17 +7990,17 @@
       "year",
       "description",
       "start",
-      "date",
       "dates",
+      "date",
       "also",
       "known",
       "open",
       "opening",
-      "branch",
       "branches",
+      "branch",
       "created",
-      "customer",
       "customers",
+      "customer",
       "hire",
       "employees",
       "employee",
@@ -8010,13 +8010,13 @@
       "column",
       "columns",
       "inventory",
-      "invoices",
       "invoice",
+      "invoices",
       "due",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "payments",
       "payment",
       "purchase",
@@ -8024,8 +8024,8 @@
       "shipment",
       "shipments",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -8449,20 +8449,20 @@
       "01",
       "description",
       "start",
-      "date",
       "dates",
+      "date",
       "also",
       "known",
       "open",
       "opening",
-      "branch",
       "branches",
+      "branch",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -8900,8 +8900,8 @@
       "name",
       "id",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -9338,8 +9338,8 @@
       "name",
       "id",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -9774,14 +9774,14 @@
       "also",
       "known",
       "categories",
-      "products",
       "product",
+      "products",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -10324,16 +10324,16 @@
       ],
       "table_names": [
         "sales_orders",
-        "shipments",
-        "categories",
-        "purchase_orders",
-        "products",
-        "employees",
-        "suppliers",
-        "warehouses",
-        "sales_order_items",
         "purchase_order_items",
-        "returns"
+        "purchase_orders",
+        "suppliers",
+        "sales_order_items",
+        "returns",
+        "shipments",
+        "products",
+        "warehouses",
+        "employees",
+        "categories"
       ],
       "term": "id",
       "type": "glossary"
@@ -10358,24 +10358,24 @@
       "maps",
       "column",
       "columns",
-      "products",
       "product",
+      "products",
       "suppliers",
       "warehouses",
       "warehouse",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "customer",
       "purchase",
-      "item",
       "items",
+      "item",
       "shipment",
       "shipments",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -10803,8 +10803,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -11268,14 +11268,14 @@
         }
       ],
       "table_names": [
-        "categories",
         "suppliers",
-        "employees",
         "products",
+        "branches",
         "warehouses",
-        "departments",
         "customers",
-        "branches"
+        "employees",
+        "departments",
+        "categories"
       ],
       "term": "name",
       "type": "glossary"
@@ -11300,17 +11300,17 @@
       "columns",
       "warehouses",
       "warehouse",
-      "branch",
       "branches",
-      "customer",
+      "branch",
       "customers",
+      "customer",
       "department",
       "departments",
-      "products",
       "product",
+      "products",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -11745,8 +11745,8 @@
     "tokenized_text": [
       "business",
       "term",
-      "customer",
       "customers",
+      "customer",
       "description",
       "info",
       "also",
@@ -11763,8 +11763,8 @@
       "credit",
       "limit",
       "example",
-      "questions",
       "question",
+      "questions",
       "their",
       "type"
     ]
@@ -12219,8 +12219,8 @@
       "credit",
       "limit",
       "example",
-      "questions",
       "question",
+      "questions",
       "their",
       "type"
     ]
@@ -12640,8 +12640,8 @@
         }
       ],
       "table_names": [
-        "sales_orders",
-        "customers"
+        "customers",
+        "sales_orders"
       ],
       "term": "customer id",
       "type": "glossary"
@@ -12659,14 +12659,14 @@
       "customers",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -13095,8 +13095,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -13525,8 +13525,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -13957,8 +13957,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -14381,16 +14381,16 @@
       "description",
       "monetary",
       "field",
-      "customer",
       "customers",
+      "customer",
       "also",
       "known",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -14957,18 +14957,18 @@
         }
       ],
       "table_names": [
-        "sales_orders",
-        "shipments",
-        "purchase_orders",
-        "products",
-        "employees",
-        "sales_order_items",
-        "invoices",
-        "customers",
-        "purchase_order_items",
         "payments",
+        "sales_orders",
+        "purchase_order_items",
+        "purchase_orders",
+        "sales_order_items",
+        "returns",
+        "shipments",
+        "products",
         "expenses",
-        "returns"
+        "customers",
+        "employees",
+        "invoices"
       ],
       "term": "amount",
       "type": "glossary"
@@ -14981,8 +14981,8 @@
       "description",
       "monetary",
       "field",
-      "customer",
       "customers",
+      "customer",
       "credit",
       "limit",
       "also",
@@ -14998,26 +14998,26 @@
       "column",
       "columns",
       "type",
-      "products",
       "product",
+      "products",
       "unit",
       "price",
       "cost",
-      "invoices",
       "invoice",
+      "invoices",
       "paid",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "total",
       "discount",
       "tax",
       "payments",
       "payment",
       "purchase",
-      "item",
       "items",
+      "item",
       "quantity",
       "line",
       "refund",
@@ -15025,8 +15025,8 @@
       "shipments",
       "freight",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -15568,18 +15568,18 @@
         }
       ],
       "table_names": [
-        "sales_orders",
-        "shipments",
-        "purchase_orders",
-        "products",
-        "employees",
-        "sales_order_items",
-        "invoices",
-        "customers",
-        "purchase_order_items",
         "payments",
+        "sales_orders",
+        "purchase_order_items",
+        "purchase_orders",
+        "sales_order_items",
+        "returns",
+        "shipments",
+        "products",
         "expenses",
-        "returns"
+        "customers",
+        "employees",
+        "invoices"
       ],
       "term": "total",
       "type": "glossary"
@@ -15592,8 +15592,8 @@
       "description",
       "monetary",
       "field",
-      "customer",
       "customers",
+      "customer",
       "credit",
       "limit",
       "also",
@@ -15610,33 +15610,33 @@
       "columns",
       "type",
       "amount",
-      "products",
       "product",
+      "products",
       "unit",
       "price",
       "cost",
-      "invoices",
       "invoice",
+      "invoices",
       "paid",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "discount",
       "tax",
       "payments",
       "payment",
       "purchase",
-      "item",
       "items",
+      "item",
       "line",
       "refund",
       "shipment",
       "shipments",
       "freight",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -16178,18 +16178,18 @@
         }
       ],
       "table_names": [
-        "sales_orders",
-        "shipments",
-        "purchase_orders",
-        "products",
-        "employees",
-        "sales_order_items",
-        "invoices",
-        "customers",
-        "purchase_order_items",
         "payments",
+        "sales_orders",
+        "purchase_order_items",
+        "purchase_orders",
+        "sales_order_items",
+        "returns",
+        "shipments",
+        "products",
         "expenses",
-        "returns"
+        "customers",
+        "employees",
+        "invoices"
       ],
       "term": "value",
       "type": "glossary"
@@ -16202,8 +16202,8 @@
       "description",
       "monetary",
       "field",
-      "customer",
       "customers",
+      "customer",
       "credit",
       "limit",
       "also",
@@ -16220,34 +16220,34 @@
       "columns",
       "type",
       "amount",
-      "products",
       "product",
+      "products",
       "unit",
       "price",
       "cost",
-      "invoices",
       "invoice",
+      "invoices",
       "paid",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "total",
       "discount",
       "tax",
       "payments",
       "payment",
       "purchase",
-      "item",
       "items",
+      "item",
       "line",
       "refund",
       "shipment",
       "shipments",
       "freight",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -16795,18 +16795,18 @@
         }
       ],
       "table_names": [
-        "sales_orders",
-        "shipments",
-        "purchase_orders",
-        "products",
-        "employees",
-        "sales_order_items",
-        "invoices",
-        "customers",
-        "purchase_order_items",
         "payments",
+        "sales_orders",
+        "purchase_order_items",
+        "purchase_orders",
+        "sales_order_items",
+        "returns",
+        "shipments",
+        "products",
         "expenses",
-        "returns"
+        "customers",
+        "employees",
+        "invoices"
       ],
       "term": "balance",
       "type": "glossary"
@@ -16819,8 +16819,8 @@
       "description",
       "monetary",
       "field",
-      "customer",
       "customers",
+      "customer",
       "credit",
       "limit",
       "also",
@@ -16837,35 +16837,35 @@
       "columns",
       "type",
       "amount",
-      "products",
       "product",
+      "products",
       "unit",
       "price",
       "cost",
-      "invoices",
       "invoice",
+      "invoices",
       "due",
       "paid",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "total",
       "discount",
       "tax",
       "payments",
       "payment",
       "purchase",
-      "item",
       "items",
+      "item",
       "line",
       "refund",
       "shipment",
       "shipments",
       "freight",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -17289,8 +17289,8 @@
       "description",
       "monetary",
       "field",
-      "customer",
       "customers",
+      "customer",
       "credit",
       "limit",
       "also",
@@ -17299,8 +17299,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -17732,10 +17732,10 @@
         }
       ],
       "table_names": [
-        "products",
-        "employees",
         "customers",
-        "suppliers"
+        "suppliers",
+        "employees",
+        "products"
       ],
       "term": "active status",
       "type": "glossary"
@@ -17751,22 +17751,22 @@
       "inactive",
       "also",
       "known",
-      "customer",
       "customers",
+      "customer",
       "employees",
       "employee",
-      "products",
       "product",
+      "products",
       "suppliers",
       "supplier",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
-      "pend",
-      "pending"
+      "questions",
+      "pending",
+      "pend"
     ]
   },
   {
@@ -18243,14 +18243,14 @@
       ],
       "table_names": [
         "sales_orders",
-        "shipments",
         "purchase_orders",
-        "products",
-        "employees",
         "suppliers",
-        "invoices",
+        "shipments",
+        "products",
+        "branches",
         "customers",
-        "branches"
+        "employees",
+        "invoices"
       ],
       "term": "status",
       "type": "glossary"
@@ -18266,17 +18266,17 @@
       "inactive",
       "also",
       "known",
-      "customer",
       "customers",
+      "customer",
       "employees",
       "employee",
       "payment",
-      "invoices",
       "invoice",
+      "invoices",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "maps",
       "column",
       "columns",
@@ -18284,18 +18284,18 @@
       "shipment",
       "shipments",
       "delivery",
-      "branch",
       "branches",
+      "branch",
       "state",
-      "products",
       "product",
+      "products",
       "suppliers",
       "supplier",
       "example",
-      "questions",
       "question",
-      "pend",
-      "pending"
+      "questions",
+      "pending",
+      "pend"
     ]
   },
   {
@@ -18718,14 +18718,14 @@
       "description",
       "also",
       "known",
-      "customer",
       "customers",
+      "customer",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -19196,15 +19196,15 @@
         }
       ],
       "table_names": [
+        "payments",
+        "inventory",
         "sales_orders",
         "shipments",
-        "employees",
-        "invoices",
-        "inventory",
-        "customers",
-        "payments",
+        "branches",
         "expenses",
-        "branches"
+        "customers",
+        "employees",
+        "invoices"
       ],
       "term": "date",
       "type": "glossary"
@@ -19218,8 +19218,8 @@
       "created",
       "also",
       "known",
-      "customer",
       "customers",
+      "customer",
       "hire",
       "employees",
       "employee",
@@ -19231,24 +19231,24 @@
       "column",
       "columns",
       "inventory",
-      "invoices",
       "invoice",
+      "invoices",
       "due",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "payments",
       "payment",
       "shipment",
       "shipments",
-      "branch",
       "branches",
+      "branch",
       "open",
       "opening",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -19684,8 +19684,8 @@
       "columns",
       "name",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -20120,8 +20120,8 @@
       "columns",
       "name",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -20561,8 +20561,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -20989,9 +20989,9 @@
         }
       ],
       "table_names": [
-        "products",
         "returns",
-        "departments"
+        "departments",
+        "products"
       ],
       "term": "primary key",
       "type": "glossary"
@@ -21015,8 +21015,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -21444,8 +21444,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -21897,8 +21897,8 @@
       "hire",
       "date",
       "example",
-      "questions",
       "question",
+      "questions",
       "john",
       "s",
       "job"
@@ -22353,8 +22353,8 @@
       "hire",
       "date",
       "example",
-      "questions",
       "question",
+      "questions",
       "john",
       "s",
       "job"
@@ -22793,14 +22793,14 @@
       "employees",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -23276,8 +23276,8 @@
       "columns",
       "customer",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -23705,8 +23705,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -24136,8 +24136,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -24563,9 +24563,9 @@
         }
       ],
       "table_names": [
+        "warehouses",
         "sales_orders",
-        "employees",
-        "warehouses"
+        "employees"
       ],
       "term": "branch",
       "type": "glossary"
@@ -24587,14 +24587,14 @@
       "warehouse",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -25025,8 +25025,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -25458,8 +25458,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -25889,8 +25889,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -26322,8 +26322,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -26753,8 +26753,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -27257,12 +27257,12 @@
       "table_names": [
         "sales_orders",
         "shipments",
+        "returns",
         "products",
-        "employees",
-        "invoices",
-        "customers",
         "expenses",
-        "returns"
+        "customers",
+        "employees",
+        "invoices"
       ],
       "term": "money",
       "type": "glossary"
@@ -27289,8 +27289,8 @@
       "columns",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "total",
       "discount",
       "tax",
@@ -27298,21 +27298,21 @@
       "shipment",
       "shipments",
       "freight",
-      "customer",
       "customers",
+      "customer",
       "credit",
       "limit",
       "id",
       "date",
       "type",
-      "products",
       "product",
+      "products",
       "unit",
       "price",
       "cost",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -27769,10 +27769,10 @@
       "table_names": [
         "suppliers",
         "products",
-        "employees",
-        "invoices",
+        "branches",
         "customers",
-        "branches"
+        "employees",
+        "invoices"
       ],
       "term": "active",
       "type": "glossary"
@@ -27789,26 +27789,26 @@
       "also",
       "known",
       "employees",
-      "products",
       "product",
+      "products",
       "maps",
       "column",
       "columns",
-      "branch",
       "branches",
+      "branch",
       "state",
-      "customer",
       "customers",
+      "customer",
       "suppliers",
       "supplier",
-      "invoices",
       "invoice",
+      "invoices",
       "payment",
       "example",
-      "questions",
       "question",
-      "pend",
-      "pending"
+      "questions",
+      "pending",
+      "pend"
     ]
   },
   {
@@ -28247,13 +28247,13 @@
       "expense",
       "description",
       "office",
-      "supplies",
       "supply",
+      "supplies",
       "cost",
       "also",
       "known",
-      "expens",
       "expen",
+      "expens",
       "maps",
       "column",
       "columns",
@@ -28262,8 +28262,8 @@
       "id",
       "type",
       "example",
-      "questions",
       "question",
+      "questions",
       "was",
       "spent"
     ]
@@ -28700,12 +28700,12 @@
     "tokenized_text": [
       "business",
       "term",
-      "expens",
       "expen",
+      "expens",
       "description",
       "office",
-      "supplies",
       "supply",
+      "supplies",
       "cost",
       "also",
       "known",
@@ -28719,8 +28719,8 @@
       "id",
       "type",
       "example",
-      "questions",
       "question",
+      "questions",
       "was",
       "spent"
     ]
@@ -29152,8 +29152,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -29583,8 +29583,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -30013,8 +30013,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -30444,8 +30444,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -30865,8 +30865,8 @@
         }
       ],
       "table_names": [
-        "expenses",
-        "warehouses"
+        "warehouses",
+        "expenses"
       ],
       "term": "type",
       "type": "glossary"
@@ -30888,8 +30888,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -31343,8 +31343,8 @@
       "inventory",
       "description",
       "food",
-      "beverage",
       "beverages",
+      "beverage",
       "also",
       "known",
       "product",
@@ -31359,8 +31359,8 @@
       "hand",
       "reserved",
       "example",
-      "questions",
       "question",
+      "questions",
       "s",
       "stock",
       "level"
@@ -31791,8 +31791,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -32251,9 +32251,9 @@
       ],
       "table_names": [
         "inventory",
-        "products",
+        "purchase_order_items",
         "sales_order_items",
-        "purchase_order_items"
+        "products"
       ],
       "term": "product",
       "type": "glossary"
@@ -32272,8 +32272,8 @@
       "products",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "sales",
       "sale",
       "maps",
@@ -32288,8 +32288,8 @@
       "reorder",
       "level",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -32727,8 +32727,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -33168,11 +33168,11 @@
         }
       ],
       "table_names": [
-        "sales_order_items",
-        "products",
         "inventory",
-        "purchase_order_items",
-        "returns"
+        "sales_order_items",
+        "returns",
+        "products",
+        "purchase_order_items"
       ],
       "term": "product id",
       "type": "glossary"
@@ -33191,16 +33191,16 @@
       "products",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "sales",
       "sale",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -33624,9 +33624,9 @@
         }
       ],
       "table_names": [
+        "warehouses",
         "inventory",
-        "shipments",
-        "warehouses"
+        "shipments"
       ],
       "term": "warehouse id",
       "type": "glossary"
@@ -33649,8 +33649,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -34078,8 +34078,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -34533,12 +34533,12 @@
         }
       ],
       "table_names": [
+        "inventory",
         "sales_order_items",
+        "returns",
         "products",
         "warehouses",
-        "inventory",
-        "purchase_order_items",
-        "returns"
+        "purchase_order_items"
       ],
       "term": "qty",
       "type": "glossary"
@@ -34557,8 +34557,8 @@
       "reserved",
       "reorder",
       "level",
-      "products",
       "product",
+      "products",
       "capacity",
       "unit",
       "units",
@@ -34569,13 +34569,13 @@
       "columns",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "sales",
       "sale",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -35029,12 +35029,12 @@
         }
       ],
       "table_names": [
+        "inventory",
         "sales_order_items",
+        "returns",
         "products",
         "warehouses",
-        "inventory",
-        "purchase_order_items",
-        "returns"
+        "purchase_order_items"
       ],
       "term": "count",
       "type": "glossary"
@@ -35053,8 +35053,8 @@
       "reserved",
       "reorder",
       "level",
-      "products",
       "product",
+      "products",
       "capacity",
       "unit",
       "units",
@@ -35065,13 +35065,13 @@
       "columns",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "sales",
       "sale",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -35525,12 +35525,12 @@
         }
       ],
       "table_names": [
+        "inventory",
         "sales_order_items",
+        "returns",
         "products",
         "warehouses",
-        "inventory",
-        "purchase_order_items",
-        "returns"
+        "purchase_order_items"
       ],
       "term": "stock",
       "type": "glossary"
@@ -35549,8 +35549,8 @@
       "reserved",
       "reorder",
       "level",
-      "products",
       "product",
+      "products",
       "capacity",
       "unit",
       "units",
@@ -35561,13 +35561,13 @@
       "columns",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "sales",
       "sale",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -36021,12 +36021,12 @@
         }
       ],
       "table_names": [
+        "inventory",
         "sales_order_items",
+        "returns",
         "products",
         "warehouses",
-        "inventory",
-        "purchase_order_items",
-        "returns"
+        "purchase_order_items"
       ],
       "term": "units",
       "type": "glossary"
@@ -36046,8 +36046,8 @@
       "reserved",
       "reorder",
       "level",
-      "products",
       "product",
+      "products",
       "capacity",
       "warehouses",
       "warehouse",
@@ -36056,13 +36056,13 @@
       "columns",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "sales",
       "sale",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -36494,8 +36494,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -36925,8 +36925,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -37358,8 +37358,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -37796,8 +37796,8 @@
       ],
       "table_names": [
         "inventory",
-        "sales_orders",
-        "sales_order_items"
+        "sales_order_items",
+        "sales_orders"
       ],
       "term": "order",
       "type": "glossary"
@@ -37823,11 +37823,11 @@
       "maps",
       "column",
       "columns",
-      "item",
       "items",
+      "item",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record",
       "latest"
@@ -38259,8 +38259,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -38691,8 +38691,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -39128,8 +39128,8 @@
     "tokenized_text": [
       "business",
       "term",
-      "products",
       "product",
+      "products",
       "description",
       "smartphone",
       "charger",
@@ -39147,8 +39147,8 @@
       "reorder",
       "level",
       "example",
-      "questions",
       "question",
+      "questions",
       "rechargeable"
     ]
   },
@@ -39578,8 +39578,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -40005,8 +40005,8 @@
         }
       ],
       "table_names": [
-        "products",
-        "returns"
+        "returns",
+        "products"
       ],
       "term": "foreign key",
       "type": "glossary"
@@ -40031,8 +40031,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -40457,9 +40457,9 @@
         }
       ],
       "table_names": [
+        "suppliers",
         "purchase_orders",
-        "products",
-        "suppliers"
+        "products"
       ],
       "term": "supplier id",
       "type": "glossary"
@@ -40473,18 +40473,18 @@
       "description",
       "also",
       "known",
-      "products",
       "product",
+      "products",
       "suppliers",
       "purchase",
-      "orders",
       "order",
+      "orders",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -40920,8 +40920,8 @@
         }
       ],
       "table_names": [
-        "products",
-        "suppliers"
+        "suppliers",
+        "products"
       ],
       "term": "supplier",
       "type": "glossary"
@@ -40935,8 +40935,8 @@
       "id",
       "also",
       "known",
-      "products",
       "product",
+      "products",
       "suppliers",
       "maps",
       "column",
@@ -40947,8 +40947,8 @@
       "statu",
       "state",
       "example",
-      "questions",
       "question",
+      "questions",
       "top"
     ]
   },
@@ -41383,19 +41383,19 @@
       "per",
       "also",
       "known",
-      "products",
       "product",
+      "products",
       "sales",
       "sale",
       "order",
-      "item",
       "items",
+      "item",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -41866,12 +41866,12 @@
         }
       ],
       "table_names": [
+        "purchase_order_items",
         "sales_order_items",
         "products",
-        "employees",
+        "expenses",
         "customers",
-        "purchase_order_items",
-        "expenses"
+        "employees"
       ],
       "term": "price",
       "type": "glossary"
@@ -41886,13 +41886,13 @@
       "unit",
       "also",
       "known",
-      "products",
       "product",
+      "products",
       "cost",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "line",
       "total",
       "sales",
@@ -41900,8 +41900,8 @@
       "maps",
       "column",
       "columns",
-      "customer",
       "customers",
+      "customer",
       "credit",
       "limit",
       "employees",
@@ -41914,8 +41914,8 @@
       "type",
       "amount",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -42348,15 +42348,15 @@
       "per",
       "also",
       "known",
-      "products",
       "product",
+      "products",
       "cost",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -42782,14 +42782,14 @@
       "unit",
       "also",
       "known",
-      "products",
       "product",
+      "products",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -43255,9 +43255,9 @@
       "table_names": [
         "sales_order_items",
         "products",
-        "employees",
+        "expenses",
         "customers",
-        "expenses"
+        "employees"
       ],
       "term": "cost",
       "type": "glossary"
@@ -43273,19 +43273,19 @@
       "also",
       "known",
       "price",
-      "products",
       "product",
+      "products",
       "sales",
       "sale",
       "order",
-      "item",
       "items",
+      "item",
       "money",
       "maps",
       "column",
       "columns",
-      "customer",
       "customers",
+      "customer",
       "credit",
       "limit",
       "employees",
@@ -43298,8 +43298,8 @@
       "type",
       "amount",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -43725,14 +43725,14 @@
       "limit",
       "also",
       "known",
-      "products",
       "product",
+      "products",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -44161,14 +44161,14 @@
       "known",
       "reorder",
       "level",
-      "products",
       "product",
+      "products",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -44622,8 +44622,8 @@
       "state",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "top"
     ]
   },
@@ -45053,8 +45053,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -45493,8 +45493,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -45912,8 +45912,8 @@
     "tokenized_text": [
       "business",
       "term",
-      "rating",
       "rat",
+      "rating",
       "description",
       "supplier",
       "also",
@@ -45923,8 +45923,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -46347,8 +46347,8 @@
       "5",
       "description",
       "supplier",
-      "rating",
       "rat",
+      "rating",
       "also",
       "known",
       "suppliers",
@@ -46356,8 +46356,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -46781,8 +46781,8 @@
       "5",
       "description",
       "supplier",
-      "rating",
       "rat",
+      "rating",
       "also",
       "known",
       "suppliers",
@@ -46790,8 +46790,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -47223,10 +47223,10 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
-      "pend",
-      "pending"
+      "questions",
+      "pending",
+      "pend"
     ]
   },
   {
@@ -47658,10 +47658,10 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
-      "pend",
-      "pending"
+      "questions",
+      "pending",
+      "pend"
     ]
   },
   {
@@ -48101,8 +48101,8 @@
       "description",
       "large",
       "storage",
-      "facility",
       "facilities",
+      "facility",
       "also",
       "known",
       "warehou",
@@ -48117,8 +48117,8 @@
       "branch",
       "id",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -48558,8 +48558,8 @@
       "description",
       "large",
       "storage",
-      "facility",
       "facilities",
+      "facility",
       "also",
       "known",
       "warehouses",
@@ -48574,8 +48574,8 @@
       "branch",
       "id",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -49009,10 +49009,10 @@
         }
       ],
       "table_names": [
-        "purchase_orders",
-        "sales_order_items",
         "warehouses",
-        "purchase_order_items"
+        "purchase_order_items",
+        "sales_order_items",
+        "purchase_orders"
       ],
       "term": "unique",
       "type": "glossary"
@@ -49040,8 +49040,8 @@
       "sales",
       "sale",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -49470,8 +49470,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -49901,8 +49901,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -50348,11 +50348,11 @@
         }
       ],
       "table_names": [
+        "payments",
         "purchase_orders",
         "sales_order_items",
         "warehouses",
-        "purchase_order_items",
-        "payments"
+        "purchase_order_items"
       ],
       "term": "reference",
       "type": "glossary"
@@ -50375,8 +50375,8 @@
       "payment",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "maps",
       "column",
       "columns",
@@ -50385,8 +50385,8 @@
       "sales",
       "sale",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -50817,8 +50817,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -51249,8 +51249,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -51704,12 +51704,12 @@
         }
       ],
       "table_names": [
+        "inventory",
         "sales_order_items",
+        "returns",
         "products",
         "warehouses",
-        "inventory",
-        "purchase_order_items",
-        "returns"
+        "purchase_order_items"
       ],
       "term": "quantity",
       "type": "glossary"
@@ -51730,8 +51730,8 @@
       "warehouse",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "sales",
       "sale",
       "maps",
@@ -51740,13 +51740,13 @@
       "inventory",
       "hand",
       "reserved",
-      "products",
       "product",
+      "products",
       "reorder",
       "level",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -52180,8 +52180,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "record"
     ]
@@ -52618,8 +52618,8 @@
     "tokenized_text": [
       "business",
       "term",
-      "invoices",
       "invoice",
+      "invoices",
       "description",
       "details",
       "detail",
@@ -52633,8 +52633,8 @@
       "amount",
       "paid",
       "example",
-      "questions",
       "question",
+      "questions",
       "payment",
       "made"
     ]
@@ -53107,8 +53107,8 @@
       "amount",
       "paid",
       "example",
-      "questions",
       "question",
+      "questions",
       "made"
     ]
   },
@@ -53548,8 +53548,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -53980,8 +53980,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -54422,10 +54422,10 @@
       ],
       "table_names": [
         "sales_orders",
-        "shipments",
         "sales_order_items",
-        "invoices",
-        "returns"
+        "returns",
+        "shipments",
+        "invoices"
       ],
       "term": "sales order id",
       "type": "glossary"
@@ -54441,19 +54441,19 @@
       "description",
       "also",
       "known",
-      "invoices",
       "invoice",
+      "invoices",
       "orders",
-      "item",
       "items",
+      "item",
       "shipment",
       "shipments",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -54880,14 +54880,14 @@
       "id",
       "also",
       "known",
-      "invoices",
       "invoice",
+      "invoices",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -55315,8 +55315,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -55748,8 +55748,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -56173,16 +56173,16 @@
       "description",
       "time",
       "field",
-      "invoices",
       "invoice",
+      "invoices",
       "also",
       "known",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -56602,14 +56602,14 @@
     "tokenized_text": [
       "business",
       "term",
-      "outstanding",
       "outstand",
+      "outstanding",
       "description",
       "date",
       "time",
       "field",
-      "invoices",
       "invoice",
+      "invoices",
       "due",
       "also",
       "known",
@@ -56617,8 +56617,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -57043,16 +57043,16 @@
       "date",
       "time",
       "field",
-      "invoices",
       "invoice",
+      "invoices",
       "also",
       "known",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -57483,8 +57483,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -57908,16 +57908,16 @@
       "description",
       "monetary",
       "field",
-      "invoices",
       "invoice",
+      "invoices",
       "also",
       "known",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -58344,16 +58344,16 @@
       "unpaid",
       "also",
       "known",
-      "invoices",
       "invoice",
+      "invoices",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
-      "pend",
-      "pending"
+      "questions",
+      "pending",
+      "pend"
     ]
   },
   {
@@ -58807,8 +58807,8 @@
       "known",
       "status",
       "statu",
-      "invoices",
       "invoice",
+      "invoices",
       "payments",
       "maps",
       "column",
@@ -58818,10 +58818,10 @@
       "reference",
       "id",
       "example",
-      "questions",
       "question",
-      "pend",
+      "questions",
       "pending",
+      "pend",
       "successful"
     ]
   },
@@ -59262,8 +59262,8 @@
       "term",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "description",
       "details",
       "detail",
@@ -59279,8 +59279,8 @@
       "statu",
       "tax",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "cost"
     ]
@@ -59739,8 +59739,8 @@
       "statu",
       "tax",
       "example",
-      "questions",
       "question",
+      "questions",
       "total",
       "cost"
     ]
@@ -60161,8 +60161,8 @@
         }
       ],
       "table_names": [
-        "purchase_orders",
-        "sales_orders"
+        "sales_orders",
+        "purchase_orders"
       ],
       "term": "order date",
       "type": "glossary"
@@ -60184,8 +60184,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -60605,8 +60605,8 @@
         }
       ],
       "table_names": [
-        "purchase_orders",
-        "sales_orders"
+        "sales_orders",
+        "purchase_orders"
       ],
       "term": "total amount",
       "type": "glossary"
@@ -60629,8 +60629,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -61049,8 +61049,8 @@
         }
       ],
       "table_names": [
-        "sales_order_items",
-        "sales_orders"
+        "sales_orders",
+        "sales_order_items"
       ],
       "term": "discount amount",
       "type": "glossary"
@@ -61066,16 +61066,16 @@
       "known",
       "sales",
       "sale",
-      "orders",
       "order",
-      "item",
+      "orders",
       "items",
+      "item",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -61503,14 +61503,14 @@
       "known",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -61937,14 +61937,14 @@
       "known",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -62372,14 +62372,14 @@
       "known",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -62808,14 +62808,14 @@
       "known",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -63244,14 +63244,14 @@
       "known",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -63703,8 +63703,8 @@
       "invoice",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "successful"
     ]
   },
@@ -64133,8 +64133,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -64562,8 +64562,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -64994,8 +64994,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -65424,8 +65424,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -65856,8 +65856,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -66288,8 +66288,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -66722,8 +66722,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -67153,8 +67153,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -67588,8 +67588,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "codes"
     ]
   },
@@ -68022,8 +68022,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -68463,11 +68463,11 @@
       "term",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "description",
-      "widgets",
       "widget",
+      "widgets",
       "sale",
       "also",
       "known",
@@ -68482,8 +68482,8 @@
       "product",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "10",
       "units"
     ]
@@ -68927,8 +68927,8 @@
       "order",
       "item",
       "description",
-      "widgets",
       "widget",
+      "widgets",
       "sale",
       "also",
       "known",
@@ -68944,8 +68944,8 @@
       "product",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "10",
       "units"
     ]
@@ -69379,8 +69379,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -69799,8 +69799,8 @@
         }
       ],
       "table_names": [
-        "purchase_orders",
-        "purchase_order_items"
+        "purchase_order_items",
+        "purchase_orders"
       ],
       "term": "purchase order id",
       "type": "glossary"
@@ -69817,15 +69817,15 @@
       "reference",
       "also",
       "known",
-      "item",
       "items",
+      "item",
       "orders",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -70253,14 +70253,14 @@
       "purchase",
       "order",
       "id",
-      "item",
       "items",
+      "item",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -70688,9 +70688,9 @@
         }
       ],
       "table_names": [
-        "sales_order_items",
         "payments",
-        "purchase_order_items"
+        "purchase_order_items",
+        "sales_order_items"
       ],
       "term": "code",
       "type": "glossary"
@@ -70707,8 +70707,8 @@
       "id",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "sales",
       "sale",
       "reference",
@@ -70719,8 +70719,8 @@
       "payments",
       "payment",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -71153,8 +71153,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -71590,8 +71590,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -72011,8 +72011,8 @@
         }
       ],
       "table_names": [
-        "sales_order_items",
-        "purchase_order_items"
+        "purchase_order_items",
+        "sales_order_items"
       ],
       "term": "line total",
       "type": "glossary"
@@ -72029,16 +72029,16 @@
       "known",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "sales",
       "sale",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -72467,14 +72467,14 @@
       "total",
       "purchase",
       "order",
-      "item",
       "items",
+      "item",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -72913,8 +72913,8 @@
       "business",
       "term",
       "purchase",
-      "orders",
       "order",
+      "orders",
       "description",
       "supplier",
       "received",
@@ -72930,8 +72930,8 @@
       "total",
       "amount",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -73387,8 +73387,8 @@
       "total",
       "amount",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -73807,8 +73807,8 @@
         }
       ],
       "table_names": [
-        "purchase_orders",
-        "payments"
+        "payments",
+        "purchase_orders"
       ],
       "term": "identifier",
       "type": "glossary"
@@ -73824,8 +73824,8 @@
       "known",
       "id",
       "purchase",
-      "orders",
       "order",
+      "orders",
       "code",
       "maps",
       "column",
@@ -73834,8 +73834,8 @@
       "payment",
       "reference",
       "example",
-      "questions",
       "question",
+      "questions",
       "codes"
     ]
   },
@@ -74261,14 +74261,14 @@
       "also",
       "known",
       "purchase",
-      "orders",
       "order",
+      "orders",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -74701,10 +74701,10 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
-      "pend",
-      "pending"
+      "questions",
+      "pending",
+      "pend"
     ]
   },
   {
@@ -75131,14 +75131,14 @@
       "also",
       "known",
       "purchase",
-      "orders",
       "order",
+      "orders",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -75570,8 +75570,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -76021,8 +76021,8 @@
       "product",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "count"
     ]
   },
@@ -76473,8 +76473,8 @@
       "product",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "count"
     ]
   },
@@ -76903,8 +76903,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -77331,8 +77331,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -77759,8 +77759,8 @@
       "maps",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -78187,8 +78187,8 @@
       "maps",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -78615,8 +78615,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -79059,8 +79059,8 @@
       "sales",
       "sale",
       "order",
-      "item",
       "items",
+      "item",
       "description",
       "details",
       "detail",
@@ -79077,8 +79077,8 @@
       "unit",
       "price",
       "example",
-      "questions",
       "question",
+      "questions",
       "count"
     ]
   },
@@ -79539,8 +79539,8 @@
       "unit",
       "price",
       "example",
-      "questions",
       "question",
+      "questions",
       "count"
     ]
   },
@@ -79974,8 +79974,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -80395,8 +80395,8 @@
     "tokenized_text": [
       "business",
       "term",
-      "savings",
       "saving",
+      "savings",
       "description",
       "discount",
       "amount",
@@ -80405,14 +80405,14 @@
       "sales",
       "sale",
       "order",
-      "item",
       "items",
+      "item",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -80842,14 +80842,14 @@
       "sales",
       "sale",
       "order",
-      "item",
       "items",
+      "item",
       "maps",
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -81309,8 +81309,8 @@
       "order",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "delivered"
     ]
   },
@@ -81770,8 +81770,8 @@
       "order",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "delivered"
     ]
   },
@@ -82201,8 +82201,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -82631,8 +82631,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest"
     ]
   },
@@ -83065,10 +83065,10 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
-      "pend",
-      "pending"
+      "questions",
+      "pending",
+      "pend"
     ]
   },
   {
@@ -83498,8 +83498,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   },
@@ -83950,12 +83950,12 @@
         }
       ],
       "table_names": [
-        "products",
-        "employees",
         "suppliers",
-        "invoices",
+        "products",
+        "branches",
         "customers",
-        "branches"
+        "employees",
+        "invoices"
       ],
       "term": "inactive",
       "type": "glossary"
@@ -83976,25 +83976,25 @@
       "maps",
       "column",
       "columns",
-      "branch",
       "branches",
-      "customer",
+      "branch",
       "customers",
+      "customer",
       "active",
       "employees",
       "employee",
-      "products",
       "product",
+      "products",
       "suppliers",
       "supplier",
-      "invoices",
       "invoice",
+      "invoices",
       "payment",
       "example",
-      "questions",
       "question",
-      "pend",
+      "questions",
       "pending",
+      "pend",
       "records",
       "record"
     ]
@@ -84446,12 +84446,12 @@
         }
       ],
       "table_names": [
-        "products",
-        "employees",
         "suppliers",
-        "invoices",
+        "products",
+        "branches",
         "customers",
-        "branches"
+        "employees",
+        "invoices"
       ],
       "term": "pending",
       "type": "glossary"
@@ -84460,8 +84460,8 @@
     "tokenized_text": [
       "business",
       "term",
-      "pend",
       "pending",
+      "pend",
       "description",
       "state",
       "lifecycle",
@@ -84473,23 +84473,23 @@
       "maps",
       "column",
       "columns",
-      "branch",
       "branches",
-      "customer",
+      "branch",
       "customers",
+      "customer",
       "active",
       "employees",
       "employee",
-      "products",
       "product",
+      "products",
       "suppliers",
       "supplier",
-      "invoices",
       "invoice",
+      "invoices",
       "payment",
       "example",
-      "questions",
       "question",
+      "questions",
       "records",
       "record"
     ]
@@ -84941,13 +84941,13 @@
         }
       ],
       "table_names": [
-        "sales_orders",
-        "employees",
-        "invoices",
-        "inventory",
-        "customers",
         "payments",
-        "branches"
+        "inventory",
+        "sales_orders",
+        "branches",
+        "customers",
+        "employees",
+        "invoices"
       ],
       "term": "recent",
       "type": "glossary"
@@ -84966,12 +84966,12 @@
       "maps",
       "column",
       "columns",
-      "branch",
       "branches",
+      "branch",
       "open",
       "opening",
-      "customer",
       "customers",
+      "customer",
       "created",
       "employees",
       "employee",
@@ -84979,18 +84979,18 @@
       "inventory",
       "last",
       "updated",
-      "invoices",
       "invoice",
+      "invoices",
       "due",
       "sales",
       "sale",
-      "orders",
       "order",
+      "orders",
       "payments",
       "payment",
       "example",
-      "questions",
       "question",
+      "questions",
       "latest",
       "records",
       "record"

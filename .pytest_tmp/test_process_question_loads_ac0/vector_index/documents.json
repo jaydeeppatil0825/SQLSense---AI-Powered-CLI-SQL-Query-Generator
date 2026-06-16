@@ -402,8 +402,8 @@
     "text": "Table: orders Module: unknown Purpose:  Description:  Columns: order_id, final_amount",
     "tokenized_text": [
       "table",
-      "orders",
       "order",
+      "orders",
       "module",
       "unknown",
       "purpose",
@@ -1230,8 +1230,8 @@
       "final",
       "amount",
       "table",
-      "orders",
       "order",
+      "orders",
       "type",
       "integer",
       "semantic",
@@ -1655,12 +1655,12 @@
       "maps",
       "column",
       "columns",
-      "orders",
       "order",
+      "orders",
       "final",
       "example",
-      "questions",
       "question",
+      "questions",
       "total"
     ]
   }

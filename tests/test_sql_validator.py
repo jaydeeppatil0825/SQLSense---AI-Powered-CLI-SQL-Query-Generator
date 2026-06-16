@@ -6,7 +6,7 @@ Covers Requirements 8.1 – 8.10.
 """
 
 import pytest
-from utils.sql_validator import validate_sql, add_limit_if_missing, clean_sql_response
+from utils.sql_validator import validate_sql, add_limit_if_missing, clean_sql_response, extract_requested_limit
 
 
 # ---------------------------------------------------------------------------
@@ -270,3 +270,17 @@ class TestAddLimitIfMissingIdempotent:
     def test_idempotent_when_limit_present(self):
         sql = "SELECT * FROM orders LIMIT 20"
         assert add_limit_if_missing(add_limit_if_missing(sql)) == add_limit_if_missing(sql)
+
+
+class TestExtractRequestedLimit:
+    def test_extracts_top_n(self):
+        assert extract_requested_limit("show top 10 records") == 10
+
+    def test_extracts_first_n(self):
+        assert extract_requested_limit("show first 5 rows") == 5
+
+    def test_extracts_limit_n(self):
+        assert extract_requested_limit("limit 25") == 25
+
+    def test_returns_none_when_no_explicit_limit_requested(self):
+        assert extract_requested_limit("tell me pending payment by customer") is None

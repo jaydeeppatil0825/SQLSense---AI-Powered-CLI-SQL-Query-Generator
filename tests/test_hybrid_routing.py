@@ -265,6 +265,25 @@ def test_simple_table_listing_uses_rule_based(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "rule-based"
 
 
+def test_legacy_simple_generator_signature_still_uses_rule_based(monkeypatch):
+    service = QuestionService()
+    monkeypatch.setattr("core.question_service.build_query_context", lambda *args, **kwargs: _context(["alpha_records"], intent="list"))
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda user_question, knowledge_base: "SELECT record_id, record_name FROM alpha_records LIMIT 50;",
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called")),
+    )
+
+    success, message, sql, error = service.process_question("show records", GENERIC_KB, ai_backend="local")
+
+    assert success is True
+    assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+
+
 def test_count_query_uses_rule_based(monkeypatch):
     service = QuestionService()
     monkeypatch.setattr("core.question_service.build_query_context", lambda *args, **kwargs: _context(["alpha_records"], intent="count"))
@@ -342,6 +361,22 @@ def test_low_confidence_simple_looking_query_goes_to_ai(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "ai"
 
 
+def test_legacy_ai_generator_signature_still_works(monkeypatch):
+    service = QuestionService()
+    monkeypatch.setattr("core.question_service.build_query_context", lambda *args, **kwargs: _context(["alpha_records"], intent="list", confidence=0.35))
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: "SELECT * FROM alpha_records LIMIT 50;")
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda user_question, knowledge_base: "SELECT record_id, record_name FROM alpha_records LIMIT 50;",
+    )
+
+    success, message, sql, error = service.process_question("show entries", GENERIC_KB, ai_backend="local")
+
+    assert success is True
+    assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
+    assert service.get_last_query_context()["route_used"] == "ai"
+
+
 def test_complex_join_query_goes_to_ai(monkeypatch):
     service = QuestionService()
     ai_called = {"value": False}
@@ -390,6 +425,138 @@ def test_generated_rule_based_sql_is_validated_before_return(monkeypatch):
     assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
     assert "FROM LIMIT" not in sql
     assert service.get_last_query_context()["route_used"] == "ai"
+
+
+def test_complex_ai_query_does_not_get_default_limit(monkeypatch):
+    service = QuestionService()
+    monkeypatch.setattr(
+        "core.question_service.build_query_context",
+        lambda *args, **kwargs: _context(
+            ["alpha_records", "beta_events"],
+            intent="comparison",
+            metric="money",
+            dimension="owner",
+            grouping=["owner"],
+        ),
+    )
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (
+            "SELECT a.record_name, SUM(b.event_total) AS total_event_total "
+            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id "
+            "GROUP BY a.record_name"
+        ),
+    )
+
+    success, message, sql, error = service.process_question("tell me totals by owner", GENERIC_KB, ai_backend="local")
+
+    assert success is True
+    assert "LIMIT" not in sql.upper()
+
+
+def test_explicit_limit_is_added_only_when_requested(monkeypatch):
+    service = QuestionService()
+    monkeypatch.setattr(
+        "core.question_service.build_query_context",
+        lambda *args, **kwargs: _context(
+            ["alpha_records", "beta_events"],
+            intent="comparison",
+            metric="money",
+            dimension="owner",
+            grouping=["owner"],
+        ),
+    )
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (
+            "SELECT a.record_name, SUM(b.event_total) AS total_event_total "
+            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id "
+            "GROUP BY a.record_name"
+        ),
+    )
+
+    success, message, sql, error = service.process_question("show top 10 totals by owner", GENERIC_KB, ai_backend="local")
+
+    assert success is True
+    assert sql.endswith("LIMIT 10")
+
+
+def test_invalid_ai_sql_does_not_receive_limit_before_retry(monkeypatch):
+    service = QuestionService()
+    captured = {}
+    monkeypatch.setattr(
+        "core.question_service.build_query_context",
+        lambda *args, **kwargs: _context(
+            ["alpha_records", "beta_events"],
+            intent="comparison",
+            metric="money",
+            dimension="owner",
+            grouping=["owner"],
+        ),
+    )
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
+    monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: "SELECT record_name FROM")
+
+    def fake_retry(*args, **kwargs):
+        captured["first_attempt_sql"] = kwargs["first_attempt_sql"]
+        return (
+            "SELECT a.record_name, SUM(b.event_total) AS total_event_total "
+            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id "
+            "GROUP BY a.record_name"
+        )
+
+    monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_retry)
+
+    success, message, sql, error = service.process_question("tell me totals by owner", GENERIC_KB, ai_backend="local")
+
+    assert success is True
+    assert captured["first_attempt_sql"] == "SELECT record_name FROM"
+    assert "FROM LIMIT" not in captured["first_attempt_sql"]
+
+
+def test_legacy_ai_retry_signature_keeps_validation_context(monkeypatch):
+    service = QuestionService()
+    captured = {}
+    monkeypatch.setattr(
+        "core.question_service.build_query_context",
+        lambda *args, **kwargs: _context(
+            ["alpha_records", "beta_events"],
+            intent="comparison",
+            metric="money",
+            dimension="owner",
+            grouping=["owner"],
+        ),
+    )
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
+    monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: "SELECT record_name FROM")
+
+    def fake_retry(
+        user_question,
+        knowledge_base,
+        backend,
+        first_attempt_sql,
+        validation_reason,
+        validation_context=None,
+    ):
+        captured["first_attempt_sql"] = first_attempt_sql
+        captured["validation_context"] = validation_context
+        return (
+            "SELECT a.record_name, SUM(b.event_total) AS total_event_total "
+            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id "
+            "GROUP BY a.record_name"
+        )
+
+    monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_retry)
+
+    success, message, sql, error = service.process_question("tell me totals by owner", GENERIC_KB, ai_backend="local")
+
+    assert success is True
+    assert captured["first_attempt_sql"] == "SELECT record_name FROM"
+    assert captured["validation_context"] is not None
+    assert captured["validation_context"]["selected_tables"]
+    assert service.get_last_query_context()["route_used"] == "ai-retry"
 
 
 def test_query_planner_does_not_assign_business_specific_intents():

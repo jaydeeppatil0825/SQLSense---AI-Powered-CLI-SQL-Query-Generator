@@ -8,13 +8,14 @@ and validation.
 """
 
 from typing import Optional, Tuple, Dict, Any
+import inspect
 import re
 
 from core.query_planner import build_query_context
 from ai.simple_query_generator import generate_simple_sql
 from ai.sql_generator import generate_sql, generate_sql_with_retry
 from utils.question_normalizer import normalize_question, is_too_ambiguous
-from utils.sql_validator import validate_sql, validate_sql_structure, add_limit_if_missing
+from utils.sql_validator import validate_sql, validate_sql_structure, add_limit_if_missing, extract_requested_limit
 from conversation.followup_detector import detect_follow_up
 from conversation.question_rewriter import rewrite_follow_up_question
 from conversation.action_detector import detect_conversation_action
@@ -275,6 +276,21 @@ def _build_validation_retry_context(query_context: dict[str, Any]) -> dict[str, 
             for entry in (vector_results.get("relationships") or [])[:6]
             if entry.get("from_table") and entry.get("to_table")
         ],
+        "fk_relationships": [
+            {
+                "table": table_name,
+                "foreign_keys": [
+                    {
+                        "column": fk.get("column"),
+                        "referenced_table": fk.get("referenced_table"),
+                        "referenced_column": fk.get("referenced_column"),
+                    }
+                    for fk in table_data.get("foreign_keys", [])[:8]
+                ],
+            }
+            for table_name, table_data in list((query_context.get("selected_knowledge_base") or {}).items())[:6]
+        ],
+        "join_paths": list(query_context.get("join_paths") or []),
     }
 
 
@@ -390,6 +406,7 @@ class QuestionService:
         retry_context = _build_validation_retry_context(query_context)
         simple_sql_cache: str | None = None
         simple_sql_loaded = False
+        requested_limit = extract_requested_limit(rewritten_question)
 
         def _validate_candidate_sql(candidate_sql: str, *, source_label: str) -> Tuple[bool, Optional[str], Optional[str]]:
             nonlocal last_rejected_sql
@@ -412,31 +429,91 @@ class QuestionService:
             last_rejected_sql = candidate_sql
             return False, fail_reason, source_label
 
+        def _apply_explicit_limit_if_safe(candidate_sql: str | None) -> str | None:
+            if not candidate_sql:
+                return candidate_sql
+            if not requested_limit:
+                return candidate_sql
+            if re.search(r"\bLIMIT\b", candidate_sql, re.IGNORECASE):
+                return candidate_sql
+
+            safety_ok, _ = validate_sql(candidate_sql)
+            struct_ok, _ = validate_sql_structure(candidate_sql, knowledge_base)
+            if not safety_ok or not struct_ok:
+                return candidate_sql
+            return add_limit_if_missing(candidate_sql, limit=requested_limit)
+
+        def _call_with_optional_kwargs(func, /, *args, optional_kwargs: dict[str, Any], removable_kwargs: tuple[str, ...]):
+            try:
+                signature = inspect.signature(func)
+            except (TypeError, ValueError):
+                signature = None
+
+            active_kwargs = dict(optional_kwargs)
+            if signature is not None:
+                parameters = signature.parameters.values()
+                accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters)
+                if not accepts_kwargs:
+                    supported_names = {
+                        param.name
+                        for param in signature.parameters.values()
+                        if param.kind in (
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            inspect.Parameter.KEYWORD_ONLY,
+                        )
+                    }
+                    active_kwargs = {
+                        name: value
+                        for name, value in active_kwargs.items()
+                        if name in supported_names
+                    }
+            while True:
+                try:
+                    return func(*args, **active_kwargs)
+                except TypeError as exc:
+                    exc_text = str(exc)
+                    removed = False
+                    for name in removable_kwargs:
+                        if name in active_kwargs and name in exc_text:
+                            active_kwargs.pop(name, None)
+                            removed = True
+                    if removed:
+                        continue
+                    raise
+
         def _get_simple_sql() -> str | None:
             nonlocal simple_sql_cache, simple_sql_loaded
             if simple_sql_loaded:
                 return simple_sql_cache
 
             simple_sql_loaded = True
-            simple_sql_cache = generate_simple_sql(
+            simple_sql_cache = _call_with_optional_kwargs(
+                generate_simple_sql,
                 rewritten_question,
                 scoped_knowledge_base,
-                query_plan=query_plan,
-                business_glossary=business_glossary,
-                selected_tables=query_context.get("selected_tables"),
-                vector_results=query_context.get("vector_results"),
+                optional_kwargs={
+                    "query_plan": query_plan,
+                    "business_glossary": business_glossary,
+                    "selected_tables": query_context.get("selected_tables"),
+                    "vector_results": query_context.get("vector_results"),
+                },
+                removable_kwargs=("query_plan", "business_glossary", "selected_tables", "vector_results"),
             )
             if simple_sql_cache is None and scoped_knowledge_base is not full_knowledge_base:
-                simple_sql_cache = generate_simple_sql(
+                simple_sql_cache = _call_with_optional_kwargs(
+                    generate_simple_sql,
                     rewritten_question,
                     full_knowledge_base,
-                    query_plan=query_plan,
-                    business_glossary=business_glossary,
-                    selected_tables=query_context.get("selected_tables"),
-                    vector_results=query_context.get("vector_results"),
+                    optional_kwargs={
+                        "query_plan": query_plan,
+                        "business_glossary": business_glossary,
+                        "selected_tables": query_context.get("selected_tables"),
+                        "vector_results": query_context.get("vector_results"),
+                    },
+                    removable_kwargs=("query_plan", "business_glossary", "selected_tables", "vector_results"),
                 )
             if simple_sql_cache:
-                simple_sql_cache = add_limit_if_missing(simple_sql_cache.strip())
+                simple_sql_cache = _apply_explicit_limit_if_safe(simple_sql_cache.strip())
             return simple_sql_cache
 
         if prefer_rule_based:
@@ -454,58 +531,55 @@ class QuestionService:
         if not prefer_rule_based or ai_failure_reason is not None or last_rejected_sql is not None or _get_simple_sql() is None:
             logger.info("Using AI as the primary SQL generator for this question")
             try:
-                try:
-                    raw_sql = generate_sql(
-                        rewritten_question,
-                        scoped_knowledge_base,
-                        backend=ai_backend,
-                        query_plan=query_plan,
-                        selected_tables=query_context.get("selected_tables"),
-                        business_glossary=business_glossary,
-                    )
-                except TypeError as exc:
-                    if "business_glossary" not in str(exc):
-                        raise
-                    raw_sql = generate_sql(
-                        rewritten_question,
-                        scoped_knowledge_base,
-                        backend=ai_backend,
-                        query_plan=query_plan,
-                        selected_tables=query_context.get("selected_tables"),
-                    )
+                base_generate_kwargs = {
+                    "backend": ai_backend,
+                    "query_plan": query_plan,
+                    "selected_tables": query_context.get("selected_tables"),
+                    "business_glossary": business_glossary,
+                    "join_paths": query_context.get("join_paths"),
+                }
+                raw_sql = _call_with_optional_kwargs(
+                    generate_sql,
+                    rewritten_question,
+                    scoped_knowledge_base,
+                    optional_kwargs=base_generate_kwargs,
+                    removable_kwargs=("backend", "query_plan", "selected_tables", "business_glossary", "join_paths"),
+                )
                 logger.info(f"SQL generated by AI: {raw_sql[:100]}...")
-                candidate_sql = add_limit_if_missing(raw_sql.strip())
+                candidate_sql = _apply_explicit_limit_if_safe(raw_sql.strip())
                 ai_ok, ai_reason, _ = _validate_candidate_sql(candidate_sql, source_label="AI")
                 if ai_ok:
                     _set_route(query_context, "ai", "AI was selected for a complex or low-confidence question")
                     return True, "SQL generated successfully (AI)", candidate_sql, None
 
                 logger.warning(f"AI SQL did not meet validation requirements: {ai_reason}. Retrying...")
-                try:
-                    retry_raw = generate_sql_with_retry(
-                        user_question=rewritten_question,
-                        knowledge_base=scoped_knowledge_base,
-                        backend=ai_backend,
-                        first_attempt_sql=candidate_sql,
-                        validation_reason=ai_reason or "AI SQL did not satisfy business validation.",
-                        query_plan=query_plan,
-                        selected_tables=query_context.get("selected_tables"),
-                        business_glossary=business_glossary,
-                        validation_context=retry_context,
-                    )
-                except TypeError as exc:
-                    if "business_glossary" not in str(exc) and "validation_context" not in str(exc):
-                        raise
-                    retry_raw = generate_sql_with_retry(
-                        user_question=rewritten_question,
-                        knowledge_base=scoped_knowledge_base,
-                        backend=ai_backend,
-                        first_attempt_sql=candidate_sql,
-                        validation_reason=ai_reason or "AI SQL did not satisfy business validation.",
-                        query_plan=query_plan,
-                        selected_tables=query_context.get("selected_tables"),
-                    )
-                retry_sql = add_limit_if_missing(retry_raw.strip())
+                retry_generate_kwargs = {
+                    "query_plan": query_plan,
+                    "selected_tables": query_context.get("selected_tables"),
+                    "business_glossary": business_glossary,
+                    "validation_context": retry_context,
+                    "join_paths": query_context.get("join_paths"),
+                }
+                retry_raw = _call_with_optional_kwargs(
+                    generate_sql_with_retry,
+                    optional_kwargs={
+                        "user_question": rewritten_question,
+                        "knowledge_base": scoped_knowledge_base,
+                        "backend": ai_backend,
+                        "first_attempt_sql": candidate_sql,
+                        "validation_reason": ai_reason or "AI SQL did not satisfy business validation.",
+                        **retry_generate_kwargs,
+                    },
+                    removable_kwargs=(
+                        "backend",
+                        "query_plan",
+                        "selected_tables",
+                        "business_glossary",
+                        "validation_context",
+                        "join_paths",
+                    ),
+                )
+                retry_sql = _apply_explicit_limit_if_safe(retry_raw.strip())
                 retry_ok, retry_reason, _ = _validate_candidate_sql(retry_sql, source_label="AI retry")
                 if retry_ok:
                     _set_route(query_context, "ai-retry", "AI retry corrected the first invalid SQL attempt")

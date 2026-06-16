@@ -11,8 +11,8 @@ Flow
   3. _clean_sql_response()             — strip fences, explanations, whitespace
   4. Return the cleaned SQL string
 
-The caller (main.py handle_ask_question) runs validate_sql() and
-add_limit_if_missing() on the returned string before storing it.
+The caller validates the returned SQL and may apply an explicit user-requested
+LIMIT only after the SQL is structurally valid.
 
 Debug mode
 ----------
@@ -382,8 +382,9 @@ def generate_sql(
        preamble text, and trailing explanations.
     4. Return the cleaned SQL string.
 
-    The caller is responsible for running validate_sql() and
-    add_limit_if_missing() on the returned string before storing or executing.
+    The caller is responsible for validating the returned SQL before storing or
+    executing it. A LIMIT should only be added later when the user explicitly
+    requested one and the SQL is structurally valid.
 
     Args:
         user_question:  Plain-English question from the user.

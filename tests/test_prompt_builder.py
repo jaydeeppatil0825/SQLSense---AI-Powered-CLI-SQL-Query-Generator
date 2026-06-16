@@ -101,12 +101,13 @@ def test_prompt_builder_returns_system_and_user_messages_with_full_context():
         assert expected in system_message
     assert "invoice_headers.client_id references client_directory.client_id" in system_message
     assert "JOIN client_directory ON invoice_headers.client_id = client_directory.client_id" in system_message
-    assert "LIMIT 50" in system_message
+    assert "Do not add LIMIT unless the question explicitly requests a row count." in system_message
 
 
 def test_prompt_omits_default_limit_instruction_when_question_has_numeric_qualifier():
     messages = build_sql_prompt("show top 10 invoices", _knowledge_base())
-    assert "Add LIMIT 50 at the end of the query" not in messages[0]["content"]
+    assert "Do not add LIMIT unless the question explicitly requests a row count." not in messages[0]["content"]
+    assert "Use LIMIT 10 in your query." in messages[0]["content"]
 
 
 def test_get_relevant_glossary_terms_uses_generic_fallback_when_file_missing():

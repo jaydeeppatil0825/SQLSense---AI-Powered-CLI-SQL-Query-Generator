@@ -503,6 +503,27 @@ def add_limit_if_missing(sql: str, limit: int = 50) -> str:
     return sql + f" LIMIT {limit}"
 
 
+def extract_requested_limit(text: str) -> int | None:
+    """
+    Return an explicit user-requested row limit from natural language text.
+
+    Only numeric row-count requests are recognized. This intentionally avoids
+    inventing a default LIMIT for questions that did not ask for one.
+    """
+    if not isinstance(text, str):
+        return None
+
+    match = re.search(
+        r"\b(?:top|first|limit|show|get|return|fetch)\s+(\d+)\b"
+        r"|\b(\d+)\s+(?:rows?|records?|results?|items?)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return int(match.group(1) or match.group(2))
+
+
 def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
     """
     Validate that an AI-generated SQL string has a correct executable structure.

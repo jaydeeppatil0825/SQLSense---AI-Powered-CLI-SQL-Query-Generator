@@ -1675,8 +1675,8 @@
       "name",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "count"
     ]
   },
@@ -2116,8 +2116,8 @@
       "name",
       "id",
       "example",
-      "questions",
       "question",
+      "questions",
       "count"
     ]
   },
@@ -2548,8 +2548,8 @@
       "maps",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -2980,8 +2980,8 @@
       "column",
       "columns",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   },
   {
@@ -3416,8 +3416,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "names"
     ]
   },
@@ -3853,8 +3853,8 @@
       "column",
       "columns",
       "example",
-      "questions",
       "question",
+      "questions",
       "names"
     ]
   },
@@ -4290,8 +4290,8 @@
       "columns",
       "customer",
       "example",
-      "questions",
-      "question"
+      "question",
+      "questions"
     ]
   }
 ]
