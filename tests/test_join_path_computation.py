@@ -150,6 +150,10 @@ def test_compute_join_paths():
     # Should find path through table_b
     path = next(jp for jp in join_paths if jp["from_table"] == "table_a" and jp["to_table"] == "table_c")
     assert path["length"] == 2
+    assert path["path"][0]["from_table"] == "table_a"
+    assert path["path"][0]["join_condition"] == "table_a.b_id = table_b.id"
+    assert path["path"][1]["from_table"] == "table_b"
+    assert path["path"][1]["join_condition"] == "table_b.c_id = table_c.id"
 
 
 def test_find_bridge_tables():
@@ -271,6 +275,9 @@ def test_complex_chain_a_b_c_d():
     assert len(join_paths) > 0
     path_ad = next(jp for jp in join_paths if jp["from_table"] == "table_a" and jp["to_table"] == "table_d")
     assert path_ad["length"] == 3
+    assert path_ad["path"][0]["join_condition"] == "table_a.b_id = table_b.id"
+    assert path_ad["path"][1]["join_condition"] == "table_b.c_id = table_c.id"
+    assert path_ad["path"][2]["join_condition"] == "table_c.d_id = table_d.id"
 
 
 if __name__ == "__main__":

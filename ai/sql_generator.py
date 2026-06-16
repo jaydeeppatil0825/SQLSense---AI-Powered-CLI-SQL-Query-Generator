@@ -87,7 +87,7 @@ def extract_sql_only(response_text: str) -> str:
 
     The model sometimes wraps its answer in:
     - Markdown fences:  ```sql ... ```  or  ``` ... ```
-    - Preamble labels:  "Here is the SQL:", "SQL statement to show paid orders:"
+    - Preamble labels:  "Here is the SQL:", "SQL statement to show requested rows:"
     - Trailing notes:   "This query joins…" after the semicolon
 
     This function handles all of those cases and returns only the SQL.
@@ -476,8 +476,11 @@ def generate_sql_with_retry(
         f"Runtime schema and retrieval context:\n{validation_context or {}}\n\n"
         "Required tables: " + ", ".join([t.get('table', '') for t in (selected_tables or [])]) + "\n"
         "Required columns: " + ", ".join([f"{c.get('table', '')}.{c.get('column', '')}" for c in (validation_context.get('selected_columns', []) if validation_context else [])]) + "\n"
-        "Relationship/join paths: " + str(join_paths or []) + "\n\n"
+        "Relationship/join paths: " + str(join_paths or []) + "\n"
+        "Join predicates to use: " + ", ".join(validation_context.get("join_conditions", []) if validation_context else []) + "\n\n"
         "Correct the SQL so it follows the plan, selected tables, selected relationships, glossary context, and safety rules. "
+        "Use only allowed tables and columns from the schema context. "
+        "Qualify columns with table aliases when more than one table is used. "
         "Output complete SQL only, no ellipsis, no placeholder FROM, no incomplete JOIN."
     )
 

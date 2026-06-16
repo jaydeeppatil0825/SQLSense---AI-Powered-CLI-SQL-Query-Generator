@@ -6,7 +6,13 @@ Covers Requirements 8.1 – 8.10.
 """
 
 import pytest
-from utils.sql_validator import validate_sql, add_limit_if_missing, clean_sql_response, extract_requested_limit
+from utils.sql_validator import (
+    validate_sql,
+    validate_sql_structure,
+    add_limit_if_missing,
+    clean_sql_response,
+    extract_requested_limit,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -284,3 +290,85 @@ class TestExtractRequestedLimit:
 
     def test_returns_none_when_no_explicit_limit_requested(self):
         assert extract_requested_limit("tell me pending payment by customer") is None
+
+
+GENERIC_KB = {
+    "alpha_records": {
+        "columns": [
+            {"name": "record_id", "type": "INTEGER", "semantic_type": "id"},
+            {"name": "record_name", "type": "VARCHAR(100)", "semantic_type": "name"},
+            {"name": "owner_id", "type": "INTEGER", "semantic_type": "id"},
+        ],
+        "primary_keys": ["record_id"],
+        "foreign_keys": [],
+    },
+    "beta_events": {
+        "columns": [
+            {"name": "event_id", "type": "INTEGER", "semantic_type": "id"},
+            {"name": "owner_id", "type": "INTEGER", "semantic_type": "id"},
+            {"name": "event_total", "type": "DECIMAL(12,2)", "semantic_type": "money"},
+        ],
+        "primary_keys": ["event_id"],
+        "foreign_keys": [
+            {
+                "from_table": "beta_events",
+                "column": "owner_id",
+                "to_table": "alpha_records",
+                "referenced_table": "alpha_records",
+                "referenced_column": "owner_id",
+            }
+        ],
+    },
+}
+
+
+class TestValidateSqlStructure:
+    def test_from_limit_is_rejected(self):
+        valid, msg = validate_sql_structure("SELECT record_name FROM LIMIT 50", GENERIC_KB)
+
+        assert valid is False
+        assert "valid table name after FROM" in msg
+
+    def test_unknown_table_is_rejected(self):
+        valid, msg = validate_sql_structure("SELECT id FROM missing_records", GENERIC_KB)
+
+        assert valid is False
+        assert "does not exist in the knowledge base" in msg
+
+    def test_unknown_qualified_column_is_rejected(self):
+        valid, msg = validate_sql_structure(
+            "SELECT a.missing_name FROM alpha_records a",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "does not exist in table 'alpha_records'" in msg
+
+    def test_unknown_unqualified_column_in_multitable_query_is_rejected(self):
+        valid, msg = validate_sql_structure(
+            "SELECT missing_name FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "does not exist in referenced tables" in msg
+
+    def test_ambiguous_unqualified_column_in_multitable_query_is_rejected(self):
+        valid, msg = validate_sql_structure(
+            "SELECT owner_id FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "is ambiguous across tables" in msg
+
+    def test_valid_join_and_group_by_passes(self):
+        valid, msg = validate_sql_structure(
+            "SELECT a.record_name, SUM(b.event_total) AS total_event_total "
+            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id "
+            "GROUP BY a.record_name ORDER BY total_event_total DESC",
+            GENERIC_KB,
+        )
+
+        assert valid is True
+        assert msg == "SQL structure is valid"

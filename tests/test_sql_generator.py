@@ -30,7 +30,8 @@ def test_retry_prompt_includes_validation_error_and_join_context(monkeypatch):
         "selected_columns": [{"table": "alpha_records", "column": "record_name", "confidence": 0.9, "reason": "selected"}],
         "vector_tables": ["alpha_records", "beta_events"],
         "fk_relationships": [{"table": "beta_events", "foreign_keys": [{"column": "owner_id", "referenced_table": "alpha_records", "referenced_column": "record_name"}]}],
-        "join_paths": [{"from_table": "alpha_records", "to_table": "beta_events", "path": [{"to_table": "beta_events", "from_column": "record_name", "to_column": "owner_id"}]}],
+        "join_paths": [{"from_table": "alpha_records", "to_table": "beta_events", "path": [{"from_table": "alpha_records", "to_table": "beta_events", "from_column": "record_name", "to_column": "owner_id"}]}],
+        "join_conditions": ["alpha_records.record_name = beta_events.owner_id"],
     }
     join_paths = validation_context["join_paths"]
 
@@ -52,5 +53,8 @@ def test_retry_prompt_includes_validation_error_and_join_context(monkeypatch):
     assert "Validation failure" in correction_user
     assert "missing a valid table name after FROM" in correction_user
     assert "Relationship/join paths" in correction_user
+    assert "Join predicates to use" in correction_user
+    assert "alpha_records.record_name = beta_events.owner_id" in correction_user
     assert "alpha_records" in correction_user
+    assert "Use only allowed tables and columns" in correction_user
     assert "output complete sql only" in correction_user.lower()

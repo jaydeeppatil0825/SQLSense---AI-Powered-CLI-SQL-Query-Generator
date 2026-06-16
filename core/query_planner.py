@@ -821,6 +821,7 @@ def _build_fk_relationship_graph(knowledge_base: dict) -> dict:
                     graph[to_table] = {"outgoing": [], "incoming": []}
                 
                 graph[from_table]["outgoing"].append({
+                    "from_table": from_table,
                     "to_table": to_table,
                     "from_column": from_column,
                     "to_column": to_column,
@@ -853,20 +854,34 @@ def _find_shortest_path(graph: dict, start: str, end: str, max_depth: int = 5) -
         # Check outgoing edges
         for edge in graph[current].get("outgoing", []):
             next_table = edge["to_table"]
+            path_edge = {
+                "from_table": current,
+                "from_column": edge["from_column"],
+                "to_table": next_table,
+                "to_column": edge["to_column"],
+                "join_condition": f"{current}.{edge['from_column']} = {next_table}.{edge['to_column']}",
+            }
             if next_table == end:
-                return path + [edge]
+                return path + [path_edge]
             if next_table not in visited:
                 visited.add(next_table)
-                queue.append((next_table, path + [edge]))
+                queue.append((next_table, path + [path_edge]))
         
         # Check incoming edges
         for edge in graph[current].get("incoming", []):
             next_table = edge["from_table"]
+            path_edge = {
+                "from_table": current,
+                "from_column": edge["to_column"],
+                "to_table": next_table,
+                "to_column": edge["from_column"],
+                "join_condition": f"{current}.{edge['to_column']} = {next_table}.{edge['from_column']}",
+            }
             if next_table == end:
-                return path + [{"to_table": next_table, "from_column": edge["to_column"], "to_column": edge["from_column"]}]
+                return path + [path_edge]
             if next_table not in visited:
                 visited.add(next_table)
-                queue.append((next_table, path + [{"to_table": next_table, "from_column": edge["to_column"], "to_column": edge["from_column"]}]))
+                queue.append((next_table, path + [path_edge]))
     
     return None
 

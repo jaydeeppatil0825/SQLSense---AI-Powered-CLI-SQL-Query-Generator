@@ -236,6 +236,7 @@ def _validate_business_sql_fit(sql: str, query_context: dict[str, Any]) -> tuple
 def _build_validation_retry_context(query_context: dict[str, Any]) -> dict[str, Any]:
     """Build compact dynamic schema/vector context for AI correction prompts."""
     vector_results = query_context.get("vector_results") or {}
+    join_paths = list(query_context.get("join_paths") or [])
     return {
         "selected_tables": [
             {
@@ -290,7 +291,17 @@ def _build_validation_retry_context(query_context: dict[str, Any]) -> dict[str, 
             }
             for table_name, table_data in list((query_context.get("selected_knowledge_base") or {}).items())[:6]
         ],
-        "join_paths": list(query_context.get("join_paths") or []),
+        "join_paths": join_paths,
+        "join_conditions": [
+            edge.get("join_condition")
+            or (
+                f"{edge.get('from_table')}.{edge.get('from_column')} = "
+                f"{edge.get('to_table')}.{edge.get('to_column')}"
+            )
+            for join_path in join_paths[:6]
+            for edge in join_path.get("path", [])
+            if edge.get("from_column") and edge.get("to_table") and edge.get("to_column")
+        ],
     }
 
 

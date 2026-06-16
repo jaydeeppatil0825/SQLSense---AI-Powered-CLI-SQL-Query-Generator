@@ -33,6 +33,7 @@ SQL query construction rules:
   - Use JOIN only when a listed relationship supports it.
   - Never invent table names or column names.
   - Prefer fully qualified column references when multiple tables are involved.
+  - When using aliases in multi-table SQL, qualify every non-aggregate column with its alias.
   - Do not include explanations or comments in the SQL output.
 """.strip()
 
@@ -55,6 +56,7 @@ Structured-plan execution rules:
   - For intent=top_n use GROUP BY + ORDER BY DESC, and add LIMIT only when the question explicitly requests a row count.
   - For intent=trend or grouping by month use a date expression and aggregate.
   - When the plan includes filters, apply them instead of returning a raw table dump.
+  - Use computed join predicates exactly when they are supplied.
   - Do NOT use SELECT * for totals, counts, balances, grouped analysis, or other business-style questions unless the plan clearly indicates a raw record listing.
 """.strip()
 
@@ -236,11 +238,22 @@ def _build_plan_section(query_plan: dict | None, selected_tables: list[dict] | N
     if join_paths:
         lines.append("Computed join paths between selected tables:")
         for jp in join_paths:
-            path_str = " -> ".join([
-                f"{edge['to_table']}.{edge['to_column']}" 
-                for edge in jp['path']
-            ])
-            lines.append(f"  - {jp['from_table']} -> {jp['to_table']}: {path_str}")
+            predicate_parts = []
+            for edge in jp.get("path", []):
+                join_condition = edge.get("join_condition")
+                if join_condition:
+                    predicate_parts.append(str(join_condition))
+                    continue
+
+                from_table = edge.get("from_table", jp.get("from_table", ""))
+                from_column = edge.get("from_column", "")
+                to_table = edge.get("to_table", "")
+                to_column = edge.get("to_column", "")
+                if from_table and from_column and to_table and to_column:
+                    predicate_parts.append(f"{from_table}.{from_column} = {to_table}.{to_column}")
+
+            path_str = " AND ".join(predicate_parts) if predicate_parts else "no join predicate available"
+            lines.append(f"  - {jp.get('from_table')} -> {jp.get('to_table')}: {path_str}")
 
     lines.append("")
     return lines

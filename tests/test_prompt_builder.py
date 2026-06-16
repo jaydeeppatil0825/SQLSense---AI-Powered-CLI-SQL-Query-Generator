@@ -170,6 +170,22 @@ def test_prompt_includes_selected_columns_and_plan_execution_rules():
         query_plan=query_plan,
         selected_tables=selected_tables,
         business_glossary=_glossary(),
+        join_paths=[
+            {
+                "from_table": "invoice_headers",
+                "to_table": "client_directory",
+                "path": [
+                    {
+                        "from_table": "invoice_headers",
+                        "from_column": "client_id",
+                        "to_table": "client_directory",
+                        "to_column": "client_id",
+                        "join_condition": "invoice_headers.client_id = client_directory.client_id",
+                    }
+                ],
+                "length": 1,
+            }
+        ],
     )
     system_message = messages[0]["content"]
 
@@ -178,3 +194,5 @@ def test_prompt_includes_selected_columns_and_plan_execution_rules():
     assert "Use the metric 'money' as the main measure hint." in system_message
     assert "selected columns: invoice_date[date], total_due[money]" in system_message
     assert "semantic_type=money" in system_message
+    assert "Computed join paths between selected tables:" in system_message
+    assert "invoice_headers.client_id = client_directory.client_id" in system_message

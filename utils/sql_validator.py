@@ -333,6 +333,90 @@ def _validate_single_table_columns(sql: str, knowledge_base: dict[str, Any], ref
     return True, "Single-table columns are valid."
 
 
+def _column_owner_matches(identifier: str, knowledge_base: dict[str, Any], referenced_tables: list[str]) -> list[str]:
+    identifier_lower = str(identifier or "").lower()
+    matches = []
+    for table_name in referenced_tables:
+        known_columns = {
+            str(col.get("name", "")).lower()
+            for col in knowledge_base.get(table_name, {}).get("columns", [])
+        }
+        if identifier_lower in known_columns:
+            matches.append(table_name)
+    return matches
+
+
+def _collect_select_aliases(select_segment: str) -> set[str]:
+    aliases = {
+        match.group(1).lower()
+        for match in re.finditer(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\b", select_segment, re.IGNORECASE)
+    }
+    return aliases
+
+
+def _extract_clause_segments(sql: str) -> list[tuple[str, str]]:
+    segments: list[tuple[str, str]] = []
+    patterns = [
+        ("SELECT", r"\bSELECT\s+(.*?)\bFROM\b"),
+        ("WHERE", r"\bWHERE\s+(.*?)(?=\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|\bUNION\b|;|$)"),
+        ("GROUP BY", r"\bGROUP\s+BY\s+(.*?)(?=\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|\bUNION\b|;|$)"),
+        ("HAVING", r"\bHAVING\s+(.*?)(?=\bORDER\s+BY\b|\bLIMIT\b|\bUNION\b|;|$)"),
+        ("ORDER BY", r"\bORDER\s+BY\s+(.*?)(?=\bLIMIT\b|\bUNION\b|;|$)"),
+    ]
+    for label, pattern in patterns:
+        match = re.search(pattern, sql, re.IGNORECASE | re.DOTALL)
+        if match:
+            segments.append((label, match.group(1)))
+    return segments
+
+
+def _validate_unqualified_columns(
+    sql: str,
+    knowledge_base: dict[str, Any],
+    referenced_tables: list[str],
+    alias_to_table: dict[str, str],
+) -> tuple[bool, str]:
+    """Validate unqualified identifiers in multi-table clauses against schema metadata."""
+    if len(referenced_tables) < 2:
+        return True, "Skipping multi-table unqualified column validation."
+
+    masked_sql = _strip_string_literals(sql)
+    select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", masked_sql, re.IGNORECASE | re.DOTALL)
+    output_aliases = _collect_select_aliases(select_match.group(1) if select_match else "")
+    table_aliases = set(alias_to_table.keys())
+    table_names = {table.lower() for table in referenced_tables}
+
+    for clause_name, segment in _extract_clause_segments(masked_sql):
+        tokens = _tokenize_sql(segment)
+        for index, token in enumerate(tokens):
+            if not _is_identifier(token):
+                continue
+
+            token_upper = token.upper()
+            token_lower = token.lower()
+            previous_token = tokens[index - 1] if index > 0 else ""
+            next_token = tokens[index + 1] if index + 1 < len(tokens) else ""
+
+            if token_upper in _SQL_KEYWORDS or token_upper in _SQL_FUNCTIONS:
+                continue
+            if previous_token == "." or next_token == ".":
+                continue
+            if previous_token.upper() == "AS":
+                continue
+            if next_token == "(":
+                continue
+            if token_lower in output_aliases or token_lower in table_aliases or token_lower in table_names:
+                continue
+
+            matches = _column_owner_matches(token, knowledge_base, referenced_tables)
+            if not matches:
+                return False, f"Column '{token}' in {clause_name} does not exist in referenced tables: {', '.join(referenced_tables)}."
+            if len(matches) > 1:
+                return False, f"Column '{token}' in {clause_name} is ambiguous across tables: {', '.join(matches)}."
+
+    return True, "Unqualified multi-table columns are valid."
+
+
 def _has_dangling_comma(sql: str) -> bool:
     return bool(re.search(r",\s*(FROM|WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|JOIN|;|$)", sql, re.IGNORECASE))
 
@@ -610,6 +694,10 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
         single_ok, single_reason = _validate_single_table_columns(stripped, knowledge_base, referenced_tables)
         if not single_ok:
             return False, single_reason
+
+        unqualified_ok, unqualified_reason = _validate_unqualified_columns(stripped, knowledge_base, referenced_tables, alias_to_table)
+        if not unqualified_ok:
+            return False, unqualified_reason
 
     if _has_dangling_comma(stripped):
         return False, "SQL contains a dangling comma before the next clause."
