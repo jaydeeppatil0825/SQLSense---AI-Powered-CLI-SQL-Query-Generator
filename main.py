@@ -400,6 +400,20 @@ def handle_ask_question(state: SessionState) -> None:
     query_plan = query_context.get("plan") or {}
     vector_status = state.app_service.get_vector_status()
     persistence_status = vector_status.get("persistence", {})
+    route_used = str(query_context.get("route_used") or "").strip()
+    route_reason = str(query_context.get("route_reason") or "").strip()
+    route_labels = {
+        "rule-based": "rule-based",
+        "ai": "AI",
+        "ai-retry": "AI retry",
+        "fallback-failed": "fallback failed",
+    }
+
+    if route_used:
+        print("\n  Routing:")
+        print(f"  Route: {route_labels.get(route_used, route_used)}")
+        if route_reason:
+            print(f"  Reason: {route_reason}")
 
     if query_plan:
         print("\n  Query Plan:")

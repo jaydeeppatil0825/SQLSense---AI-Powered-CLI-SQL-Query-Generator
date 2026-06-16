@@ -1,11 +1,14 @@
 """
 utils/sql_validator.py
 
-Provides SQL safety validation and LIMIT injection utilities.
-All functions in this module are stateless and have no external dependencies.
+Provides SQL cleanup, safety validation, and schema-driven structure validation.
+All functions in this module are stateless and generic.
 """
 
+from __future__ import annotations
+
 import re
+from typing import Any
 
 # Forbidden DML/DDL keywords that must never appear in a safe SELECT query.
 _FORBIDDEN_KEYWORDS = [
@@ -16,10 +19,341 @@ _FORBIDDEN_KEYWORDS = [
     "ALTER",
     "TRUNCATE",
     "CREATE",
+    "RECREATE",
     "REPLACE",
     "EXEC",
     "EXECUTE",
 ]
+
+_CLAUSE_KEYWORDS = {
+    "SELECT", "FROM", "WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER",
+    "FULL", "CROSS", "NATURAL", "ON", "USING", "GROUP", "ORDER", "BY",
+    "HAVING", "LIMIT", "OFFSET", "UNION", "AS",
+}
+_INVALID_TABLE_START_KEYWORDS = {
+    "WHERE", "GROUP", "ORDER", "LIMIT", "HAVING", "JOIN", "ON", "USING",
+    "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "NATURAL", "UNION", "BY",
+}
+_SQL_FUNCTIONS = {
+    "COUNT", "SUM", "AVG", "MIN", "MAX", "DATE_FORMAT", "DATE", "YEAR", "MONTH",
+    "DAY", "NOW", "CURDATE", "COALESCE", "IFNULL", "ROUND", "CAST", "UPPER",
+    "LOWER", "TRIM", "SUBSTRING", "CONCAT", "ABS",
+}
+_SQL_KEYWORDS = {
+    "SELECT", "FROM", "WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER",
+    "FULL", "CROSS", "NATURAL", "ON", "USING", "GROUP", "ORDER", "BY",
+    "HAVING", "LIMIT", "OFFSET", "UNION", "ALL", "DISTINCT", "AS",
+    "CASE", "WHEN", "THEN", "ELSE", "END", "AND", "OR", "NOT", "NULL", "IS",
+    "IN", "LIKE", "BETWEEN", "ASC", "DESC",
+}
+_PUNCTUATION_TOKENS = {",", ";", "(", ")", ".", "*", "=", "<", ">", "<=", ">=", "!=", "<>"}
+_TOKEN_RE = re.compile(r"`[^`]+`|<=|>=|<>|!=|[(),.;=*<>]|\.|[A-Za-z_][A-Za-z0-9_]*|\d+")
+_PREAMBLE_PATTERNS = re.compile(
+    r"^("
+    r"here\s+is(\s+the)?\s+sql[\s:]*"
+    r"|here\s+is(\s+a)?\s+query[\s:]*"
+    r"|sql\s+statement[\s\w]*:+"
+    r"|sql\s+query[\s\w]*:+"
+    r"|the\s+sql[\s\w]*:+"
+    r"|query[\s:]*"
+    r"|result[\s:]*"
+    r"|output[\s:]*"
+    r"|answer[\s:]*"
+    r")\s*",
+    re.IGNORECASE,
+)
+
+
+def _repair_order_by(sql: str) -> str:
+    """Remove obviously malformed ORDER BY tails without altering valid SQL."""
+    sql = re.sub(r"\bORDER\s+BY\s+(?=LIMIT\b)", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\bORDER\s+BY\s*(?=;|$)", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"[ \t]{2,}", " ", sql)
+    sql = re.sub(r"\n{3,}", "\n\n", sql)
+    return sql.strip()
+
+
+def _normalize_sql_response_text(sql: str) -> str:
+    """Remove wrapper text while preserving the full model response body."""
+    if not isinstance(sql, str):
+        return ""
+
+    text = sql.strip()
+    if not text:
+        return ""
+
+    text = re.sub(r"```(?:sql)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"```", "", text).strip()
+    text = _PREAMBLE_PATTERNS.sub("", text).strip()
+    return text
+
+
+def clean_sql_response(sql: str) -> str:
+    """
+    Clean a raw SQL-like response into a single executable SELECT statement.
+
+    This removes markdown fences, labels, leading explanations, and trailing prose.
+    """
+    if not isinstance(sql, str):
+        return ""
+
+    text = _normalize_sql_response_text(sql)
+    if not text:
+        return ""
+
+    select_match = re.search(r"\bSELECT\b", text, re.IGNORECASE)
+    if not select_match:
+        return text.strip()
+
+    text = text[select_match.start():]
+    sql_lines: list[str] = []
+    sql_line_re = re.compile(
+        r"^\s*("
+        r"SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|OUTER|CROSS|FULL|"
+        r"ON|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|OFFSET|UNION|WITH|"
+        r"AS|AND|OR|NOT|IN|EXISTS|BETWEEN|LIKE|IS\s+NULL|IS\s+NOT|"
+        r"CASE|WHEN|THEN|ELSE|END|COUNT|SUM|AVG|MAX|MIN|DISTINCT|"
+        r"COALESCE|IFNULL|DATE_FORMAT|DATE|YEAR|MONTH|DAY|NOW|CURDATE|"
+        r"\(|\)|\w+\s*[=<>!]|\w+\.\w+|`\w"
+        r")",
+        re.IGNORECASE,
+    )
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if sql_lines:
+                break
+            continue
+
+        if ";" in stripped:
+            sql_lines.append(stripped[: stripped.index(";") + 1])
+            break
+
+        if sql_lines and not sql_line_re.match(line):
+            break
+
+        sql_lines.append(line)
+
+    cleaned = "\n".join(sql_lines).strip() or text.strip()
+    return _repair_order_by(cleaned)
+
+
+def _strip_string_literals(sql: str) -> str:
+    """Mask string literals so identifier parsing ignores their contents."""
+    return re.sub(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"", "''", sql)
+
+
+def _is_identifier(token: str) -> bool:
+    normalized = str(token or "").strip("`")
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized))
+
+
+def _normalize_identifier(token: str) -> str:
+    return str(token or "").strip("`")
+
+
+def _tokenize_sql(sql: str) -> list[str]:
+    masked = _strip_string_literals(sql)
+    return [token for token in _TOKEN_RE.findall(masked) if token and not token.isspace()]
+
+
+def _extract_table_references(sql: str, knowledge_base: dict[str, Any]) -> tuple[bool, str, list[str], dict[str, str]]:
+    """Extract referenced tables and aliases from FROM/JOIN clauses."""
+    kb_tables = {str(name).lower(): str(name) for name in (knowledge_base or {}).keys()}
+    tokens = _tokenize_sql(sql)
+    referenced_tables: list[str] = []
+    alias_to_table: dict[str, str] = {}
+
+    idx = 0
+    while idx < len(tokens):
+        token_upper = tokens[idx].upper()
+        if token_upper not in {"FROM", "JOIN"}:
+            idx += 1
+            continue
+
+        keyword = token_upper
+        cursor = idx + 1
+        if cursor >= len(tokens):
+            return False, f"SQL is missing a table name after {keyword}.", [], {}
+
+        next_token = tokens[cursor]
+        next_upper = next_token.upper()
+        if next_upper in _INVALID_TABLE_START_KEYWORDS or next_token in {",", ";", ")", "."}:
+            found = next_upper if next_upper in _INVALID_TABLE_START_KEYWORDS else next_token
+            return False, f"SQL is missing a valid table name after {keyword}. Found '{found}' instead.", [], {}
+        if next_token == "(":
+            return False, f"Subqueries are not allowed after {keyword} in generated SQL.", [], {}
+        if not _is_identifier(next_token):
+            return False, f"SQL has an invalid table reference after {keyword}: '{next_token}'.", [], {}
+
+        table_name = _normalize_identifier(next_token)
+        cursor += 1
+        if cursor + 1 < len(tokens) and tokens[cursor] == "." and _is_identifier(tokens[cursor + 1]):
+            table_name = _normalize_identifier(tokens[cursor + 1])
+            cursor += 2
+
+        if table_name.lower() not in kb_tables:
+            return (
+                False,
+                f"Table '{table_name}' does not exist in the knowledge base. "
+                f"Available tables: {', '.join(sorted(knowledge_base.keys()))}",
+                [],
+                {},
+            )
+
+        canonical_table = kb_tables[table_name.lower()]
+        referenced_tables.append(canonical_table)
+        alias_to_table[canonical_table.lower()] = canonical_table
+
+        if cursor < len(tokens):
+            alias_token = tokens[cursor]
+            alias_upper = alias_token.upper()
+            if alias_upper == "AS":
+                cursor += 1
+                if cursor >= len(tokens) or not _is_identifier(tokens[cursor]):
+                    return False, f"SQL has an invalid alias after table '{canonical_table}'.", [], {}
+                alias_to_table[_normalize_identifier(tokens[cursor]).lower()] = canonical_table
+                cursor += 1
+            elif _is_identifier(alias_token) and alias_upper not in _CLAUSE_KEYWORDS:
+                alias_to_table[_normalize_identifier(alias_token).lower()] = canonical_table
+                cursor += 1
+
+        idx = cursor
+
+    if not referenced_tables:
+        return False, "SQL is missing a valid table name after FROM or JOIN.", [], {}
+
+    return True, "Table references are valid.", referenced_tables, alias_to_table
+
+
+def _validate_join_conditions(sql: str) -> tuple[bool, str]:
+    """Ensure explicit JOIN clauses have ON/USING conditions."""
+    tokens = _tokenize_sql(sql)
+    clause_boundaries = {"WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", ";"}
+
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx].upper() != "JOIN":
+            idx += 1
+            continue
+
+        requires_condition = True
+        prev_upper = tokens[idx - 1].upper() if idx > 0 else ""
+        if prev_upper in {"CROSS", "NATURAL"}:
+            requires_condition = False
+
+        cursor = idx + 1
+        while cursor < len(tokens) and tokens[cursor] not in clause_boundaries and tokens[cursor].upper() not in {"JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "NATURAL"}:
+            if tokens[cursor].upper() in {"ON", "USING"}:
+                break
+            cursor += 1
+
+        if not requires_condition:
+            idx += 1
+            continue
+
+        if cursor >= len(tokens) or tokens[cursor].upper() not in {"ON", "USING"}:
+            return False, "SQL has a JOIN without an ON or USING condition."
+
+        condition_keyword = tokens[cursor].upper()
+        cursor += 1
+        if cursor >= len(tokens) or tokens[cursor].upper() in clause_boundaries or tokens[cursor] in {",", ";", ")"}:
+            return False, f"SQL has an incomplete {condition_keyword} clause in a JOIN."
+
+        idx += 1
+
+    return True, "JOIN conditions are valid."
+
+
+def _validate_qualified_columns(sql: str, knowledge_base: dict[str, Any], alias_to_table: dict[str, str]) -> tuple[bool, str]:
+    """Validate qualified alias.column references against the schema."""
+    if not knowledge_base:
+        return True, "No schema metadata available."
+
+    for alias, column in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\b", _strip_string_literals(sql)):
+        alias_lower = alias.lower()
+        if alias.upper() in _SQL_FUNCTIONS:
+            continue
+        if alias_lower not in alias_to_table:
+            return False, f"Alias or table '{alias}' is not defined in FROM/JOIN clauses."
+
+        table_name = alias_to_table[alias_lower]
+        known_columns = {
+            str(col.get("name", "")).lower()
+            for col in knowledge_base.get(table_name, {}).get("columns", [])
+        }
+        if column.lower() not in known_columns:
+            return False, f"Column '{alias}.{column}' does not exist in table '{table_name}'."
+
+    return True, "Qualified columns are valid."
+
+
+def _validate_single_table_columns(sql: str, knowledge_base: dict[str, Any], referenced_tables: list[str]) -> tuple[bool, str]:
+    """Validate unqualified columns when exactly one table is referenced."""
+    if len(referenced_tables) != 1:
+        return True, "Skipping single-table column validation."
+
+    table_name = referenced_tables[0]
+    known_columns = {
+        str(col.get("name", "")).lower()
+        for col in knowledge_base.get(table_name, {}).get("columns", [])
+    }
+    if not known_columns:
+        return True, "No column metadata available."
+
+    select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", sql, re.IGNORECASE | re.DOTALL)
+    if not select_match:
+        return True, "No SELECT list found."
+
+    select_segment = _strip_string_literals(select_match.group(1))
+    alias_tokens = {
+        match.group(1).lower()
+        for match in re.finditer(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\b", select_segment, re.IGNORECASE)
+    }
+    tokens = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", select_segment)
+
+    for token in tokens:
+        token_upper = token.upper()
+        token_lower = token.lower()
+        if token_upper in _SQL_KEYWORDS or token_upper in _SQL_FUNCTIONS:
+            continue
+        if token_lower in known_columns or token_lower in alias_tokens:
+            continue
+        if token.isdigit():
+            continue
+        return False, f"Column '{token}' does not exist in table '{table_name}'."
+
+    return True, "Single-table columns are valid."
+
+
+def _has_dangling_comma(sql: str) -> bool:
+    return bool(re.search(r",\s*(FROM|WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|JOIN|;|$)", sql, re.IGNORECASE))
+
+
+def _has_partial_clause(sql: str) -> tuple[bool, str]:
+    if re.search(r"\b(?:FROM|JOIN|WHERE|ON|GROUP\s+BY|ORDER\s+BY|HAVING)\s*;?\s*$", sql, re.IGNORECASE):
+        return True, "SQL ends with an incomplete clause."
+    if re.search(r"(=|<|>|<=|>=|<>|!=|AND|OR)\s*;?\s*$", sql, re.IGNORECASE):
+        return True, "SQL ends with an incomplete expression."
+    return False, ""
+
+
+def _looks_like_sql_trailer(text: str) -> bool:
+    """Return True when trailing content appears to be another SQL statement."""
+    trailer = str(text or "").strip()
+    if not trailer:
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"SELECT|WITH|UNION|FROM|JOIN|WHERE|GROUP|ORDER|HAVING|LIMIT|"
+            r"DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|CREATE|RECREATE|REPLACE|EXEC|EXECUTE"
+            r")\b",
+            trailer,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _contains_sql_comment(sql: str) -> bool:
@@ -82,34 +416,31 @@ def validate_sql(sql: str) -> tuple[bool, str]:
     if not sql or not sql.strip():
         return False, "SQL query is empty or missing."
 
-    stripped = sql.strip()
+    normalized = _normalize_sql_response_text(sql)
+    cleaned = clean_sql_response(sql)
+    if not cleaned:
+        return False, "SQL query is empty or missing."
+    stripped = cleaned.strip()
 
     # Check 3: must start with SELECT (case-insensitive)
     if not stripped.upper().startswith("SELECT"):
         return False, "Only SELECT queries are allowed."
 
     # Check 4: reject comments. Comments can hide or split injected SQL.
-    if _contains_sql_comment(stripped):
+    if _contains_sql_comment(normalized):
         return False, "SQL comments are not allowed."
 
     # Check 5: forbidden keywords as whole words (case-insensitive, word boundaries)
-    upper_sql = stripped.upper()
+    upper_sql = normalized.upper()
     for keyword in _FORBIDDEN_KEYWORDS:
         pattern = r"\b" + keyword + r"\b"
         if re.search(pattern, upper_sql):
             return False, f"Dangerous SQL command detected: {keyword}"
 
-    # Check 6: semicolon not at the very end (multiple statements)
-    # Strip trailing whitespace for this check; a semicolon is only allowed as
-    # the very last non-whitespace character.
-    without_trailing = stripped.rstrip()
-    # Remove one optional trailing semicolon and check the remainder
-    if without_trailing.endswith(";"):
-        inner = without_trailing[:-1]
-    else:
-        inner = without_trailing
-
-    if ";" in inner:
+    # Check 6: additional SQL after the extracted statement is not allowed.
+    trailing = normalized[len(stripped):].strip() if normalized.startswith(stripped) else ""
+    inner = stripped[:-1] if stripped.endswith(";") else stripped
+    if ";" in inner or _looks_like_sql_trailer(trailing):
         return False, "Multiple SQL statements are not allowed."
 
     return True, "SQL is safe"
@@ -198,10 +529,11 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
         (True,  "SQL structure is valid")      — all checks passed
         (False, <reason>)                      — first failing check
     """
-    if not sql or not sql.strip():
+    cleaned = clean_sql_response(sql)
+    if not cleaned:
         return False, "SQL is empty."
 
-    stripped = sql.strip()
+    stripped = cleaned.strip()
 
     # Check 1: must start with SELECT.
     if not stripped.upper().startswith("SELECT"):
@@ -212,23 +544,6 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
         return False, "SQL contains comments."
 
     upper = stripped.upper()
-
-    # Check 3: natural-language phrases that indicate the AI returned text.
-    # These patterns mean the AI included an explanation rather than clean SQL.
-    # Checked before the FROM check so NL preambles are identified correctly.
-    nl_patterns = [
-        r"\bSQL\s+statement\b",          # "SQL statement to show..."
-        r"\bHere\s+is\b",                # "Here is the SQL..."
-        r"\bThe\s+query\s+is\b",         # "The query is..."
-        r"\bThis\s+query\b",             # "This query shows..."
-        r"\bexplanation\b",
-        r"\bNote\s*:",                   # "Note: ..."
-        r"\bThis\s+will\b",              # "This will return..."
-        r"\bThe\s+above\b",
-    ]
-    for pattern in nl_patterns:
-        if re.search(pattern, stripped, re.IGNORECASE):
-            return False, f"SQL contains natural language text (pattern: {pattern.strip()})."
 
     # Check 4: must contain FROM.
     if "FROM" not in upper:
@@ -244,40 +559,13 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
 
     # Check 7: verify table names after FROM and JOIN exist in knowledge base.
     if knowledge_base:
-        kb_tables = {t.lower(): t for t in knowledge_base.keys()}
-        alias_to_table: dict[str, str] = {}
-        reserved_alias_words = {
-            "select", "where", "on", "set", "values", "into", "group", "order",
-            "limit", "having", "left", "right", "inner", "outer", "join",
-        }
-        # Extract bare table names after FROM / JOIN keywords.
-        # Pattern: FROM/JOIN followed by optional schema prefix then table name.
-        table_refs = re.findall(
-            r"\b(?:FROM|JOIN)\s+(?:`?[\w]+`?\.)?`?(\w+)`?(?:\s+(?:AS\s+)?(\w+))?",
-            stripped,
-            re.IGNORECASE,
-        )
-        referenced_tables = []
-        saw_from_or_join = bool(table_refs)
-        for ref, alias in table_refs:
-            # Skip subquery aliases, CTE names, and common SQL keywords.
-            skip = reserved_alias_words
-            if ref.lower() in skip:
-                continue
-            if ref.lower() not in kb_tables:
-                return (
-                    False,
-                    f"Table '{ref}' does not exist in the knowledge base. "
-                    f"Available tables: {', '.join(sorted(knowledge_base.keys()))}",
-                )
-            canonical_table = kb_tables[ref.lower()]
-            referenced_tables.append(canonical_table)
-            alias_to_table[canonical_table] = canonical_table
-            if alias and alias.lower() not in skip:
-                alias_to_table[alias] = canonical_table
+        table_ok, table_reason, referenced_tables, alias_to_table = _extract_table_references(stripped, knowledge_base)
+        if not table_ok:
+            return False, table_reason
 
-        if saw_from_or_join and not referenced_tables:
-            return False, "SQL is missing a valid table name after FROM or JOIN."
+        join_ok, join_reason = _validate_join_conditions(stripped)
+        if not join_ok:
+            return False, join_reason
 
         if re.search(r"\bSELECT\s+(?:\w+\.)?\*", stripped, re.IGNORECASE):
             for table_name in referenced_tables:
@@ -288,56 +576,19 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
                         f"SELECT * is not allowed on large table '{table_name}' ({row_count} rows).",
                     )
 
-        strict_column_validation = (
-            len(referenced_tables) == 1
-            or all(
-                len(knowledge_base.get(table_name, {}).get("columns", [])) > 1
-                for table_name in referenced_tables
-            )
-        )
+        qualified_ok, qualified_reason = _validate_qualified_columns(stripped, knowledge_base, alias_to_table)
+        if not qualified_ok:
+            return False, qualified_reason
 
-        if strict_column_validation:
-            for alias, column in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b", stripped):
-                if alias.lower() in {"date_format"}:
-                    continue
-                table_name = alias_to_table.get(alias)
-                if not table_name:
-                    continue
-                known_columns = {
-                    str(col.get("name", "")).lower()
-                    for col in knowledge_base.get(table_name, {}).get("columns", [])
-                }
-                if column.lower() not in known_columns:
-                    return False, f"Column '{alias}.{column}' does not exist in table '{table_name}'."
+        single_ok, single_reason = _validate_single_table_columns(stripped, knowledge_base, referenced_tables)
+        if not single_ok:
+            return False, single_reason
 
-        if len(referenced_tables) == 1 and strict_column_validation:
-            table_name = referenced_tables[0]
-            known_columns = {
-                str(col.get("name", "")).lower()
-                for col in knowledge_base.get(table_name, {}).get("columns", [])
-            }
-            select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", stripped, re.IGNORECASE | re.DOTALL)
-            if select_match:
-                tokens = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", select_match.group(1))
-                alias_tokens = {
-                    match.group(1).lower()
-                    for match in re.finditer(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\b", select_match.group(1), re.IGNORECASE)
-                }
-                sql_keywords = {
-                    "select", "from", "where", "and", "or", "as", "sum", "avg", "min", "max", "count",
-                    "distinct", "date_format", "case", "when", "then", "else", "end", "limit",
-                }
-                for token in tokens:
-                    lower_token = token.lower()
-                    if lower_token in sql_keywords or lower_token in known_columns or lower_token in alias_tokens:
-                        continue
-                    if token.isdigit():
-                        continue
-                    if any(ch in select_match.group(1) for ch in ("'", '"')):
-                        # String literals in the select list are rare in this CLI path; skip them.
-                        continue
-                    if lower_token in alias_to_table:
-                        continue
-                    return False, f"Column '{token}' does not exist in table '{table_name}'."
+    if _has_dangling_comma(stripped):
+        return False, "SQL contains a dangling comma before the next clause."
+
+    is_partial, partial_reason = _has_partial_clause(stripped)
+    if is_partial:
+        return False, partial_reason
 
     return True, "SQL structure is valid"

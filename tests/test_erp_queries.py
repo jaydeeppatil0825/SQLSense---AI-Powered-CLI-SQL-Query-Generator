@@ -416,3 +416,71 @@ def test_business_question_uses_rule_based_fallback_when_ai_is_too_generic(monke
     assert "SUM(final_amount)" in sql
     assert "FROM sales_invoices" in sql
     assert "retry_reason" in captured
+
+
+def test_ai_retry_receives_validator_error_and_dynamic_context(monkeypatch):
+    service = _service()
+    captured: dict = {}
+
+    def fake_generate_sql(user_question, knowledge_base, backend=None, query_plan=None, selected_tables=None, business_glossary=None):
+        return "SELECT customer_name FROM LIMIT 50"
+
+    def fake_generate_sql_with_retry(
+        user_question,
+        knowledge_base,
+        backend,
+        first_attempt_sql,
+        validation_reason,
+        query_plan=None,
+        selected_tables=None,
+        business_glossary=None,
+        validation_context=None,
+    ):
+        captured["first_attempt_sql"] = first_attempt_sql
+        captured["validation_reason"] = validation_reason
+        captured["validation_context"] = validation_context
+        return "SELECT customer_name FROM customers LIMIT 50;"
+
+    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
+    monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_generate_sql_with_retry)
+
+    success, message, sql, error = service.process_question("show customers", ai_backend="local")
+
+    assert success is True
+    assert "SELECT customer_name FROM customers" in sql
+    assert "table name after FROM" in captured["validation_reason"]
+    assert captured["validation_context"]["selected_tables"]
+    assert "vector_tables" in captured["validation_context"]
+
+
+def test_failed_retry_returns_clean_validation_failure_details(monkeypatch):
+    service = _service()
+
+    def fake_generate_sql(user_question, knowledge_base, backend=None, query_plan=None, selected_tables=None, business_glossary=None):
+        return "SELECT customer_name FROM LIMIT 50"
+
+    def fake_generate_sql_with_retry(
+        user_question,
+        knowledge_base,
+        backend,
+        first_attempt_sql,
+        validation_reason,
+        query_plan=None,
+        selected_tables=None,
+        business_glossary=None,
+        validation_context=None,
+    ):
+        return "SELECT customer_name FROM LIMIT 50"
+
+    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
+    monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_generate_sql_with_retry)
+
+    success, message, sql, error = service.process_question("show customers", ai_backend="local")
+
+    assert success is False
+    assert sql is None
+    assert error is not None
+    assert "Question: show customers" in error
+    assert "Generated SQL: SELECT customer_name FROM LIMIT 50" in error
+    assert "Validation reason:" in error
+    assert "Relevant table candidates:" in error

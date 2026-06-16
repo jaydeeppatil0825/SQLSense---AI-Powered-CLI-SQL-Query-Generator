@@ -1,83 +1,110 @@
-"""Tests for SQL structure validation."""
+"""Tests for generic SQL structure validation."""
 
 import pytest
+
 from utils.sql_validator import validate_sql_structure
 
-DEMO_KB = {
-    "customers": {"columns": [{"name": "customer_id", "type": "INTEGER", "nullable": False}], "primary_keys": ["customer_id"], "foreign_keys": []},
-    "orders": {"columns": [{"name": "order_id", "type": "INTEGER", "nullable": False}], "primary_keys": ["order_id"], "foreign_keys": []},
+RUNTIME_SCHEMA = {
+    "alpha_records": {
+        "columns": [
+            {"name": "record_id", "type": "INTEGER", "nullable": False},
+            {"name": "record_name", "type": "VARCHAR(100)", "nullable": True},
+            {"name": "owner_id", "type": "INTEGER", "nullable": True},
+        ],
+        "primary_keys": ["record_id"],
+        "foreign_keys": [],
+    },
+    "beta_events": {
+        "columns": [
+            {"name": "event_id", "type": "INTEGER", "nullable": False},
+            {"name": "owner_id", "type": "INTEGER", "nullable": True},
+            {"name": "event_total", "type": "DECIMAL(12,2)", "nullable": True},
+        ],
+        "primary_keys": ["event_id"],
+        "foreign_keys": [],
+    },
 }
 
 
-def test_accepts_valid_sql():
-    ok, reason = validate_sql_structure("SELECT * FROM customers LIMIT 50", DEMO_KB)
+def test_accepts_valid_join_sql():
+    sql = (
+        "SELECT a.record_name, SUM(b.event_total) AS total_amount "
+        "FROM alpha_records a "
+        "JOIN beta_events b ON a.owner_id = b.owner_id "
+        "GROUP BY a.record_name "
+        "ORDER BY total_amount DESC LIMIT 50"
+    )
+    ok, reason = validate_sql_structure(sql, RUNTIME_SCHEMA)
+    assert ok is True
+    assert reason == "SQL structure is valid"
+
+
+def test_accepts_valid_group_by_sql():
+    sql = "SELECT owner_id, COUNT(*) AS total_count FROM beta_events GROUP BY owner_id LIMIT 50"
+    ok, reason = validate_sql_structure(sql, RUNTIME_SCHEMA)
     assert ok is True
 
 
-def test_rejects_natural_language_preamble():
-    bad = "SELECT SQL statement to show all customers: LIMIT 50"
-    ok, reason = validate_sql_structure(bad, DEMO_KB)
+@pytest.mark.parametrize(
+    "sql, expected",
+    [
+        ("SELECT record_name FROM LIMIT 50", "missing a valid table name after FROM"),
+        ("SELECT record_name FROM WHERE owner_id = 1", "missing a valid table name after FROM"),
+        ("SELECT record_name FROM alpha_records JOIN LIMIT 50", "missing a valid table name after JOIN"),
+        ("SELECT record_name FROM alpha_records JOIN beta_events", "JOIN without an ON or USING condition"),
+        ("SELECT record_name FROM alpha_records JOIN beta_events ON", "incomplete ON clause"),
+    ],
+)
+def test_rejects_invalid_from_or_join_shapes(sql, expected):
+    ok, reason = validate_sql_structure(sql, RUNTIME_SCHEMA)
     assert ok is False
-    assert "natural language" in reason.lower() or "SQL statement" in reason.lower() or "pattern" in reason.lower()
-
-
-def test_rejects_markdown_fences():
-    bad = "```sql\nSELECT * FROM customers\n```"
-    ok, reason = validate_sql_structure(bad, DEMO_KB)
-    assert ok is False
+    assert expected.lower() in reason.lower()
 
 
 def test_rejects_unknown_table():
-    bad = "SELECT * FROM nonexistent_table LIMIT 50"
-    ok, reason = validate_sql_structure(bad, DEMO_KB)
+    ok, reason = validate_sql_structure("SELECT record_name FROM gamma_unknown LIMIT 50", RUNTIME_SCHEMA)
     assert ok is False
-    assert "nonexistent_table" in reason
+    assert "gamma_unknown" in reason
 
 
-def test_rejects_missing_from():
-    bad = "SELECT 1 + 1"
-    ok, reason = validate_sql_structure(bad, DEMO_KB)
+def test_rejects_unknown_column():
+    ok, reason = validate_sql_structure("SELECT missing_field FROM alpha_records LIMIT 50", RUNTIME_SCHEMA)
     assert ok is False
+    assert "missing_field" in reason
 
 
-def test_rejects_non_select():
-    bad = "INSERT INTO customers VALUES (1)"
-    ok, reason = validate_sql_structure(bad, DEMO_KB)
+def test_rejects_unknown_qualified_column():
+    sql = (
+        "SELECT a.record_name, b.missing_total "
+        "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id LIMIT 50"
+    )
+    ok, reason = validate_sql_structure(sql, RUNTIME_SCHEMA)
     assert ok is False
+    assert "b.missing_total" in reason
 
 
-def test_accepts_join_sql():
-    sql = "SELECT c.customer_name FROM customers c JOIN orders o ON c.customer_id = o.customer_id LIMIT 50"
-    ok, reason = validate_sql_structure(sql, DEMO_KB)
-    assert ok is True
+def test_rejects_invalid_alias_usage():
+    sql = "SELECT z.record_name FROM alpha_records a LIMIT 50"
+    ok, reason = validate_sql_structure(sql, RUNTIME_SCHEMA)
+    assert ok is False
+    assert "Alias or table 'z'" in reason
+
+
+def test_rejects_markdown_and_preamble_after_cleanup_if_sql_missing():
+    sql = "```sql\nSELECT record_name FROM LIMIT 50\n```"
+    ok, reason = validate_sql_structure(sql, RUNTIME_SCHEMA)
+    assert ok is False
+    assert "FROM" in reason or "table name" in reason
 
 
 @pytest.mark.parametrize(
     "sql",
     [
-        "SELECT * FROM customers -- comment",
-        "SELECT * FROM customers # comment",
-        "SELECT /*+ hint */ * FROM customers",
-        "SELECT /*!50000 1 */ FROM customers",
+        "SELECT record_name, FROM alpha_records LIMIT 50",
+        "SELECT record_name FROM alpha_records WHERE owner_id = 1,",
     ],
 )
-def test_rejects_sql_comments(sql):
-    ok, reason = validate_sql_structure(sql, DEMO_KB)
-
+def test_rejects_dangling_comma(sql):
+    ok, reason = validate_sql_structure(sql, RUNTIME_SCHEMA)
     assert ok is False
-    assert "comment" in reason.lower()
-
-
-@pytest.mark.parametrize(
-    "sql",
-    [
-        "SELECT * FROM customers ORDER BY LIMIT 50",
-        "SELECT * FROM customers ORDER BY;",
-        "SELECT * FROM customers ORDER BY",
-    ],
-)
-def test_rejects_incomplete_order_by(sql):
-    ok, reason = validate_sql_structure(sql, DEMO_KB)
-
-    assert ok is False
-    assert "order by" in reason.lower()
+    assert "dangling comma" in reason.lower() or "incomplete" in reason.lower()

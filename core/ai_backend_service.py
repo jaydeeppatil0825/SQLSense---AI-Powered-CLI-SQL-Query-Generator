@@ -16,19 +16,14 @@ logger = get_logger()
 
 class AIBackendService:
     """Service for AI backend management."""
-    
+
     def __init__(self):
         self.active_backend: str = "local"
         self.local_model: str = "llama3"
         self.local_api_url: str = "http://localhost:11434"
         self.local_timeout: int = 120
-        self.nvidia_model: str = ""
-        self.nvidia_api_key: str = ""
-        self.nvidia_base_url: str = ""
-        self.custom_api_url: str = ""
-        self.custom_model: str = ""
-        self.custom_auth_header: str = ""
-        self.custom_auth_token: str = ""
+       
+        
         
         # Load from environment variables
         self.local_model = os.getenv("LOCAL_MODEL", "llama3")

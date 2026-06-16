@@ -80,24 +80,39 @@ def _attach_generation_feedback(query_context: dict[str, Any], sql: str) -> None
 
 def _is_business_question(query_context: dict[str, Any]) -> bool:
     plan = query_context.get("plan") or {}
-    if plan.get("metric") or plan.get("dimension") or plan.get("filters") or plan.get("date_range"):
-        return True
     if plan.get("intent") in {"total", "average", "top_n", "trend", "comparison", "pending_outstanding", "low_stock"}:
+        return True
+    if plan.get("dimension") or plan.get("grouping"):
+        return True
+    if plan.get("metric") and plan.get("intent") not in {"list", "count"}:
         return True
     if len(query_context.get("selected_table_names") or []) > 1:
         return True
     return False
 
 
-def _should_prefer_ai(query_context: dict[str, Any]) -> bool:
+def _should_try_rule_based_first(query_context: dict[str, Any]) -> tuple[bool, str]:
     plan = query_context.get("plan") or {}
-    if _is_business_question(query_context):
-        return True
-    if plan.get("intent") == "count":
-        return False
-    if plan.get("intent") == "list" and not plan.get("filters") and not plan.get("grouping"):
-        return False
-    return False
+    selected_table_names = list(query_context.get("selected_table_names") or [])
+    selected_tables = list(query_context.get("selected_tables") or [])
+    overall_confidence = float(query_context.get("confidence") or 0.0)
+    top_confidence = float(selected_tables[0].get("confidence") or 0.0) if selected_tables else 0.0
+    intent = str(plan.get("intent") or "list")
+
+    if len(selected_table_names) != 1:
+        return False, "multiple relevant tables were selected"
+    if plan.get("intent") in {"top_n", "trend", "comparison", "pending_outstanding", "low_stock"}:
+        return False, f"intent '{intent}' needs richer reasoning"
+    if plan.get("dimension") or plan.get("grouping"):
+        return False, "question asks for grouped or dimensional output"
+    if overall_confidence < 0.5 or top_confidence < 0.5:
+        return False, "planner confidence is too low for deterministic SQL"
+    return True, "simple single-table question with sufficient planner confidence"
+
+
+def _set_route(query_context: dict[str, Any], route_used: str, route_reason: str) -> None:
+    query_context["route_used"] = route_used
+    query_context["route_reason"] = route_reason
 
 
 def _validate_business_sql_fit(sql: str, query_context: dict[str, Any]) -> tuple[bool, str]:
@@ -139,6 +154,76 @@ def _validate_business_sql_fit(sql: str, query_context: dict[str, Any]) -> tuple
             return False, f"Questions by {dimension} should group or join by that business dimension."
 
     return True, "SQL matches the business query plan."
+
+
+def _build_validation_retry_context(query_context: dict[str, Any]) -> dict[str, Any]:
+    """Build compact dynamic schema/vector context for AI correction prompts."""
+    vector_results = query_context.get("vector_results") or {}
+    return {
+        "selected_tables": [
+            {
+                "table": entry.get("table"),
+                "confidence": entry.get("confidence"),
+                "reason": entry.get("reason"),
+            }
+            for entry in (query_context.get("selected_tables") or [])[:6]
+        ],
+        "selected_columns": [
+            {
+                "table": entry.get("table"),
+                "column": entry.get("column"),
+                "confidence": entry.get("confidence"),
+                "reason": entry.get("reason"),
+            }
+            for entry in (query_context.get("selected_columns") or [])[:10]
+        ],
+        "vector_tables": list(vector_results.get("table_names") or [])[:8],
+        "vector_columns": [
+            {
+                "table": entry.get("table_name"),
+                "column": entry.get("column_name"),
+                "semantic_type": entry.get("semantic_type"),
+            }
+            for entry in (vector_results.get("columns") or [])[:10]
+        ],
+        "vector_glossary_terms": [
+            entry.get("term")
+            for entry in (vector_results.get("glossary_terms") or [])[:6]
+            if entry.get("term")
+        ],
+        "vector_relationships": [
+            {
+                "from": f"{entry.get('from_table')}.{entry.get('from_column')}",
+                "to": f"{entry.get('to_table')}.{entry.get('to_column')}",
+            }
+            for entry in (vector_results.get("relationships") or [])[:6]
+            if entry.get("from_table") and entry.get("to_table")
+        ],
+    }
+
+
+def _format_generation_failure(
+    question: str,
+    generated_sql: str | None,
+    validation_reason: str,
+    query_context: dict[str, Any],
+) -> str:
+    """Create a clean CLI error with dynamic schema/vector candidates."""
+    retry_context = _build_validation_retry_context(query_context)
+    table_candidates = ", ".join(retry_context["vector_tables"] or [entry["table"] for entry in retry_context["selected_tables"] if entry.get("table")]) or "none"
+    column_candidates = ", ".join(
+        f"{entry.get('table')}.{entry.get('column')}"
+        for entry in retry_context["selected_columns"]
+        if entry.get("table") and entry.get("column")
+    ) or "none"
+    return (
+        "Could not generate a valid SQL query.\n"
+        f"Question: {question}\n"
+        f"Generated SQL: {generated_sql or '(empty)'}\n"
+        f"Validation reason: {validation_reason}\n"
+        f"Relevant table candidates: {table_candidates}\n"
+        f"Relevant column candidates: {column_candidates}"
+    )
 
 
 class QuestionService:  
@@ -215,10 +300,16 @@ class QuestionService:
         scoped_knowledge_base = query_context.get("selected_knowledge_base", knowledge_base)
         full_knowledge_base = query_context.get("knowledge_base", knowledge_base)
         query_plan = query_context.get("plan")
-        prefer_ai = _should_prefer_ai(query_context)
+        prefer_rule_based, route_reason = _should_try_rule_based_first(query_context)
         ai_failure_reason: str | None = None
+        ai_rejected_sql: str | None = None
+        last_rejected_sql: str | None = None
+        retry_context = _build_validation_retry_context(query_context)
+        simple_sql_cache: str | None = None
+        simple_sql_loaded = False
 
         def _validate_candidate_sql(candidate_sql: str, *, source_label: str) -> Tuple[bool, Optional[str], Optional[str]]:
+            nonlocal last_rejected_sql
             _attach_generation_feedback(query_context, candidate_sql)
             safety_ok, safety_reason = validate_sql(candidate_sql)
             struct_ok, struct_reason = validate_sql_structure(candidate_sql, knowledge_base)
@@ -235,10 +326,50 @@ class QuestionService:
                 return True, None, None
 
             fail_reason = safety_reason if not safety_ok else struct_reason if not struct_ok else business_reason
+            last_rejected_sql = candidate_sql
             return False, fail_reason, source_label
 
-        if prefer_ai:
-            logger.info("Using AI as the primary SQL generator for this business question")
+        def _get_simple_sql() -> str | None:
+            nonlocal simple_sql_cache, simple_sql_loaded
+            if simple_sql_loaded:
+                return simple_sql_cache
+
+            simple_sql_loaded = True
+            simple_sql_cache = generate_simple_sql(
+                rewritten_question,
+                scoped_knowledge_base,
+                query_plan=query_plan,
+                business_glossary=business_glossary,
+                selected_tables=query_context.get("selected_tables"),
+                vector_results=query_context.get("vector_results"),
+            )
+            if simple_sql_cache is None and scoped_knowledge_base is not full_knowledge_base:
+                simple_sql_cache = generate_simple_sql(
+                    rewritten_question,
+                    full_knowledge_base,
+                    query_plan=query_plan,
+                    business_glossary=business_glossary,
+                    selected_tables=query_context.get("selected_tables"),
+                    vector_results=query_context.get("vector_results"),
+                )
+            if simple_sql_cache:
+                simple_sql_cache = add_limit_if_missing(simple_sql_cache.strip())
+            return simple_sql_cache
+
+        if prefer_rule_based:
+            logger.info(f"Using rule-based SQL generator first: {route_reason}")
+            simple_sql = _get_simple_sql()
+            if simple_sql:
+                simple_ok, simple_reason, _ = _validate_candidate_sql(simple_sql, source_label="Rule-based")
+                if simple_ok:
+                    _set_route(query_context, "rule-based", route_reason)
+                    return True, "SQL generated successfully (rule-based)", simple_sql, None
+                logger.warning(f"Rule-based SQL did not meet validation requirements: {simple_reason}. Escalating to AI...")
+            else:
+                logger.info("Rule-based route was selected first, but no deterministic SQL pattern matched. Escalating to AI...")
+
+        if not prefer_rule_based or ai_failure_reason is not None or last_rejected_sql is not None or _get_simple_sql() is None:
+            logger.info("Using AI as the primary SQL generator for this question")
             try:
                 try:
                     raw_sql = generate_sql(
@@ -263,6 +394,7 @@ class QuestionService:
                 candidate_sql = add_limit_if_missing(raw_sql.strip())
                 ai_ok, ai_reason, _ = _validate_candidate_sql(candidate_sql, source_label="AI")
                 if ai_ok:
+                    _set_route(query_context, "ai", "AI was selected for a complex or low-confidence question")
                     return True, "SQL generated successfully (AI)", candidate_sql, None
 
                 logger.warning(f"AI SQL did not meet validation requirements: {ai_reason}. Retrying...")
@@ -276,9 +408,10 @@ class QuestionService:
                         query_plan=query_plan,
                         selected_tables=query_context.get("selected_tables"),
                         business_glossary=business_glossary,
+                        validation_context=retry_context,
                     )
                 except TypeError as exc:
-                    if "business_glossary" not in str(exc):
+                    if "business_glossary" not in str(exc) and "validation_context" not in str(exc):
                         raise
                     retry_raw = generate_sql_with_retry(
                         user_question=rewritten_question,
@@ -292,43 +425,64 @@ class QuestionService:
                 retry_sql = add_limit_if_missing(retry_raw.strip())
                 retry_ok, retry_reason, _ = _validate_candidate_sql(retry_sql, source_label="AI retry")
                 if retry_ok:
+                    _set_route(query_context, "ai-retry", "AI retry corrected the first invalid SQL attempt")
                     return True, "SQL generated successfully (AI, corrected)", retry_sql, None
                 ai_failure_reason = retry_reason or ai_reason
+                ai_rejected_sql = retry_sql
                 logger.warning(f"AI retry did not meet validation requirements: {ai_failure_reason}")
             except Exception as e:
                 ai_failure_reason = str(e)
                 logger.error(f"AI SQL generation failed: {e}")
 
         # Rule-based fallback remains available for deterministic guardrails and AI recovery.
-        simple_sql = generate_simple_sql(
-            rewritten_question,
-            scoped_knowledge_base,
-            query_plan=query_plan,
-            business_glossary=business_glossary,
-        )
-        if simple_sql is None and scoped_knowledge_base is not full_knowledge_base:
-            simple_sql = generate_simple_sql(
-                rewritten_question,
-                full_knowledge_base,
-                query_plan=query_plan,
-                business_glossary=business_glossary,
-            )
+        simple_sql = _get_simple_sql()
 
         if simple_sql:
             logger.info("Using rule-based fallback SQL generator")
             simple_ok, simple_reason, _ = _validate_candidate_sql(simple_sql, source_label="Rule-based fallback")
             if simple_ok:
-                message = "SQL generated successfully (rule-based fallback)" if prefer_ai else "SQL generated successfully (simple generator)"
+                _set_route(
+                    query_context,
+                    "rule-based",
+                    "AI route did not produce a valid SQL statement, so rule-based SQL was used",
+                )
+                message = "SQL generated successfully (rule-based fallback)"
                 return True, message, simple_sql, None
             logger.error(f"Fallback SQL failed validation: {simple_reason}")
-            return False, f"Generated SQL failed validation: {simple_reason}", None, None
+            failure_sql = simple_sql
+            failure_reason = simple_reason or "Generated SQL failed validation."
+            if ai_failure_reason:
+                failure_sql = ai_rejected_sql or last_rejected_sql or simple_sql
+                failure_reason = ai_failure_reason
+            _set_route(query_context, "fallback-failed", failure_reason)
+            error_message = _format_generation_failure(
+                rewritten_question,
+                failure_sql,
+                failure_reason,
+                query_context,
+            )
+            return False, f"Generated SQL failed validation: {failure_reason}", None, error_message
 
         if ai_failure_reason:
             logger.error(f"SQL generation failed after AI and fallback checks: {ai_failure_reason}")
-            return False, f"SQL generation failed: {ai_failure_reason}", None, None
+            _set_route(query_context, "fallback-failed", ai_failure_reason)
+            error_message = _format_generation_failure(
+                rewritten_question,
+                ai_rejected_sql or last_rejected_sql,
+                ai_failure_reason,
+                query_context,
+            )
+            return False, f"SQL generation failed: {ai_failure_reason}", None, error_message
 
         logger.error("Could not generate SQL from AI or fallback logic.")
-        return False, "Could not generate a valid SQL query for this question.", None, None
+        _set_route(query_context, "fallback-failed", "no valid SQL could be generated from rule-based or AI paths")
+        error_message = _format_generation_failure(
+            rewritten_question,
+            last_rejected_sql,
+            "Could not generate a valid SQL query.",
+            query_context,
+        )
+        return False, "Could not generate a valid SQL query for this question.", None, error_message
     
     def validate_sql(self, sql: str, knowledge_base: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
         """

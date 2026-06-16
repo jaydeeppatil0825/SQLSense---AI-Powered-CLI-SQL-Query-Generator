@@ -153,14 +153,27 @@ def _pick_table(
     knowledge_base: dict,
     query_plan: dict | None,
     glossary_matches: list[tuple[str, dict[str, Any]]],
+    selected_tables: list[dict[str, Any]] | None = None,
+    vector_results: dict[str, Any] | None = None,
 ) -> str | None:
     if not knowledge_base:
         return None
+
+    selected_entries = [
+        entry for entry in (selected_tables or [])
+        if entry.get("table") in knowledge_base
+    ]
+    if len(selected_entries) == 1:
+        return str(selected_entries[0]["table"])
 
     if query_plan:
         selected = list(query_plan.get("selected_table_names") or [])
         if len(selected) == 1 and selected[0] in knowledge_base:
             return selected[0]
+
+    for table_name in list((vector_results or {}).get("table_names") or []):
+        if table_name in knowledge_base:
+            return table_name
 
     if len(knowledge_base) == 1:
         return next(iter(knowledge_base))
@@ -263,6 +276,32 @@ def _pick_measure_column(
     return None
 
 
+def _selected_column_names(
+    table_name: str,
+    selected_tables: list[dict[str, Any]] | None,
+) -> list[str]:
+    for entry in selected_tables or []:
+        if entry.get("table") != table_name:
+            continue
+        return [
+            str(column_entry.get("column"))
+            for column_entry in (entry.get("selected_columns") or [])
+            if column_entry.get("column")
+        ]
+    return []
+
+
+def _pick_quantity_column(table_data: dict[str, Any]) -> str | None:
+    for column in _table_columns(table_data):
+        if str(column.get("semantic_type", "")).lower() == "quantity":
+            return str(column.get("name", ""))
+    for column in _table_columns(table_data):
+        name = _normalize_identifier(column.get("name", ""))
+        if any(token in name for token in ("qty", "quantity", "stock", "count", "units", "balance")):
+            return str(column.get("name", ""))
+    return None
+
+
 def _extract_limit_from_question(user_question: str) -> int:
     match = re.search(
         r"\b(?:latest|last|recent|first|top|show|get|fetch)\s+(\d+)\b"
@@ -290,27 +329,118 @@ def _is_complex_question(user_question: str, query_plan: dict | None) -> bool:
     return False
 
 
-def _try_count(table_name: str) -> str:
+def _escape_sql_literal(value: Any) -> str:
+    return str(value).replace("'", "''")
+
+
+def _where_sql(clauses: list[str]) -> str:
+    if not clauses:
+        return ""
+    return " WHERE " + " AND ".join(dict.fromkeys(clauses))
+
+
+def _resolve_status_value(
+    question: str,
+    filter_data: dict[str, Any],
+    column: dict[str, Any],
+) -> str | None:
+    sample_values = [str(value) for value in (column.get("sample_values") or []) if value is not None]
+    sample_lookup = {value.lower(): value for value in sample_values}
+
+    explicit_value = str(filter_data.get("value") or "").strip()
+    if explicit_value:
+        matched = sample_lookup.get(explicit_value.lower())
+        if matched:
+            return matched
+        return explicit_value
+
+    return _status_value_for_question(question, column)
+
+
+def _build_where_clauses(
+    question: str,
+    table_data: dict[str, Any],
+    query_plan: dict | None,
+) -> list[str]:
+    clauses: list[str] = []
+    if not query_plan:
+        return clauses
+
+    date_range = query_plan.get("date_range") or {}
+    if date_range:
+        date_column = _pick_date_column(table_data)
+        if date_column:
+            start = date_range.get("start")
+            end_exclusive = date_range.get("end_exclusive")
+            if start:
+                clauses.append(f"{date_column} >= '{_escape_sql_literal(start)}'")
+            if end_exclusive:
+                clauses.append(f"{date_column} < '{_escape_sql_literal(end_exclusive)}'")
+
+    for filter_data in query_plan.get("filters") or []:
+        if filter_data.get("type") != "status":
+            continue
+        status_column = _pick_status_column(table_data)
+        if not status_column or not status_column.get("name"):
+            continue
+        resolved_value = _resolve_status_value(question, filter_data, status_column)
+        if resolved_value is None:
+            continue
+        clauses.append(
+            f"{status_column['name']} = '{_escape_sql_literal(resolved_value)}'"
+        )
+
+    return clauses
+
+
+def _default_sort_clause(
+    table_data: dict[str, Any],
+    query_plan: dict | None,
+) -> str:
+    sorting = (query_plan or {}).get("sorting") or {}
+    sort_by = str(sorting.get("by") or "").lower()
+    direction = str(sorting.get("direction") or "asc").upper()
+    if direction not in {"ASC", "DESC"}:
+        direction = "ASC"
+
+    if sort_by == "date":
+        date_column = _pick_date_column(table_data)
+        if date_column:
+            return f" ORDER BY {date_column} {direction}"
+    if sort_by == "quantity":
+        quantity_column = _pick_quantity_column(table_data)
+        if quantity_column:
+            return f" ORDER BY {quantity_column} {direction}"
+    return ""
+
+
+def _effective_limit(user_question: str, query_plan: dict | None) -> int:
+    limit = (query_plan or {}).get("limit")
+    if isinstance(limit, int) and limit > 0:
+        return limit
+    return _extract_limit_from_question(user_question)
+
+
+def _try_count(table_name: str, where_clauses: list[str]) -> str:
     alias = f"total_{_normalize_identifier(table_name) or 'records'}"
-    return f"SELECT COUNT(*) AS {alias} FROM {table_name};"
+    return f"SELECT COUNT(*) AS {alias} FROM {table_name}{_where_sql(where_clauses)};"
 
 
-def _try_latest(table_name: str, table_data: dict[str, Any], question: str) -> str | None:
+def _try_latest(
+    table_name: str,
+    table_data: dict[str, Any],
+    question: str,
+    where_clauses: list[str],
+    limit: int,
+) -> str | None:
     date_column = _pick_date_column(table_data)
     if not date_column:
         return None
-    limit = _extract_limit_from_question(question)
-    return f"SELECT * FROM {table_name} ORDER BY {date_column} DESC LIMIT {limit};"
-
-
-def _try_status_filter(table_name: str, table_data: dict[str, Any], question: str) -> str | None:
-    column = _pick_status_column(table_data)
-    if not column:
-        return None
-    value = _status_value_for_question(question, column)
-    if not value:
-        return None
-    return f"SELECT * FROM {table_name} WHERE {column.get('name')} = '{value}' LIMIT 50;"
+    return (
+        f"SELECT * FROM {table_name}"
+        f"{_where_sql(where_clauses)}"
+        f" ORDER BY {date_column} DESC LIMIT {limit};"
+    )
 
 
 def _try_total_or_average(
@@ -319,6 +449,7 @@ def _try_total_or_average(
     question: str,
     glossary_columns: list[str],
     query_plan: dict | None,
+    where_clauses: list[str],
 ) -> str | None:
     normalized_question = _normalize(question)
     if re.search(r"\b(total|sum)\b", normalized_question):
@@ -335,13 +466,24 @@ def _try_total_or_average(
         return None
 
     alias = f"{alias_prefix}_{_normalize_identifier(measure_column)}"
-    return f"SELECT {func}({measure_column}) AS {alias} FROM {table_name};"
+    return (
+        f"SELECT {func}({measure_column}) AS {alias} "
+        f"FROM {table_name}{_where_sql(where_clauses)};"
+    )
 
 
-def _try_show_all(table_name: str, question: str) -> str | None:
+def _try_show_all(
+    table_name: str,
+    table_data: dict[str, Any],
+    question: str,
+    query_plan: dict | None,
+    where_clauses: list[str],
+    limit: int,
+) -> str | None:
     normalized_question = _normalize(question)
     if re.search(r"\b(show|list|display|get|fetch|view|see|give)\b", normalized_question):
-        return f"SELECT * FROM {table_name} LIMIT 50;"
+        order_by_sql = _default_sort_clause(table_data, query_plan)
+        return f"SELECT * FROM {table_name}{_where_sql(where_clauses)}{order_by_sql} LIMIT {limit};"
     return None
 
 
@@ -350,6 +492,8 @@ def generate_simple_sql(
     knowledge_base: dict,
     query_plan: dict | None = None,
     business_glossary: dict | None = None,
+    selected_tables: list[dict[str, Any]] | None = None,
+    vector_results: dict[str, Any] | None = None,
 ) -> str | None:
     """
     Try to generate SQL for a simple question using dynamic KB-driven logic.
@@ -364,33 +508,45 @@ def generate_simple_sql(
         return None
 
     glossary_matches = _find_glossary_matches(user_question, business_glossary)
-    table_name = _pick_table(user_question, knowledge_base, query_plan, glossary_matches)
+    table_name = _pick_table(
+        user_question,
+        knowledge_base,
+        query_plan,
+        glossary_matches,
+        selected_tables=selected_tables,
+        vector_results=vector_results,
+    )
     if not table_name or table_name not in knowledge_base:
         return None
 
     table_data = knowledge_base[table_name]
-    glossary_columns = _glossary_mapped_columns(table_name, glossary_matches)
+    glossary_columns = _selected_column_names(table_name, selected_tables)
+    glossary_columns.extend(_glossary_mapped_columns(table_name, glossary_matches))
     normalized_question = _normalize(user_question)
     intent = (query_plan or {}).get("intent")
+    limit = _effective_limit(user_question, query_plan)
+    where_clauses = _build_where_clauses(user_question, table_data, query_plan)
 
     if intent == "count" or re.search(r"\b(count|how many|number of)\b", normalized_question):
-        return _try_count(table_name)
+        return _try_count(table_name, where_clauses)
 
     if re.search(r"\b(latest|recent|newest|last|most recent)\b", normalized_question):
-        latest_sql = _try_latest(table_name, table_data, user_question)
+        latest_sql = _try_latest(table_name, table_data, user_question, where_clauses, limit)
         if latest_sql:
             return latest_sql
 
-    if any(re.search(r"\b" + re.escape(trigger) + r"\b", normalized_question) for trigger in _STATUS_VALUE_FALLBACKS):
-        status_sql = _try_status_filter(table_name, table_data, user_question)
-        if status_sql:
-            return status_sql
-
-    aggregate_sql = _try_total_or_average(table_name, table_data, user_question, glossary_columns, query_plan)
+    aggregate_sql = _try_total_or_average(
+        table_name,
+        table_data,
+        user_question,
+        glossary_columns,
+        query_plan,
+        where_clauses,
+    )
     if aggregate_sql:
         return aggregate_sql
 
     if intent in {"pending_outstanding", "low_stock"}:
         return None
 
-    return _try_show_all(table_name, user_question)
+    return _try_show_all(table_name, table_data, user_question, query_plan, where_clauses, limit)

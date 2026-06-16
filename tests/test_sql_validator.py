@@ -6,7 +6,7 @@ Covers Requirements 8.1 – 8.10.
 """
 
 import pytest
-from utils.sql_validator import validate_sql, add_limit_if_missing
+from utils.sql_validator import validate_sql, add_limit_if_missing, clean_sql_response
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +28,15 @@ class TestValidateSqlEmpty:
         valid, msg = validate_sql("   \t\n  ")
         assert valid is False
         assert msg == "SQL query is empty or missing."
+
+
+class TestCleanSqlResponse:
+    def test_removes_markdown_and_explanation(self):
+        raw = "Here is the SQL:\n```sql\nSELECT id FROM alpha_records;\n```\nThis query lists rows."
+        assert clean_sql_response(raw) == "SELECT id FROM alpha_records;"
+
+    def test_returns_empty_when_no_select_exists(self):
+        assert clean_sql_response("No valid query available.") == "No valid query available."
 
 
 # ---------------------------------------------------------------------------

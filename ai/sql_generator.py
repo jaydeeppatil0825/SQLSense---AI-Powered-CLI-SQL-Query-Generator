@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 
 from ai.prompt_builder import build_sql_prompt
 from utils.logger import get_logger
+from utils.sql_validator import clean_sql_response
 
 try:
     import requests
@@ -192,7 +193,7 @@ def _clean_sql_response(raw: str) -> str:
     Public-facing alias kept for backward compatibility.
     Delegates entirely to extract_sql_only().
     """
-    return extract_sql_only(raw)
+    return clean_sql_response(raw)
 
 
 def _local_api_url() -> str:
@@ -417,6 +418,7 @@ def generate_sql_with_retry(
     query_plan: dict | None = None,
     selected_tables: list[dict] | None = None,
     business_glossary: dict | None = None,
+    validation_context: dict | None = None,
 ) -> str:
     """
     Retry AI SQL generation once after a failed first attempt.
@@ -434,6 +436,7 @@ def generate_sql_with_retry(
         backend:            Ignored for the active CLI workflow; local is used.
         first_attempt_sql:  The rejected SQL from the first attempt.
         validation_reason:  Why the first attempt was rejected.
+        validation_context: Dynamic table, column, glossary, and relationship hints.
 
     Returns:
         Cleaned SQL string from the retry attempt.
@@ -460,6 +463,7 @@ def generate_sql_with_retry(
         f"Original question: {user_question}\n\n"
         f"Rejected SQL:\n{first_attempt_sql}\n\n"
         f"Validation failure: {validation_reason}\n\n"
+        f"Runtime schema and retrieval context:\n{validation_context or {}}\n\n"
         "Correct the SQL so it follows the plan, selected tables, selected relationships, glossary context, and safety rules."
     )
 
