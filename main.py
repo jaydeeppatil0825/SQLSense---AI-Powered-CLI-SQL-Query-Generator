@@ -363,6 +363,10 @@ def handle_ask_question(state: SessionState) -> None:
     logger.info("User chose option 3: Ask a Question")
     
     # ── Load knowledge base ───────────────────────────────────────────────
+    if not state.app_service.is_database_connected():
+        print("  No database connection. Please run option 1 first, then build the knowledge base.")
+        return
+
     success, message, knowledge_base = state.app_service.load_knowledge_base()
     if not success:
         print(f"  {message}")

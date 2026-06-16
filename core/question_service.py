@@ -125,12 +125,21 @@ def _should_try_rule_based_first(query_context: dict[str, Any]) -> tuple[bool, s
     logger.debug(f"[DEBUG ROUTING] Dimension: {plan.get('dimension')}")
     logger.debug(f"[DEBUG ROUTING] Grouping: {plan.get('grouping')}")
 
-    if plan.get("intent") in {"top_n", "trend", "comparison"}:
+    if intent not in {"list", "count"}:
         logger.debug(f"[DEBUG ROUTING] Rule-based skipped: intent '{intent}' needs richer reasoning")
         return False, f"intent '{intent}' needs richer reasoning"
     if plan.get("dimension") or plan.get("grouping"):
         logger.debug(f"[DEBUG ROUTING] Rule-based skipped: question asks for grouped or dimensional output")
         return False, "question asks for grouped or dimensional output"
+    if plan.get("date_range"):
+        logger.debug("[DEBUG ROUTING] Rule-based skipped: question requires date-aware filtering")
+        return False, "question requires date-aware filtering"
+    if plan.get("filters"):
+        logger.debug("[DEBUG ROUTING] Rule-based skipped: question requires runtime filters")
+        return False, "question requires runtime filters"
+    if intent == "list" and plan.get("metric"):
+        logger.debug("[DEBUG ROUTING] Rule-based skipped: question implies a business metric instead of a plain table browse")
+        return False, "question implies a business metric instead of a plain table browse"
     if not _has_clear_primary_table(query_context):
         logger.debug(f"[DEBUG ROUTING] Rule-based skipped: planner could not isolate one primary table with enough confidence")
         return False, "planner could not isolate one primary table with enough confidence"

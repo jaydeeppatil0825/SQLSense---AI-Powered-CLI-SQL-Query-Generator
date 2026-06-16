@@ -11,6 +11,7 @@ from typing import List, Any
 import hashlib
 import os
 import re
+import sys
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -24,6 +25,7 @@ _STOP_WORDS = {
 
 class EmbeddingService:
     """Service for generating text embeddings."""
+    _STATE_CACHE: dict[tuple[str, str, int | None], dict[str, Any]] = {}
     
     def __init__(self):
         self._model = None
@@ -36,7 +38,36 @@ class EmbeddingService:
         self._active_model_name = "deterministic-hash"
         self._last_init_error = ""
         self._dimension = 384
-        self._init_model()
+        self._cache_key = self._build_cache_key()
+        cached_state = self._STATE_CACHE.get(self._cache_key)
+        if cached_state is not None:
+            self._load_cached_state(cached_state)
+        else:
+            self._init_model()
+            self._STATE_CACHE[self._cache_key] = self._snapshot_state()
+
+    def _build_cache_key(self) -> tuple[str, str, int | None]:
+        module_obj = sys.modules.get("sentence_transformers")
+        module_marker = id(module_obj) if module_obj is not None else None
+        return (self._backend, self._configured_model_name, module_marker)
+
+    def _snapshot_state(self) -> dict[str, Any]:
+        return {
+            "model": self._model,
+            "use_fallback": self._use_fallback,
+            "active_backend": self._active_backend,
+            "active_model_name": self._active_model_name,
+            "last_init_error": self._last_init_error,
+            "dimension": self._dimension,
+        }
+
+    def _load_cached_state(self, state: dict[str, Any]) -> None:
+        self._model = state.get("model")
+        self._use_fallback = bool(state.get("use_fallback", True))
+        self._active_backend = str(state.get("active_backend", "fallback"))
+        self._active_model_name = str(state.get("active_model_name", "deterministic-hash"))
+        self._last_init_error = str(state.get("last_init_error", ""))
+        self._dimension = int(state.get("dimension", 384) or 384)
     
     def _init_model(self):
         """Initialize the embedding model if available."""
@@ -52,11 +83,16 @@ class EmbeddingService:
 
         try:
             model_name = self._resolved_model_name()
-            self._model = SentenceTransformer(model_name)
+            try:
+                self._model = SentenceTransformer(model_name, local_files_only=True)
+            except TypeError:
+                self._model = SentenceTransformer(model_name)
             self._use_fallback = False
             self._active_backend = "local"
             self._active_model_name = self._configured_model_name
-            model_dimension = getattr(self._model, "get_sentence_embedding_dimension", None)
+            model_dimension = getattr(self._model, "get_embedding_dimension", None)
+            if not callable(model_dimension):
+                model_dimension = getattr(self._model, "get_sentence_embedding_dimension", None)
             if callable(model_dimension):
                 self._dimension = int(model_dimension() or 384)
             logger.info(

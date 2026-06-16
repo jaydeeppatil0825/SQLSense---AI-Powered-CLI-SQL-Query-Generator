@@ -11,7 +11,7 @@ import os
 from typing import Optional, Dict, Any
 from sqlalchemy.engine import Engine
 
-from db.connection import connect_engine, get_engine, SUPPORTED_DB_TYPES
+from db.connection import connect_engine, get_engine, list_accessible_databases, SUPPORTED_DB_TYPES
 from semantic.knowledge_base_builder import build_knowledge_base
 from semantic.erp_metadata import enrich_knowledge_base_for_erp, summarize_knowledge_base
 from semantic.business_glossary import load_business_glossary, generate_business_glossary, save_business_glossary
@@ -29,6 +29,7 @@ from vector_store import EmbeddingService, VectorIndexBuilder, VectorRetriever, 
 logger = get_logger()
 
 KNOWLEDGE_BASE_PATH = "semantic/knowledge_base.json"
+KNOWLEDGE_BASE_META_PATH = "semantic/knowledge_base.meta.json"
 
 
 class DatabaseService:
@@ -38,6 +39,7 @@ class DatabaseService:
         self.engine: Optional[Engine] = None
         self.knowledge_base: Optional[Dict[str, Any]] = None
         self.business_glossary: Optional[Dict[str, Any]] = None
+        self.knowledge_base_metadata: Dict[str, Any] = {}
         self.knowledge_base_origin: str = "none"
         self.db_config: Dict[str, Any] = {}
         self.last_ai_enrichment_status: str = "skipped"
@@ -54,6 +56,122 @@ class DatabaseService:
         )
         self._warm_start_cached_assets()
 
+    def _reset_active_database_context(
+        self,
+        *,
+        clear_connection: bool = True,
+        clear_cached_assets: bool = True,
+        stale_reason: str = "",
+        index_status: str = "not_built",
+        source: str = "none",
+    ) -> None:
+        """Clear runtime database state so stale KB/vector context is never reused."""
+        if clear_connection:
+            self.engine = None
+            self.db_config = {}
+
+        if clear_cached_assets:
+            self.knowledge_base = None
+            self.business_glossary = None
+            self.knowledge_base_metadata = {}
+            self.knowledge_base_origin = "none"
+            self.last_build_summary = {}
+
+        self.vector_retriever = None
+        self.vector_index_status = index_status
+        self.vector_index_details = self._make_vector_index_details(
+            source=source,
+            stale_reason=stale_reason,
+        )
+
+    def _connected_database_identity(self) -> Dict[str, Any]:
+        """Return the active connected database identity for KB/vector checks."""
+        database_type = str(self.db_config.get("db_type", "") or "")
+        database_name = str(self.db_config.get("database", "") or "")
+        if database_type == "sqlite" and not database_name:
+            database_name = str(self.db_config.get("sqlite_path", "") or "")
+        return {
+            "database_type": database_type,
+            "database_name": database_name,
+        }
+
+    def _load_knowledge_base_metadata_file(self) -> Dict[str, Any]:
+        try:
+            metadata = load_json(KNOWLEDGE_BASE_META_PATH)
+            return metadata if isinstance(metadata, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception as exc:
+            logger.debug(f"Knowledge base metadata could not be loaded: {exc}")
+            return {}
+
+    def _save_knowledge_base_metadata_file(self, metadata: Dict[str, Any]) -> None:
+        save_json(metadata, KNOWLEDGE_BASE_META_PATH)
+
+    def _knowledge_base_matches_connected_database(self) -> bool:
+        """Return True when the active KB metadata matches the connected database."""
+        if not self.engine:
+            return True
+
+        expected = self._connected_database_identity()
+        metadata = self.knowledge_base_metadata or {}
+        metadata_type = str(metadata.get("database_type", "") or "")
+        metadata_name = str(metadata.get("database_name", "") or "")
+        expected_type = str(expected.get("database_type", "") or "")
+        expected_name = str(expected.get("database_name", "") or "")
+
+        if not expected_type or not expected_name:
+            return True
+        if not metadata_type or not metadata_name:
+            return False
+        return metadata_type == expected_type and metadata_name == expected_name
+
+    def _is_missing_database_error(self, error: Exception) -> bool:
+        message = str(error or "").lower()
+        return "unknown database" in message or "(1049" in message
+
+    def _format_missing_database_error(
+        self,
+        *,
+        db_type: str,
+        host: str,
+        port: Optional[int],
+        username: str,
+        password: str,
+        database: str,
+        error: Exception,
+    ) -> str:
+        """Build a clean dynamic connection failure message for a missing database."""
+        base_message = (
+            f"Could not connect to database '{database}' on {db_type}://{username}@{host}:{port}. "
+            f"Connection error: {error}"
+        )
+
+        try:
+            available_databases = list_accessible_databases(
+                db_type=db_type,
+                host=host,
+                port=port,
+                username=username,
+                password=password,
+            )
+        except Exception as exc:
+            logger.debug(f"Could not list available databases: {exc}")
+            available_databases = []
+
+        if available_databases:
+            preview = ", ".join(available_databases[:10])
+            if len(available_databases) > 10:
+                preview += ", ..."
+            return (
+                f"{base_message} Available databases: {preview}. "
+                "Next action: enter the correct database name or create/import the database first."
+            )
+
+        return (
+            f"{base_message} Next action: enter the correct database name or create/import the database first."
+        )
+
     def _warm_start_cached_assets(self) -> None:
         """Warm-load cached KB, glossary, and vector index for a fresh CLI session."""
         if not os.path.exists(KNOWLEDGE_BASE_PATH):
@@ -61,6 +179,7 @@ class DatabaseService:
 
         try:
             self.knowledge_base = load_json(KNOWLEDGE_BASE_PATH)
+            self.knowledge_base_metadata = self._load_knowledge_base_metadata_file()
             self.knowledge_base_origin = "loaded"
         except Exception as exc:
             logger.debug(f"Warm start skipped because KB could not be loaded: {exc}")
@@ -150,22 +269,48 @@ class DatabaseService:
         try:
             if db_type == "sqlite":
                 if not sqlite_path:
+                    self._reset_active_database_context(
+                        stale_reason="database connection failed",
+                    )
                     return False, "SQLite file path cannot be empty.", None
                 engine = connect_engine(db_type="sqlite", sqlite_path=sqlite_path)
                 self.engine = engine
                 self.db_config = {"db_type": "sqlite", "sqlite_path": sqlite_path}
+                if self.knowledge_base is not None and not self._knowledge_base_matches_connected_database():
+                    self._reset_active_database_context(
+                        clear_connection=False,
+                        clear_cached_assets=True,
+                        index_status="stale",
+                        source="stale",
+                        stale_reason="connected database differs from the cached knowledge base; rebuild the knowledge base for this database",
+                    )
+                    logger.info(f"Connected to SQLite: {sqlite_path}")
+                    return (
+                        True,
+                        f"Connected to SQLite: {sqlite_path}. Cached knowledge base does not match this database. Build the knowledge base again before asking questions.",
+                        engine,
+                    )
                 if self.knowledge_base is not None:
                     self.refresh_vector_index()
                 logger.info(f"Connected to SQLite: {sqlite_path}")
                 return True, f"Connected to SQLite: {sqlite_path}", engine
             else:
                 if db_type not in SUPPORTED_DB_TYPES:
+                    self._reset_active_database_context(
+                        stale_reason="database connection failed",
+                    )
                     return False, f"Unsupported database type: {db_type}", None
                 
                 if not username:
+                    self._reset_active_database_context(
+                        stale_reason="database connection failed",
+                    )
                     return False, "Username cannot be empty.", None
                 
                 if not database:
+                    self._reset_active_database_context(
+                        stale_reason="database connection failed",
+                    )
                     return False, "Database name cannot be empty.", None
                 
                 engine = connect_engine(
@@ -184,12 +329,40 @@ class DatabaseService:
                     "username": username,
                     "database": database,
                 }
+                if self.knowledge_base is not None and not self._knowledge_base_matches_connected_database():
+                    self._reset_active_database_context(
+                        clear_connection=False,
+                        clear_cached_assets=True,
+                        index_status="stale",
+                        source="stale",
+                        stale_reason="connected database differs from the cached knowledge base; rebuild the knowledge base for this database",
+                    )
+                    logger.info(f"Connected to {db_type}://{username}@{host}:{port}/{database}")
+                    return (
+                        True,
+                        f"Connected to {db_type}://{username}@{host}:{port}/{database}. Cached knowledge base does not match this database. Build the knowledge base again before asking questions.",
+                        engine,
+                    )
                 if self.knowledge_base is not None:
                     self.refresh_vector_index()
                 logger.info(f"Connected to {db_type}://{username}@{host}:{port}/{database}")
                 return True, f"Connected to {db_type}://{username}@{host}:{port}/{database}", engine
         except Exception as e:
+            self._reset_active_database_context(
+                stale_reason="database connection failed",
+            )
             logger.error(f"Database connection failed: {e}")
+            if self._is_missing_database_error(e):
+                message = self._format_missing_database_error(
+                    db_type=db_type,
+                    host=host,
+                    port=port,
+                    username=username,
+                    password=password,
+                    database=database,
+                    error=e,
+                )
+                return False, message, None
             return False, f"Connection failed: {e}", None
     
     def connect_from_env(self) -> tuple[bool, str, Optional[Engine]]:
@@ -202,8 +375,18 @@ class DatabaseService:
         try:
             engine = get_engine()
             self.engine = engine
+            self.db_config = {
+                "db_type": "mysql",
+                "host": os.getenv("DB_HOST", ""),
+                "port": int(os.getenv("DB_PORT", "3306") or 3306),
+                "username": os.getenv("DB_USER", ""),
+                "database": os.getenv("DB_NAME", ""),
+            }
             return True, "Connected using environment variables", engine
         except Exception as e:
+            self._reset_active_database_context(
+                stale_reason="database connection failed",
+            )
             logger.error(f"Database connection from env failed: {e}")
             return False, f"Connection failed: {e}", None
     
@@ -223,7 +406,7 @@ class DatabaseService:
             (success, message, knowledge_base)
         """
         if not self.engine:
-            return False, "No database connection", None
+            return False, "No database connection. Connect a database first.", None
         
         try:
             knowledge_base = build_knowledge_base(self.engine)
@@ -236,6 +419,28 @@ class DatabaseService:
         try:
             knowledge_base = enrich_knowledge_base_for_erp(knowledge_base)
             save_json(knowledge_base, KNOWLEDGE_BASE_PATH)
+            schema_payload = {
+                table_name: {
+                    "columns": [
+                        {
+                            "name": column.get("name"),
+                            "type": column.get("type"),
+                            "nullable": column.get("nullable"),
+                            "semantic_type": column.get("semantic_type"),
+                        }
+                        for column in table_data.get("columns", [])
+                    ],
+                    "primary_keys": list(table_data.get("primary_keys", [])),
+                    "foreign_keys": list(table_data.get("foreign_keys", [])),
+                    "relationships": list(table_data.get("relationships", [])),
+                }
+                for table_name, table_data in knowledge_base.items()
+            }
+            self.knowledge_base_metadata = {
+                **self._connected_database_identity(),
+                "schema_fingerprint": self.vector_index_storage._content_hash(schema_payload),
+            }
+            self._save_knowledge_base_metadata_file(self.knowledge_base_metadata)
             logger.info(f"Knowledge base saved to {KNOWLEDGE_BASE_PATH}")
         except Exception as e:
             logger.error(f"Failed to save knowledge base: {e}")
@@ -312,6 +517,14 @@ class DatabaseService:
         
         self.knowledge_base = final_knowledge_base
         self.knowledge_base_origin = "built"
+        self.knowledge_base_metadata = {
+            **self._connected_database_identity(),
+            "schema_fingerprint": self.vector_index_storage._content_hash(self._schema_fingerprint_payload()),
+        }
+        try:
+            self._save_knowledge_base_metadata_file(self.knowledge_base_metadata)
+        except Exception as exc:
+            logger.debug(f"Knowledge base metadata save skipped: {exc}")
         self.last_build_summary = summarize_knowledge_base(final_knowledge_base)
         self.refresh_vector_index()
         return True, "Knowledge base built successfully", final_knowledge_base
@@ -324,8 +537,42 @@ class DatabaseService:
             (success, message, knowledge_base)
         """
         try:
+            if self.knowledge_base and self._knowledge_base_matches_connected_database():
+                if self.business_glossary is None:
+                    self.load_business_glossary()
+                else:
+                    self.refresh_vector_index()
+                return True, "Knowledge base loaded successfully", self.knowledge_base
+
             knowledge_base = load_json(KNOWLEDGE_BASE_PATH)
+            metadata = self._load_knowledge_base_metadata_file()
+            if self.engine:
+                expected = self._connected_database_identity()
+                metadata_type = str(metadata.get("database_type", "") or "")
+                metadata_name = str(metadata.get("database_name", "") or "")
+                if not metadata_type or not metadata_name:
+                    self._reset_active_database_context(
+                        clear_connection=False,
+                        clear_cached_assets=True,
+                        index_status="stale",
+                        source="stale",
+                        stale_reason="cached knowledge base has no database metadata; rebuild the knowledge base for the connected database",
+                    )
+                    return False, "Cached knowledge base does not match the connected database. Rebuild the knowledge base first.", None
+                if (
+                    metadata_type != str(expected.get("database_type", "") or "")
+                    or metadata_name != str(expected.get("database_name", "") or "")
+                ):
+                    self._reset_active_database_context(
+                        clear_connection=False,
+                        clear_cached_assets=True,
+                        index_status="stale",
+                        source="stale",
+                        stale_reason="connected database differs from the cached knowledge base; rebuild the knowledge base for this database",
+                    )
+                    return False, "Connected database differs from the cached knowledge base. Build the knowledge base again before asking questions.", None
             self.knowledge_base = knowledge_base
+            self.knowledge_base_metadata = metadata
             self.knowledge_base_origin = "loaded"
             if self.business_glossary is None:
                 self.load_business_glossary()
@@ -452,6 +699,10 @@ class DatabaseService:
         database_name = str(self.db_config.get("database", "") or "")
         if database_type == "sqlite" and not database_name:
             database_name = str(self.db_config.get("sqlite_path", "") or "")
+        if not database_type:
+            database_type = str(self.knowledge_base_metadata.get("database_type", "") or "")
+        if not database_name:
+            database_name = str(self.knowledge_base_metadata.get("database_name", "") or "")
 
         schema_fingerprint = self.vector_index_storage._content_hash(self._schema_fingerprint_payload())
         return {

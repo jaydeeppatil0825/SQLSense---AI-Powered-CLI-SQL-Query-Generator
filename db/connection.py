@@ -40,6 +40,21 @@ def _test_and_return(engine: sqlalchemy.engine.Engine) -> sqlalchemy.engine.Engi
     return engine
 
 
+def _mysql_connection_url(
+    host: str,
+    port: int | None = None,
+    username: str = "",
+    password: str = "",
+    database: str = "",
+) -> str:
+    port_part = f":{port}" if port else ""
+    database_part = f"/{database}" if database else "/"
+    return (
+        f"mysql+pymysql://{username}:{quote_plus(password)}"
+        f"@{host}{port_part}{database_part}"
+    )
+
+
 def get_engine() -> sqlalchemy.engine.Engine:
     """
     Build and return a validated SQLAlchemy MySQL engine using ``.env`` values.
@@ -78,12 +93,50 @@ def get_engine() -> sqlalchemy.engine.Engine:
     db_password = os.getenv("DB_PASSWORD").strip()
     db_name = os.getenv("DB_NAME").strip()
 
-    connection_url = (
-        f"mysql+pymysql://{db_user}:{quote_plus(db_password)}@{db_host}/{db_name}"
+    connection_url = _mysql_connection_url(
+        host=db_host,
+        username=db_user,
+        password=db_password,
+        database=db_name,
     )
 
     engine = sqlalchemy.create_engine(connection_url)
     return _test_and_return(engine)
+
+
+def list_accessible_databases(
+    db_type: str,
+    host: str = "",
+    port: int | None = None,
+    username: str = "",
+    password: str = "",
+) -> list[str]:
+    """Return accessible database names for the given server, when supported."""
+    db_type = str(db_type or "").strip().lower()
+    if db_type != "mysql":
+        return []
+
+    if not host or not username:
+        return []
+
+    engine = sqlalchemy.create_engine(
+        _mysql_connection_url(
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+        )
+    )
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("SHOW DATABASES"))
+            return [
+                str(row[0])
+                for row in rows
+                if row and row[0] is not None
+            ]
+    finally:
+        engine.dispose()
 
 
 def connect_engine(
@@ -144,11 +197,12 @@ def connect_engine(
             if not value or not str(value).strip():
                 raise ValueError(f"'{field}' is required for MySQL connections.")
 
-        port_part = f":{port}" if port else ""
-        # URL-encode the password to handle special characters safely.
-        url = (
-            f"mysql+pymysql://{username}:{quote_plus(password)}"
-            f"@{host}{port_part}/{database}"
+        url = _mysql_connection_url(
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            database=database,
         )
         engine = sqlalchemy.create_engine(url)
         return _test_and_return(engine)

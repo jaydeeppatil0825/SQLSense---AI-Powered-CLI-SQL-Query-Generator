@@ -101,6 +101,16 @@ def _find_glossary_matches(question: str, glossary: dict | None) -> list[tuple[s
     return matches
 
 
+def _is_direct_term_match(question: str, term: str) -> bool:
+    normalized_question = _normalize(question)
+    normalized_term = _normalize(term)
+    if normalized_term and normalized_term in normalized_question:
+        return True
+    term_tokens = set(_tokenize(term))
+    question_terms = set(_tokenize(question))
+    return bool(term_tokens and term_tokens <= question_terms)
+
+
 def _score_table(
     question: str,
     table_name: str,
@@ -136,6 +146,18 @@ def _score_table(
     return score
 
 
+def _table_name_direct_match(question: str, table_name: str) -> bool:
+    normalized_question = _normalize(question)
+    human_table = _humanize(table_name)
+    if human_table and human_table in normalized_question:
+        return True
+
+    question_terms = set(_tokenize(question))
+    table_terms = set(_tokenize(table_name))
+    table_terms.add(_singularize(table_name))
+    return bool(table_terms & question_terms)
+
+
 def _pick_table(
     question: str,
     knowledge_base: dict,
@@ -153,6 +175,20 @@ def _pick_table(
     ]
     if len(selected_entries) == 1:
         return str(selected_entries[0]["table"])
+    if len(selected_entries) > 1:
+        direct_matches = [
+            entry for entry in selected_entries
+            if _table_name_direct_match(question, str(entry.get("table", "")))
+        ]
+        if len(direct_matches) == 1:
+            return str(direct_matches[0]["table"])
+
+        top_confidence = float(selected_entries[0].get("confidence") or 0.0)
+        second_confidence = float(selected_entries[1].get("confidence") or 0.0)
+        if top_confidence >= 0.85 and (
+            (top_confidence - second_confidence) >= 0.15 or second_confidence < 0.7
+        ):
+            return str(selected_entries[0]["table"])
 
     if query_plan:
         selected = list(query_plan.get("selected_table_names") or [])
@@ -217,11 +253,14 @@ def _status_value_for_question(question: str, column: dict[str, Any]) -> str | N
 
 
 def _glossary_mapped_columns(
+    question: str,
     table_name: str,
     glossary_matches: list[tuple[str, dict[str, Any]]],
 ) -> list[str]:
     mapped_columns = []
-    for _, term_data in glossary_matches:
+    for term, term_data in glossary_matches:
+        if not _is_direct_term_match(question, term):
+            continue
         for mapping in term_data.get("mapped_columns", []):
             if mapping.get("table") == table_name and mapping.get("column"):
                 mapped_columns.append(str(mapping["column"]))
@@ -530,7 +569,7 @@ def generate_simple_sql(
 
     table_data = knowledge_base[table_name]
     glossary_columns = _selected_column_names(table_name, selected_tables)
-    glossary_columns.extend(_glossary_mapped_columns(table_name, glossary_matches))
+    glossary_columns.extend(_glossary_mapped_columns(user_question, table_name, glossary_matches))
     normalized_question = _normalize(user_question)
     intent = (query_plan or {}).get("intent")
     limit = _effective_limit(user_question, query_plan)

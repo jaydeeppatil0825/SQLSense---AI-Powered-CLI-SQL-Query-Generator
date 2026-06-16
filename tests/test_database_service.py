@@ -1,5 +1,7 @@
 """Tests for database service knowledge-base workflow."""
 
+from pathlib import Path
+
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 
 from core.database_service import DatabaseService
@@ -41,6 +43,88 @@ def test_build_knowledge_base_falls_back_when_ollama_is_not_running(monkeypatch,
         "fallback",
         "Ollama is not running. Using rule-based enrichment.",
     )
+
+
+def test_connect_database_fails_cleanly_for_missing_database_and_clears_stale_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
+    service = DatabaseService()
+    service.engine = object()
+    service.db_config = {"db_type": "mysql", "database": "old_db"}
+    service.knowledge_base = {"orders": {"columns": []}}
+    service.business_glossary = {"sales": {"mapped_columns": []}}
+    service.knowledge_base_origin = "loaded"
+    service.vector_index_status = "ready"
+
+    class MissingDatabaseError(Exception):
+        pass
+
+    monkeypatch.setattr(
+        "core.database_service.connect_engine",
+        lambda **kwargs: (_ for _ in ()).throw(MissingDatabaseError('(1049, "Unknown database \'missing_db\'")')),
+    )
+    monkeypatch.setattr(
+        "core.database_service.list_accessible_databases",
+        lambda **kwargs: ["alpha_db", "beta_db"],
+    )
+
+    success, message, engine = service.connect_database(
+        db_type="mysql",
+        host="localhost",
+        port=3306,
+        username="root",
+        password="secret",
+        database="missing_db",
+    )
+
+    assert success is False
+    assert engine is None
+    assert "missing_db" in message
+    assert "Available databases: alpha_db, beta_db" in message
+    assert "enter the correct database name or create/import the database first" in message
+    assert service.engine is None
+    assert service.get_db_config() == {}
+    assert service.get_knowledge_base() is None
+    assert service.get_business_glossary() is None
+    assert service.get_vector_status()["index_status"] == "not_built"
+
+
+def test_connect_database_accepts_arbitrary_database_name_without_runtime_hardcoding(monkeypatch, tmp_path):
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
+    service = DatabaseService()
+    fake_engine = object()
+    captured: dict = {}
+
+    def fake_connect_engine(**kwargs):
+        captured.update(kwargs)
+        return fake_engine
+
+    monkeypatch.setattr("core.database_service.connect_engine", fake_connect_engine)
+
+    success, message, engine = service.connect_database(
+        db_type="mysql",
+        host="localhost",
+        port=3306,
+        username="root",
+        password="secret",
+        database="user_selected_db_42",
+    )
+
+    assert success is True
+    assert engine is fake_engine
+    assert captured["database"] == "user_selected_db_42"
+    assert service.get_db_config()["database"] == "user_selected_db_42"
+    assert "user_selected_db_42" in message
+
+
+def test_build_knowledge_base_requires_active_database_connection(monkeypatch, tmp_path):
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
+    service = DatabaseService()
+
+    success, message, knowledge_base = service.build_knowledge_base()
+
+    assert success is False
+    assert knowledge_base is None
+    assert message == "No database connection. Connect a database first."
 
 
 def test_build_knowledge_base_reports_partial_ai_enrichment(monkeypatch, tmp_path):
@@ -123,6 +207,7 @@ def test_build_knowledge_base_keeps_generated_glossary_active_and_builds_vector_
 
     service = DatabaseService()
     service.engine = engine
+    service.db_config = {"db_type": "mysql", "database": "dynamic_runtime_db"}
 
     monkeypatch.setattr("core.database_service.save_json", lambda data, path: None)
     monkeypatch.setattr("core.database_service.save_business_glossary", lambda glossary, path: None)
@@ -145,6 +230,7 @@ def test_build_knowledge_base_keeps_generated_glossary_active_and_builds_vector_
     assert vector_status["retriever"]["document_count"] >= 3
     assert vector_status["persistence"]["rebuilt"] is True
     assert vector_status["persistence"]["persisted"] is True
+    assert vector_status["persistence"]["database_name"] == "dynamic_runtime_db"
 
 
 def test_database_service_loads_persisted_index_when_fresh(monkeypatch, tmp_path):
@@ -322,3 +408,53 @@ def test_database_service_marks_loaded_index_stale_when_connected_database_chang
     assert second_status["index_status"] == "stale"
     assert second_status["persistence"]["source"] == "stale"
     assert "database name changed" in second_status["persistence"]["stale_reason"]
+
+
+def test_load_knowledge_base_rejects_cached_kb_for_different_connected_database(monkeypatch, tmp_path):
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
+    service = DatabaseService()
+    service.engine = object()
+    service.db_config = {"db_type": "mysql", "database": "connected_db"}
+    service.knowledge_base = {"stale": {"columns": []}}
+    service.business_glossary = {"stale": {"mapped_columns": []}}
+
+    monkeypatch.setattr(
+        "core.database_service.load_json",
+        lambda path: {"orders": {"columns": [], "primary_keys": [], "foreign_keys": [], "relationships": []}},
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_knowledge_base_metadata_file",
+        lambda: {"database_type": "mysql", "database_name": "other_db"},
+    )
+
+    success, message, knowledge_base = service.load_knowledge_base()
+
+    assert success is False
+    assert knowledge_base is None
+    assert "Connected database differs from the cached knowledge base" in message
+    assert service.get_knowledge_base() is None
+    assert service.get_business_glossary() is None
+    assert service.get_vector_status()["index_status"] == "stale"
+
+
+def test_runtime_code_has_no_hardcoded_demo_database_dependencies():
+    repo_root = Path(__file__).resolve().parents[1]
+    runtime_files = [
+        repo_root / "main.py",
+        repo_root / "core" / "app_service.py",
+        repo_root / "core" / "database_service.py",
+        repo_root / "db" / "connection.py",
+        repo_root / "vector_store" / "persistence.py",
+    ]
+    forbidden_names = [
+        "ai_sales_demo",
+        "vector_erp_test",
+        "pcsoft_erp_test",
+        "company_db",
+    ]
+
+    for path in runtime_files:
+        text = path.read_text(encoding="utf-8")
+        for forbidden in forbidden_names:
+            assert forbidden not in text, f"Runtime file {path.name} contains hardcoded database name '{forbidden}'"

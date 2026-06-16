@@ -51,13 +51,13 @@ def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypat
 
     assert success is True
     assert error is None
-    assert sql == "SELECT SUM(final_amount) AS total_final_amount FROM orders LIMIT 50;"
+    assert sql == "SELECT SUM(final_amount) AS total_sales FROM orders LIMIT 50;"
     assert service.get_last_sql() == sql
 
     exec_success, exec_message, rows = service.execute_sql(service.get_last_sql(), revalidate=True)
 
     assert exec_success is True
-    assert rows == [{"total_final_amount": 100}]
+    assert rows == [{"total_sales": 100}]
     assert service.get_last_sql() == sql
 
 
