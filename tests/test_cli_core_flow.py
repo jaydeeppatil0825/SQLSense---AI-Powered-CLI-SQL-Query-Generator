@@ -51,13 +51,13 @@ def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypat
 
     assert success is True
     assert error is None
-    assert sql == "SELECT SUM(final_amount) AS total_sales FROM orders LIMIT 50;"
+    assert sql == "SELECT SUM(final_amount) AS total_final_amount FROM orders LIMIT 50;"
     assert service.get_last_sql() == sql
 
     exec_success, exec_message, rows = service.execute_sql(service.get_last_sql(), revalidate=True)
 
     assert exec_success is True
-    assert rows == [{"total_sales": 100}]
+    assert rows == [{"total_final_amount": 100}]
     assert service.get_last_sql() == sql
 
 
@@ -103,3 +103,43 @@ def test_process_question_loads_active_glossary_without_glossary_menu(monkeypatc
     assert sql == "SELECT * FROM orders LIMIT 50;"
     assert captured["business_glossary"] == active_glossary
     assert captured["vector_retriever"] is not None
+
+
+def test_process_question_uses_persisted_vector_index_after_reload(monkeypatch, tmp_path):
+    vector_dir = tmp_path / "vector_index"
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(vector_dir))
+
+    first_service = AppService()
+    first_service.database_service.knowledge_base = KB
+    first_service.database_service.knowledge_base_origin = "built"
+    first_service.database_service.business_glossary = {
+        "sales": {
+            "description": "Total amount",
+            "mapped_columns": [{"table": "orders", "column": "final_amount", "confidence": "high"}],
+            "example_questions": ["show total sales"],
+        }
+    }
+    first_service.database_service.refresh_vector_index()
+
+    second_service = AppService()
+    second_service.database_service.knowledge_base = KB
+    second_service.database_service.knowledge_base_origin = "loaded"
+    second_service.database_service.business_glossary = first_service.database_service.business_glossary
+    second_service.database_service.refresh_vector_index()
+
+    captured = {}
+
+    def fake_process_question(question, knowledge_base, business_glossary=None, vector_retriever=None, ai_backend="local"):
+        captured["vector_retriever"] = vector_retriever
+        captured["vector_status"] = second_service.database_service.get_vector_status()
+        return True, "ok", "SELECT * FROM orders LIMIT 50;", None
+
+    monkeypatch.setattr(second_service.question_service, "process_question", fake_process_question)
+
+    success, message, sql, error = second_service.process_question("show orders", ai_backend="local")
+
+    assert success is True
+    assert captured["vector_retriever"] is not None
+    assert captured["vector_status"]["persistence"]["loaded_from_disk"] is True
+    assert captured["vector_status"]["persistence"]["source"] == "disk"

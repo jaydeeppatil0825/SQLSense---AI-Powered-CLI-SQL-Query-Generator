@@ -80,31 +80,46 @@ def _attach_generation_feedback(query_context: dict[str, Any], sql: str) -> None
 
 def _is_business_question(query_context: dict[str, Any]) -> bool:
     plan = query_context.get("plan") or {}
-    if plan.get("intent") in {"total", "average", "top_n", "trend", "comparison", "pending_outstanding", "low_stock"}:
+    if plan.get("intent") in {"total", "average", "top_n", "trend", "comparison"}:
         return True
     if plan.get("dimension") or plan.get("grouping"):
         return True
     if plan.get("metric") and plan.get("intent") not in {"list", "count"}:
+        return True
+    if plan.get("filters") or plan.get("date_range"):
         return True
     if len(query_context.get("selected_table_names") or []) > 1:
         return True
     return False
 
 
+def _has_clear_primary_table(query_context: dict[str, Any]) -> bool:
+    selected_tables = list(query_context.get("selected_tables") or [])
+    if not selected_tables:
+        return False
+    if len(selected_tables) == 1:
+        return True
+
+    primary_confidence = float(selected_tables[0].get("confidence") or 0.0)
+    secondary_confidence = float(selected_tables[1].get("confidence") or 0.0)
+    return primary_confidence >= 0.75 and (
+        (primary_confidence - secondary_confidence) >= 0.15 or secondary_confidence < 0.65
+    )
+
+
 def _should_try_rule_based_first(query_context: dict[str, Any]) -> tuple[bool, str]:
     plan = query_context.get("plan") or {}
-    selected_table_names = list(query_context.get("selected_table_names") or [])
     selected_tables = list(query_context.get("selected_tables") or [])
     overall_confidence = float(query_context.get("confidence") or 0.0)
     top_confidence = float(selected_tables[0].get("confidence") or 0.0) if selected_tables else 0.0
     intent = str(plan.get("intent") or "list")
 
-    if len(selected_table_names) != 1:
-        return False, "multiple relevant tables were selected"
-    if plan.get("intent") in {"top_n", "trend", "comparison", "pending_outstanding", "low_stock"}:
+    if plan.get("intent") in {"top_n", "trend", "comparison"}:
         return False, f"intent '{intent}' needs richer reasoning"
     if plan.get("dimension") or plan.get("grouping"):
         return False, "question asks for grouped or dimensional output"
+    if not _has_clear_primary_table(query_context):
+        return False, "planner could not isolate one primary table with enough confidence"
     if overall_confidence < 0.5 or top_confidence < 0.5:
         return False, "planner confidence is too low for deterministic SQL"
     return True, "simple single-table question with sufficient planner confidence"
@@ -139,10 +154,11 @@ def _validate_business_sql_fit(sql: str, query_context: dict[str, Any]) -> tuple
             return False, "Trend questions must group the results."
         if plan.get("dimension") == "month" and "DATE_FORMAT(" not in sql_upper:
             return False, "Month trend questions should group by a month expression."
-    if intent == "pending_outstanding" and "WHERE" not in sql_upper and "HAVING" not in sql_upper:
-        return False, "Pending or outstanding questions must apply business filters."
-    if intent == "low_stock" and "WHERE" not in sql_upper:
-        return False, "Low-stock questions must filter by stock threshold."
+
+    if plan.get("filters") and "WHERE" not in sql_upper and "HAVING" not in sql_upper:
+        return False, "Filtered questions must apply WHERE or HAVING conditions."
+    if plan.get("date_range") and "WHERE" not in sql_upper and "HAVING" not in sql_upper:
+        return False, "Date-filtered questions must apply WHERE or HAVING conditions."
 
     if plan.get("metric") == "money" and not any(token in sql_upper for token in ("SUM(", "AVG(", "COUNT(", "MAX(", "MIN(")):
         if intent in {"total", "average", "top_n", "trend"}:

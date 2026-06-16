@@ -107,6 +107,10 @@ class VectorIndexBuilder:
             "table_name": table_name,
             "module": module,
             "semantic_type": "table",
+            "description": description,
+            "business_purpose": purpose,
+            "row_count": table_data.get("row_count"),
+            "column_names": column_names[:20],
         }
         
         document = {
@@ -150,6 +154,10 @@ class VectorIndexBuilder:
             "column_name": column_name,
             "semantic_type": semantic_type,
             "column_type": column_type,
+            "description": description,
+            "business_terms": business_terms,
+            "sample_values": sample_values[:5],
+            "nullable": column.get("nullable"),
         }
         
         document = {
@@ -188,6 +196,7 @@ class VectorIndexBuilder:
             "to_column": to_column,
             "direction": direction,
             "confidence": confidence,
+            "description": reason,
         }
         
         document = {
@@ -230,6 +239,8 @@ class VectorIndexBuilder:
             "description": description,
             "table_names": table_names,
             "business_terms": business_terms,
+            "mapped_columns": mapped_columns,
+            "example_questions": example_questions[:3],
         }
         
         document = {

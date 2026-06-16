@@ -16,31 +16,6 @@ from utils.logger import get_logger
 logger = get_logger()
 
 
-_INTENT_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("low_stock", ("low stock", "reorder", "below stock", "minimum stock")),
-    ("pending_outstanding", ("outstanding", "unpaid", "pending", "due", "overdue", "payable", "receivable")),
-    ("trend", ("trend", "monthly", "by month", "per month", "by date", "over time")),
-    ("comparison", ("compare", "comparison", "versus", "vs")),
-    ("top_n", ("top ", "highest", "largest", "most")),
-    ("average", ("average", "avg", "mean")),
-    ("count", ("count", "how many", "number of")),
-    ("total", ("total", "sum")),
-    ("list", ("list", "show", "display", "fetch", "get")),
-]
-
-_STATUS_FILTERS = {
-    "pending": "Pending",
-    "unpaid": "Unpaid",
-    "paid": "Paid",
-    "open": "Open",
-    "closed": "Closed",
-    "cancelled": "Cancelled",
-    "canceled": "Cancelled",
-    "approved": "Approved",
-    "active": "Active",
-    "inactive": "Inactive",
-}
-
 _QUESTION_STOP_WORDS = {
     "show",
     "list",
@@ -63,8 +38,8 @@ _QUESTION_STOP_WORDS = {
     "table",
 }
 
-_MONEY_HINTS = {"sales", "revenue", "income", "amount", "total", "price", "cost", "balance", "due", "outstanding", "payable", "payables", "receivable", "receivables", "tax", "gst", "vat"}
-_QUANTITY_HINTS = {"quantity", "qty", "stock", "units", "count", "inventory", "warehouse"}
+_MONEY_HINTS = {"amount", "total", "price", "cost", "balance", "value"}
+_QUANTITY_HINTS = {"quantity", "qty", "unit", "units", "count", "volume", "number"}
 _PERCENTAGE_HINTS = {"percent", "percentage", "ratio", "rate"}
 
 
@@ -102,9 +77,21 @@ def _extract_limit(question: str) -> int | None:
 
 def _detect_intent(question: str) -> str:
     normalized = _normalize(question)
-    for intent, phrases in _INTENT_RULES:
-        if any(phrase in normalized for phrase in phrases):
-            return intent
+
+    if re.search(r"\b(count|how many|number of)\b", normalized):
+        return "count"
+    if re.search(r"\b(average|avg|mean)\b", normalized):
+        return "average"
+    if re.search(r"\b(total|sum)\b", normalized):
+        return "total"
+    if re.search(r"\b(compare|comparison|versus|vs)\b", normalized):
+        return "comparison"
+    if re.search(r"\b(trend|monthly|by month|per month|by date|over time)\b", normalized):
+        return "trend"
+    if re.search(r"\b(top\s+\d+|highest|largest|lowest|smallest|most|least)\b", normalized):
+        return "top_n"
+    if re.search(r"\b(list|show|display|fetch|get)\b", normalized):
+        return "list"
     return "list"
 
 
@@ -144,17 +131,62 @@ def _detect_date_range(question: str) -> dict | None:
     return None
 
 
-def _detect_filters(question: str) -> list[dict[str, Any]]:
-    normalized = _normalize(question)
-    filters = []
-    for trigger, value in _STATUS_FILTERS.items():
-        if re.search(r"\b" + re.escape(trigger) + r"\b", normalized):
-            filters.append({"type": "status", "value": value, "term": trigger})
+def _normalized_sample_values(column: dict[str, Any]) -> list[tuple[str, str]]:
+    values = []
+    for raw_value in column.get("sample_values", []) or []:
+        if raw_value is None:
+            continue
+        normalized = _normalize(str(raw_value))
+        if normalized:
+            values.append((normalized, str(raw_value)))
+    return values
+
+
+def _column_can_hold_status(column: dict[str, Any]) -> bool:
+    semantic_type = str(column.get("semantic_type", "")).lower()
+    if semantic_type == "status":
+        return True
+    column_name = _normalize_identifier(column.get("name", ""))
+    return any(token in column_name for token in ("status", "state", "stage"))
+
+
+def _detect_runtime_filters(question: str, candidate_tables: dict[str, Any]) -> list[dict[str, Any]]:
+    normalized_question = _normalize(question)
+    question_terms = set(_tokenize(question))
+    filters: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for table_name, table_data in candidate_tables.items():
+        for column in table_data.get("columns", []):
+            if not _column_can_hold_status(column):
+                continue
+            column_name = str(column.get("name", ""))
+            for normalized_value, raw_value in _normalized_sample_values(column):
+                value_terms = set(_tokenize(normalized_value))
+                if not value_terms:
+                    continue
+                if normalized_value not in normalized_question and not value_terms <= question_terms:
+                    continue
+
+                signature = (table_name, column_name, raw_value)
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                filters.append(
+                    {
+                        "type": "status",
+                        "table": table_name,
+                        "column": column_name,
+                        "value": raw_value,
+                        "term": normalized_value,
+                    }
+                )
+
     return filters
 
 
 def _default_limit_for_intent(intent: str) -> int | None:
-    if intent in {"list", "top_n", "low_stock"}:
+    if intent in {"list", "top_n"}:
         return 50
     return None
 
@@ -163,15 +195,15 @@ def _semantic_hints(question: str, intent: str) -> set[str]:
     terms = set(_content_terms(question))
     hints = set()
 
-    if terms & _MONEY_HINTS or intent in {"total", "average", "pending_outstanding"}:
+    if terms & _MONEY_HINTS or intent in {"total", "average"}:
         hints.add("money")
-    if terms & _QUANTITY_HINTS or intent == "low_stock":
+    if terms & _QUANTITY_HINTS:
         hints.add("quantity")
     if terms & _PERCENTAGE_HINTS:
         hints.add("percentage")
     if any(token in terms for token in {"date", "month", "year", "recent", "latest", "today"}):
         hints.add("date")
-    if any(token in terms for token in {"status", "state", "pending", "active", "inactive", "paid", "unpaid", "closed", "open"}):
+    if any(token in terms for token in {"status", "state", "stage"}):
         hints.add("status")
 
     return hints
@@ -182,6 +214,23 @@ def _primary_metric_hint(semantic_hints: set[str]) -> str | None:
         if candidate in semantic_hints:
             return candidate
     return next(iter(sorted(semantic_hints))) if semantic_hints else None
+
+
+def _infer_generic_semantic_type(column_name: str) -> str | None:
+    tokens = set(_tokenize(column_name))
+    if not tokens:
+        return None
+    if tokens & _MONEY_HINTS:
+        return "money"
+    if tokens & _QUANTITY_HINTS:
+        return "quantity"
+    if tokens & _PERCENTAGE_HINTS:
+        return "percentage"
+    if {"date", "time", "month", "year"} & tokens:
+        return "date"
+    if {"status", "state", "stage"} & tokens:
+        return "status"
+    return None
 
 
 def _retrieve_with_vector(
@@ -203,9 +252,12 @@ def _retrieve_with_vector(
 
         return {
             "table_names": active_retriever.get_relevant_tables(question, top_k=5),
+            "tables": active_retriever.get_relevant_table_details(question, top_k=5),
             "columns": active_retriever.get_relevant_columns(question, top_k=10),
             "glossary_terms": active_retriever.get_relevant_glossary_terms(question, top_k=5),
             "relationships": active_retriever.get_relevant_relationships(question, top_k=5),
+            "semantic_descriptions": active_retriever.get_relevant_semantic_descriptions(question, top_k=8),
+            "profiling_hints": active_retriever.get_relevant_profiling_hints(question, top_k=8),
             "retriever_status": active_retriever.get_status(),
             "used_vector": True,
         }
@@ -213,9 +265,12 @@ def _retrieve_with_vector(
         logger.warning(f"Vector retrieval error: {exc}")
         return {
             "table_names": [],
+            "tables": [],
             "columns": [],
             "glossary_terms": [],
             "relationships": [],
+            "semantic_descriptions": [],
+            "profiling_hints": [],
             "retriever_status": {},
             "used_vector": False,
             "error": str(exc),
@@ -455,6 +510,23 @@ def _expand_selected_tables(knowledge_base: dict, selected_names: list[str], dim
     return selected
 
 
+def _candidate_tables_for_filters(
+    knowledge_base: dict[str, Any],
+    scored_tables: list[tuple[str, float, list[str]]],
+    vector_results: dict[str, Any] | None,
+) -> dict[str, Any]:
+    candidate_names: list[str] = []
+    for table_name, _, _ in scored_tables[:3]:
+        if table_name in knowledge_base and table_name not in candidate_names:
+            candidate_names.append(table_name)
+    for table_name in list((vector_results or {}).get("table_names") or [])[:3]:
+        if table_name in knowledge_base and table_name not in candidate_names:
+            candidate_names.append(table_name)
+    if not candidate_names:
+        candidate_names = list(knowledge_base.keys())[:3]
+    return {table_name: knowledge_base[table_name] for table_name in candidate_names}
+
+
 def _build_selected_table_entries(
     knowledge_base: dict,
     scored_tables: list[tuple[str, float, list[str]]],
@@ -499,6 +571,64 @@ def _build_selected_table_entries(
     return entries
 
 
+def _infer_metric_from_selected_columns(
+    plan: dict[str, Any],
+    selected_tables: list[dict[str, Any]],
+) -> str | None:
+    current_metric = plan.get("metric")
+    if plan.get("intent") not in {"total", "average", "top_n", "trend", "comparison"}:
+        return current_metric
+
+    ranked_semantics: list[tuple[float, str]] = []
+    for table_entry in selected_tables:
+        for column_entry in table_entry.get("selected_columns", []):
+            semantic_type = str(column_entry.get("semantic_type", "")).lower()
+            if semantic_type in {"", "general", "unknown"}:
+                semantic_type = str(_infer_generic_semantic_type(str(column_entry.get("column", ""))) or "")
+            if semantic_type not in {"money", "quantity", "percentage", "date", "status"}:
+                continue
+            ranked_semantics.append((float(column_entry.get("confidence") or 0.0), semantic_type))
+
+    ranked_semantics.sort(key=lambda item: (-item[0], item[1]))
+    for _, semantic_type in ranked_semantics:
+        if semantic_type in {"money", "quantity", "percentage"}:
+            return semantic_type
+
+    return current_metric
+
+
+def _infer_metric_from_glossary_matches(
+    glossary_matches: list[tuple[str, dict[str, Any]]],
+    knowledge_base: dict[str, Any],
+) -> str | None:
+    ranked_semantics: list[tuple[float, str]] = []
+    confidence_rank = {"high": 1.0, "medium": 0.75, "low": 0.5}
+
+    for _, term_data in glossary_matches:
+        for mapping in term_data.get("mapped_columns", []):
+            table_name = str(mapping.get("table", "") or "")
+            column_name = str(mapping.get("column", "") or "")
+            if not table_name or not column_name:
+                continue
+
+            semantic_type = ""
+            for column in knowledge_base.get(table_name, {}).get("columns", []):
+                if str(column.get("name", "")) == column_name:
+                    semantic_type = str(column.get("semantic_type", "")).lower()
+                    break
+
+            if semantic_type in {"", "general", "unknown"}:
+                semantic_type = str(_infer_generic_semantic_type(column_name) or "")
+            if semantic_type not in {"money", "quantity", "percentage"}:
+                continue
+
+            confidence = confidence_rank.get(str(mapping.get("confidence", "")).lower(), 0.6)
+            ranked_semantics.append((confidence, semantic_type))
+
+    ranked_semantics.sort(key=lambda item: (-item[0], item[1]))
+    return ranked_semantics[0][1] if ranked_semantics else None
+
+
 def build_query_context(
     question: str,
     knowledge_base: dict,
@@ -511,7 +641,6 @@ def build_query_context(
     normalized_question = _normalize(question)
     intent = _detect_intent(normalized_question)
     dimension = _detect_dimension(normalized_question)
-    filters = _detect_filters(normalized_question)
     date_range = _detect_date_range(normalized_question)
     limit = _extract_limit(normalized_question) or _default_limit_for_intent(intent)
     semantic_hints = _semantic_hints(normalized_question, intent)
@@ -529,8 +658,6 @@ def build_query_context(
     sorting = None
     if intent == "top_n":
         sorting = {"direction": "desc", "by": "metric"}
-    elif intent == "low_stock":
-        sorting = {"direction": "asc", "by": "quantity"}
     elif intent == "trend":
         sorting = {"direction": "asc", "by": "date"}
 
@@ -545,7 +672,7 @@ def build_query_context(
         "intent": intent,
         "metric": _primary_metric_hint(semantic_hints),
         "dimension": dimension,
-        "filters": filters,
+        "filters": [],
         "date_range": date_range,
         "grouping": grouping,
         "sorting": sorting,
@@ -585,6 +712,41 @@ def build_query_context(
     ]
     scored_tables.sort(key=lambda item: (-item[1], item[0]))
 
+    filters = _detect_runtime_filters(
+        question,
+        _candidate_tables_for_filters(enriched_kb, scored_tables, vector_results),
+    )
+    if filters:
+        plan["filters"] = filters
+        plan["semantic_hints"].add("status")
+        plan["metric"] = _primary_metric_hint(plan["semantic_hints"])
+        rescored_by_name: dict[str, tuple[float, list[str]]] = {}
+        for table_name, table_data in enriched_kb.items():
+            score, reasons = _table_score(plan, table_name, table_data, glossary_matches, vector_results)
+            if score > 0:
+                rescored_by_name[table_name] = (score, reasons)
+        if vector_results:
+            for table_name in vector_results.get("table_names") or []:
+                if table_name not in enriched_kb or table_name in rescored_by_name:
+                    continue
+                rescored_by_name[table_name] = (1.0, ["vector retrieval match"])
+
+            for column_meta in vector_results.get("columns") or []:
+                table_name = column_meta.get("table_name")
+                if not table_name or table_name not in enriched_kb:
+                    continue
+                score, reasons = rescored_by_name.get(table_name, (0.0, []))
+                reasons = list(reasons)
+                score += 0.7
+                reasons.append(f"vector column match: {column_meta.get('column_name')}")
+                rescored_by_name[table_name] = (score, reasons)
+
+        scored_tables = [
+            (table_name, score, reasons)
+            for table_name, (score, reasons) in rescored_by_name.items()
+        ]
+        scored_tables.sort(key=lambda item: (-item[1], item[0]))
+
     selected_tables = _build_selected_table_entries(
         enriched_kb,
         scored_tables,
@@ -613,7 +775,7 @@ def build_query_context(
     warnings = []
     if len(reduced_kb) < len(enriched_kb):
         warnings.append(f"Using {len(reduced_kb)} relevant table(s) instead of the full schema.")
-    if intent in {"list", "top_n", "low_stock"}:
+    if intent in {"list", "top_n"}:
         warnings.append("Read-only row limits stay enabled for list-style questions.")
     if vector_results and not vector_results.get("used_vector"):
         warnings.append("Vector retrieval was unavailable; using KB and glossary rules only.")
@@ -630,6 +792,14 @@ def build_query_context(
         for entry in selected_tables
         for column_entry in entry.get("selected_columns", [])
     ]
+    metric_from_selected_columns = _infer_metric_from_selected_columns(plan, selected_tables)
+    metric_from_glossary = _infer_metric_from_glossary_matches(glossary_matches, enriched_kb)
+    if metric_from_selected_columns in {"money", "quantity", "percentage"}:
+        plan["metric"] = metric_from_selected_columns
+    elif metric_from_glossary in {"money", "quantity", "percentage"}:
+        plan["metric"] = metric_from_glossary
+    else:
+        plan["metric"] = metric_from_selected_columns
 
     return {
         "plan": plan,

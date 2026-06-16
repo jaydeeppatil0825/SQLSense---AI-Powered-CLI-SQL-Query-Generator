@@ -49,6 +49,14 @@ def _sample_glossary(term="stock"):
     }
 
 
+def _source_context(database_name="analytics_demo", schema_fingerprint="schema-v1"):
+    return {
+        "database_name": database_name,
+        "database_type": "mysql",
+        "schema_fingerprint": schema_fingerprint,
+    }
+
+
 def test_vector_index_persistence_save_and_load(monkeypatch, tmp_path):
     monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
     service = EmbeddingService()
@@ -59,7 +67,13 @@ def test_vector_index_persistence_save_and_load(monkeypatch, tmp_path):
     glossary = _sample_glossary()
     documents = builder.build_from_knowledge_base(knowledge_base) + builder.build_from_glossary(glossary)
 
-    saved, message, save_details = persistence.save_documents(documents, knowledge_base, glossary, service)
+    saved, message, save_details = persistence.save_documents(
+        documents,
+        knowledge_base,
+        glossary,
+        service,
+        source_context=_source_context(),
+    )
     assert saved is True
     assert "Saved" in message
     assert save_details["persisted"] is True
@@ -68,6 +82,7 @@ def test_vector_index_persistence_save_and_load(monkeypatch, tmp_path):
         knowledge_base,
         glossary,
         service,
+        source_context=_source_context(),
     )
     assert loaded is True
     assert "Loaded" in load_message
@@ -75,6 +90,11 @@ def test_vector_index_persistence_save_and_load(monkeypatch, tmp_path):
     assert load_details["loaded_from_disk"] is True
     assert load_details["source"] == "disk"
     assert load_details["fresh"] is True
+    manifest = persistence._read_json(persistence.manifest_path)
+    assert manifest["database_name"] == "analytics_demo"
+    assert manifest["schema_fingerprint"] == "schema-v1"
+    assert manifest["created_at"]
+    assert manifest["document_count"] == len(documents)
 
 
 def test_vector_index_persistence_detects_stale_hash_change(monkeypatch, tmp_path):
@@ -88,10 +108,21 @@ def test_vector_index_persistence_detects_stale_hash_change(monkeypatch, tmp_pat
     second_glossary = _sample_glossary("inventory")
     documents = builder.build_from_knowledge_base(knowledge_base) + builder.build_from_glossary(first_glossary)
 
-    saved, _, _ = persistence.save_documents(documents, knowledge_base, first_glossary, service)
+    saved, _, _ = persistence.save_documents(
+        documents,
+        knowledge_base,
+        first_glossary,
+        service,
+        source_context=_source_context(),
+    )
     assert saved is True
 
-    inspection = persistence.inspect_index(knowledge_base, second_glossary, service)
+    inspection = persistence.inspect_index(
+        knowledge_base,
+        second_glossary,
+        service,
+        source_context=_source_context(),
+    )
     assert inspection["fresh"] is False
     assert "glossary hash changed" in inspection["stale_reason"]
 
@@ -106,7 +137,13 @@ def test_vector_index_persistence_rejects_corrupted_documents(monkeypatch, tmp_p
     glossary = _sample_glossary()
     documents = builder.build_from_knowledge_base(knowledge_base) + builder.build_from_glossary(glossary)
 
-    saved, _, _ = persistence.save_documents(documents, knowledge_base, glossary, service)
+    saved, _, _ = persistence.save_documents(
+        documents,
+        knowledge_base,
+        glossary,
+        service,
+        source_context=_source_context(),
+    )
     assert saved is True
 
     persistence.documents_path.write_text("{not-json", encoding="utf-8")
@@ -115,6 +152,7 @@ def test_vector_index_persistence_rejects_corrupted_documents(monkeypatch, tmp_p
         knowledge_base,
         glossary,
         service,
+        source_context=_source_context(),
     )
     assert loaded is False
     assert loaded_documents == []
@@ -132,12 +170,81 @@ def test_vector_index_persistence_detects_embedding_dimension_change(monkeypatch
     glossary = _sample_glossary()
     documents = builder.build_from_knowledge_base(knowledge_base) + builder.build_from_glossary(glossary)
 
-    saved, _, _ = persistence.save_documents(documents, knowledge_base, glossary, first_service)
+    saved, _, _ = persistence.save_documents(
+        documents,
+        knowledge_base,
+        glossary,
+        first_service,
+        source_context=_source_context(),
+    )
     assert saved is True
 
     second_service = EmbeddingService()
     second_service._dimension = 8
 
-    inspection = persistence.inspect_index(knowledge_base, glossary, second_service)
+    inspection = persistence.inspect_index(
+        knowledge_base,
+        glossary,
+        second_service,
+        source_context=_source_context(),
+    )
     assert inspection["fresh"] is False
     assert "embedding dimension changed" in inspection["stale_reason"]
+
+
+def test_vector_index_persistence_detects_database_name_change(monkeypatch, tmp_path):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    service = EmbeddingService()
+    builder = VectorIndexBuilder(service)
+    persistence = VectorIndexPersistence(tmp_path / "vector_index")
+
+    knowledge_base = _sample_knowledge_base()
+    glossary = _sample_glossary()
+    documents = builder.build_from_knowledge_base(knowledge_base) + builder.build_from_glossary(glossary)
+
+    saved, _, _ = persistence.save_documents(
+        documents,
+        knowledge_base,
+        glossary,
+        service,
+        source_context=_source_context(database_name="alpha_db"),
+    )
+    assert saved is True
+
+    inspection = persistence.inspect_index(
+        knowledge_base,
+        glossary,
+        service,
+        source_context=_source_context(database_name="beta_db"),
+    )
+    assert inspection["fresh"] is False
+    assert inspection["stale_reason"] == "database name changed"
+
+
+def test_vector_index_persistence_detects_schema_fingerprint_change(monkeypatch, tmp_path):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    service = EmbeddingService()
+    builder = VectorIndexBuilder(service)
+    persistence = VectorIndexPersistence(tmp_path / "vector_index")
+
+    knowledge_base = _sample_knowledge_base()
+    glossary = _sample_glossary()
+    documents = builder.build_from_knowledge_base(knowledge_base) + builder.build_from_glossary(glossary)
+
+    saved, _, _ = persistence.save_documents(
+        documents,
+        knowledge_base,
+        glossary,
+        service,
+        source_context=_source_context(schema_fingerprint="schema-v1"),
+    )
+    assert saved is True
+
+    inspection = persistence.inspect_index(
+        knowledge_base,
+        glossary,
+        service,
+        source_context=_source_context(schema_fingerprint="schema-v2"),
+    )
+    assert inspection["fresh"] is False
+    assert inspection["stale_reason"] == "schema fingerprint changed"

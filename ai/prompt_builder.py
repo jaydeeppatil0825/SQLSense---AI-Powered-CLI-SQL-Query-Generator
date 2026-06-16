@@ -54,16 +54,16 @@ Structured-plan execution rules:
   - For intent=count use COUNT(*), COUNT(column), or COUNT(DISTINCT column) as appropriate.
   - For intent=top_n use GROUP BY + ORDER BY DESC + LIMIT.
   - For intent=trend or grouping by month use a date expression and aggregate.
-  - For pending, unpaid, outstanding, overdue, due, or low-stock questions, apply meaningful filters rather than returning a raw table dump.
+  - When the plan includes filters, apply them instead of returning a raw table dump.
   - Do NOT use SELECT * for totals, counts, balances, grouped analysis, or other business-style questions unless the plan clearly indicates a raw record listing.
 """.strip()
 
 _SEMANTIC_GUIDANCE = """
 Semantic type guidance:
-  - semantic_type=money: prefer for totals, balances, amounts, costs, prices, and payables/receivables.
-  - semantic_type=quantity: prefer for stock, counts, units, and measurable quantities.
+  - semantic_type=money: prefer for totals, balances, amounts, costs, prices, and other monetary measures.
+  - semantic_type=quantity: prefer for counts, units, and other measurable quantities.
   - semantic_type=date: prefer for latest/recent/date/month questions.
-  - semantic_type=status: prefer for pending/open/closed/paid/active filters.
+  - semantic_type=status: prefer for state-like filters when the plan or sample values indicate them.
   - semantic_type=name: prefer for user-facing labels in SELECT, GROUP BY, or ORDER BY.
   - semantic_type=code or semantic_type=id: prefer for identifiers and joins when needed.
   - semantic_type=percentage: prefer for ratio or percent questions.
@@ -262,11 +262,6 @@ def _build_ai_target_section(query_plan: dict | None, selected_tables: list[dict
         lines.append("  - Rank results with ORDER BY DESC and apply LIMIT.")
     elif intent == "trend":
         lines.append("  - Aggregate over time and include GROUP BY for the time bucket.")
-    elif intent == "pending_outstanding":
-        lines.append("  - Apply pending, unpaid, due, or outstanding filters when the schema supports them.")
-    elif intent == "low_stock":
-        lines.append("  - Filter rows by a low-stock or low-quantity condition before ordering.")
-
     if dimension:
         lines.append(f"  - Break down results by '{dimension}'.")
     if grouping:

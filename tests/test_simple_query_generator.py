@@ -1,5 +1,7 @@
 """Tests for the dynamic simple query generator."""
 
+from pathlib import Path
+
 from ai.simple_query_generator import generate_simple_sql
 
 
@@ -84,13 +86,31 @@ def test_total_uses_dynamic_measure_column_from_glossary():
     assert sql == "SELECT SUM(total_due) AS total_total_due FROM invoice_headers;"
 
 
+def test_total_uses_dynamic_date_filter_from_plan():
+    query_plan = {
+        "intent": "total",
+        "semantic_hints": {"money"},
+        "date_range": {"start": "2026-06-01", "end_exclusive": "2026-07-01"},
+    }
+    sql = generate_simple_sql(
+        "Show total invoices this month",
+        {"invoice_headers": GENERIC_KB["invoice_headers"]},
+        query_plan=query_plan,
+    )
+    assert sql == (
+        "SELECT SUM(total_due) AS total_total_due "
+        "FROM invoice_headers WHERE invoice_date >= '2026-06-01' AND invoice_date < '2026-07-01';"
+    )
+
+
 def test_latest_uses_dynamic_date_column():
     sql = generate_simple_sql("Show latest 10 invoices", GENERIC_KB)
     assert sql == "SELECT * FROM invoice_headers ORDER BY invoice_date DESC LIMIT 10;"
 
 
 def test_status_filter_uses_dynamic_status_column():
-    sql = generate_simple_sql("Show pending invoices", GENERIC_KB)
+    query_plan = {"intent": "list", "filters": [{"type": "status", "value": "Pending", "term": "pending"}]}
+    sql = generate_simple_sql("Show pending invoices", GENERIC_KB, query_plan=query_plan)
     assert sql == "SELECT * FROM invoice_headers WHERE workflow_status = 'Pending' LIMIT 50;"
 
 
@@ -113,3 +133,34 @@ def test_complex_questions_return_none_for_ai_path():
         business_glossary=GLOSSARY,
     )
     assert sql is None
+
+
+def test_list_uses_limit_from_query_plan():
+    query_plan = {"intent": "list", "limit": 10}
+    sql = generate_simple_sql("Show invoices", GENERIC_KB, query_plan=query_plan)
+    assert sql == "SELECT * FROM invoice_headers LIMIT 10;"
+
+
+def test_selected_table_metadata_overrides_heuristic_pick():
+    selected_tables = [
+        {
+            "table": "invoice_headers",
+            "confidence": 0.91,
+            "selected_columns": [{"column": "total_due", "semantic_type": "money"}],
+        }
+    ]
+    query_plan = {"intent": "total", "semantic_hints": {"money"}}
+    sql = generate_simple_sql(
+        "Show total amount",
+        GENERIC_KB,
+        query_plan=query_plan,
+        selected_tables=selected_tables,
+    )
+    assert sql == "SELECT SUM(total_due) AS total_total_due FROM invoice_headers;"
+
+
+def test_rule_based_generator_source_has_no_legacy_business_mappings():
+    source = Path("ai/simple_query_generator.py").read_text(encoding="utf-8").lower()
+
+    for banned_symbol in ("_table_aliases", "_business_term_table", "_try_pcsoft_business_sql"):
+        assert banned_symbol not in source

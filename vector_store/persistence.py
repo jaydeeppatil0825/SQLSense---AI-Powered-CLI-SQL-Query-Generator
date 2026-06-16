@@ -38,13 +38,18 @@ class VectorIndexPersistence:
         knowledge_base: dict[str, Any] | None,
         glossary: dict[str, Any] | None,
         embedding_service: EmbeddingService,
+        source_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build a deterministic signature for the current KB, glossary, and embedding backend."""
         embedding_status = embedding_service.get_status()
+        source_context = source_context or {}
         return {
             "schema_version": INDEX_SCHEMA_VERSION,
             "knowledge_base_hash": self._content_hash(knowledge_base or {}),
             "glossary_hash": self._content_hash(glossary or {}),
+            "database_name": str(source_context.get("database_name", "") or ""),
+            "database_type": str(source_context.get("database_type", "") or ""),
+            "schema_fingerprint": str(source_context.get("schema_fingerprint", "") or ""),
             "embedding": {
                 "backend": embedding_status.get("backend"),
                 "model": embedding_status.get("model"),
@@ -59,9 +64,10 @@ class VectorIndexPersistence:
         knowledge_base: dict[str, Any] | None,
         glossary: dict[str, Any] | None,
         embedding_service: EmbeddingService,
+        source_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Inspect whether the persisted index is fresh enough to reuse."""
-        signature = self.build_signature(knowledge_base, glossary, embedding_service)
+        signature = self.build_signature(knowledge_base, glossary, embedding_service, source_context=source_context)
         details = self._status_template(signature)
 
         manifest_exists = self.manifest_path.exists()
@@ -90,6 +96,18 @@ class VectorIndexPersistence:
 
         if int(manifest.get("schema_version", 0) or 0) != INDEX_SCHEMA_VERSION:
             details["stale_reason"] = "index schema version changed"
+            return details
+
+        expected_database_name = str(signature.get("database_name", "") or "")
+        manifest_database_name = str(manifest.get("database_name", "") or "")
+        if expected_database_name and manifest_database_name and manifest_database_name != expected_database_name:
+            details["stale_reason"] = "database name changed"
+            return details
+
+        expected_schema_fingerprint = str(signature.get("schema_fingerprint", "") or "")
+        manifest_schema_fingerprint = str(manifest.get("schema_fingerprint", "") or "")
+        if expected_schema_fingerprint and manifest_schema_fingerprint and manifest_schema_fingerprint != expected_schema_fingerprint:
+            details["stale_reason"] = "schema fingerprint changed"
             return details
 
         if manifest.get("knowledge_base_hash") != signature["knowledge_base_hash"]:
@@ -122,9 +140,10 @@ class VectorIndexPersistence:
         knowledge_base: dict[str, Any] | None,
         glossary: dict[str, Any] | None,
         embedding_service: EmbeddingService,
+        source_context: dict[str, Any] | None = None,
     ) -> tuple[bool, str, list[dict[str, Any]], dict[str, Any]]:
         """Load persisted documents when the on-disk index is fresh and valid."""
-        details = self.inspect_index(knowledge_base, glossary, embedding_service)
+        details = self.inspect_index(knowledge_base, glossary, embedding_service, source_context=source_context)
         if not details.get("fresh"):
             return False, details.get("stale_reason", "index is stale"), [], details
 
@@ -183,9 +202,10 @@ class VectorIndexPersistence:
         knowledge_base: dict[str, Any] | None,
         glossary: dict[str, Any] | None,
         embedding_service: EmbeddingService,
+        source_context: dict[str, Any] | None = None,
     ) -> tuple[bool, str, dict[str, Any]]:
         """Persist vector documents and the manifest to disk."""
-        signature = self.build_signature(knowledge_base, glossary, embedding_service)
+        signature = self.build_signature(knowledge_base, glossary, embedding_service, source_context=source_context)
         details = self._status_template(signature)
         details["source"] = "rebuilt"
         details["rebuilt"] = True
@@ -193,6 +213,7 @@ class VectorIndexPersistence:
 
         manifest = {
             **signature,
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "built_at": datetime.now(timezone.utc).isoformat(),
             "document_count": len(documents),
         }
@@ -241,6 +262,9 @@ class VectorIndexPersistence:
             "persistence_error": "",
             "knowledge_base_hash": signature.get("knowledge_base_hash"),
             "glossary_hash": signature.get("glossary_hash"),
+            "database_name": signature.get("database_name"),
+            "database_type": signature.get("database_type"),
+            "schema_fingerprint": signature.get("schema_fingerprint"),
             "embedding_backend": embedding_signature.get("backend"),
             "embedding_model": embedding_signature.get("model"),
             "embedding_dimension": embedding_signature.get("dimension"),

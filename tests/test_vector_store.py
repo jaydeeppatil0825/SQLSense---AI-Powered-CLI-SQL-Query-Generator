@@ -260,6 +260,9 @@ def test_retriever_returns_relationships_glossary_and_search_status():
     relationships = retriever.get_relevant_relationships("current stock by warehouse", top_k=3)
     glossary_terms = retriever.get_relevant_glossary_terms("current stock by warehouse", top_k=3)
     columns = retriever.get_relevant_columns("current stock by warehouse", top_k=5)
+    table_details = retriever.get_relevant_table_details("current stock by warehouse", top_k=3)
+    semantic_descriptions = retriever.get_relevant_semantic_descriptions("current stock by warehouse", top_k=5)
+    profiling_hints = retriever.get_relevant_profiling_hints("current stock by warehouse", top_k=5)
     status = retriever.get_status()
 
     assert relationships
@@ -267,6 +270,12 @@ def test_retriever_returns_relationships_glossary_and_search_status():
     assert glossary_terms
     assert glossary_terms[0]["term"] == "stock"
     assert any(column["table_name"] == "stock_positions" for column in columns)
+    assert table_details
+    assert table_details[0]["table_name"] in {"stock_positions", "warehouse_directory"}
+    assert semantic_descriptions
+    assert any(entry["description"] for entry in semantic_descriptions)
+    assert profiling_hints
+    assert any(hint.get("sample_values", []) == [] or isinstance(hint.get("sample_values", []), list) for hint in profiling_hints)
     assert status["index_built"] is True
     assert status["document_count"] >= 6
     assert status["last_search"]["query"] == "current stock by warehouse"

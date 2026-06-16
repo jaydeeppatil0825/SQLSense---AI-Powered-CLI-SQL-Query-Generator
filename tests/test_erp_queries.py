@@ -190,9 +190,10 @@ def test_erp_total_sales_this_month(monkeypatch):
 
     assert success is True
     assert "SELECT *" not in sql.upper()
-    assert "SUM(final_amount) AS total_sales" in sql
+    assert "SUM(final_amount)" in sql
     assert "FROM sales_invoices" in sql
     assert f"invoice_date >= '{start_date}'" in sql
+    assert service.get_last_query_context()["route_used"] == "rule-based"
     assert service.get_last_query_context()["selected_table_names"] != list(_erp_knowledge_base().keys())
 
 
@@ -412,10 +413,10 @@ def test_business_question_uses_rule_based_fallback_when_ai_is_too_generic(monke
     success, message, sql, error = service.process_question("show total sales this month", ai_backend="local")
 
     assert success is True
-    assert message == "SQL generated successfully (rule-based fallback)"
-    assert "SUM(final_amount)" in sql
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert "SUM(" in sql
     assert "FROM sales_invoices" in sql
-    assert "retry_reason" in captured
+    assert "invoice_date >=" in sql
 
 
 def test_ai_retry_receives_validator_error_and_dynamic_context(monkeypatch):

@@ -37,18 +37,6 @@ _COMPLEX_KEYWORDS = {
 }
 
 _DATE_PATTERNS = ("date", "time", "timestamp", "created", "updated", "modified")
-_STATUS_VALUE_FALLBACKS = {
-    "pending": ["Pending", "pending", "Unpaid", "unpaid", "Open", "open"],
-    "unpaid": ["Unpaid", "unpaid", "Pending", "pending"],
-    "paid": ["Paid", "paid", "Closed", "closed"],
-    "open": ["Open", "open"],
-    "closed": ["Closed", "closed"],
-    "active": ["Active", "active", "Enabled", "enabled"],
-    "inactive": ["Inactive", "inactive", "Disabled", "disabled"],
-    "cancelled": ["Cancelled", "cancelled", "Canceled", "canceled"],
-    "canceled": ["Canceled", "canceled", "Cancelled", "cancelled"],
-    "approved": ["Approved", "approved"],
-}
 
 
 def _normalize(text: str) -> str:
@@ -213,15 +201,18 @@ def _pick_status_column(table_data: dict[str, Any]) -> dict[str, Any] | None:
 
 def _status_value_for_question(question: str, column: dict[str, Any]) -> str | None:
     normalized_question = _normalize(question)
-    sample_values = [str(value) for value in (column.get("sample_values") or []) if value is not None]
-    sample_set = set(sample_values)
+    question_terms = set(_tokenize(question))
 
-    for trigger, fallbacks in _STATUS_VALUE_FALLBACKS.items():
-        if re.search(r"\b" + re.escape(trigger) + r"\b", normalized_question):
-            for value in fallbacks:
-                if value in sample_set:
-                    return value
-            return fallbacks[0]
+    for raw_value in (column.get("sample_values") or []):
+        if raw_value is None:
+            continue
+        sample_value = str(raw_value)
+        normalized_value = _normalize(sample_value)
+        sample_terms = set(_tokenize(sample_value))
+        if not normalized_value or not sample_terms:
+            continue
+        if normalized_value in normalized_question or sample_terms <= question_terms:
+            return sample_value
     return None
 
 
@@ -297,7 +288,7 @@ def _pick_quantity_column(table_data: dict[str, Any]) -> str | None:
             return str(column.get("name", ""))
     for column in _table_columns(table_data):
         name = _normalize_identifier(column.get("name", ""))
-        if any(token in name for token in ("qty", "quantity", "stock", "count", "units", "balance")):
+        if any(token in name for token in ("qty", "quantity", "count", "units", "volume")):
             return str(column.get("name", ""))
     return None
 
@@ -545,8 +536,5 @@ def generate_simple_sql(
     )
     if aggregate_sql:
         return aggregate_sql
-
-    if intent in {"pending_outstanding", "low_stock"}:
-        return None
 
     return _try_show_all(table_name, table_data, user_question, query_plan, where_clauses, limit)

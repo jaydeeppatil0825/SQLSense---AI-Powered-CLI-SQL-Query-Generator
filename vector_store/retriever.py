@@ -220,6 +220,28 @@ class VectorRetriever:
                 seen.add((table_name, column_name))
         
         return columns
+
+    def get_relevant_table_details(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Return table documents with scores and descriptive metadata."""
+        results = self.search(query, top_k=top_k, doc_type="table", min_score=0.2)
+        tables = []
+        seen = set()
+
+        for result in results:
+            metadata = dict(result.get("metadata", {}))
+            table_name = metadata.get("table_name")
+            if not table_name or table_name in seen:
+                continue
+            seen.add(table_name)
+            tables.append(
+                {
+                    **metadata,
+                    "score": result.get("score", 0.0),
+                    "text": result.get("text", ""),
+                }
+            )
+
+        return tables
     
     def get_relevant_glossary_terms(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
@@ -275,6 +297,59 @@ class VectorRetriever:
             relationships.append(metadata)
 
         return relationships
+
+    def get_relevant_semantic_descriptions(self, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
+        """Return descriptive semantic snippets from table, column, and glossary documents."""
+        results = self.search(query, top_k=top_k, min_score=0.2)
+        descriptions = []
+
+        for result in results:
+            metadata = result.get("metadata", {})
+            description = (
+                metadata.get("description")
+                or metadata.get("business_purpose")
+                or result.get("text", "")
+            )
+            if not description:
+                continue
+            descriptions.append(
+                {
+                    "type": metadata.get("type"),
+                    "table_name": metadata.get("table_name"),
+                    "column_name": metadata.get("column_name"),
+                    "term": metadata.get("term"),
+                    "description": description,
+                    "score": result.get("score", 0.0),
+                }
+            )
+
+        return descriptions
+
+    def get_relevant_profiling_hints(self, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
+        """Return profiling-oriented hints such as sample values, row counts, and nullability."""
+        results = self.search(query, top_k=top_k, min_score=0.2)
+        hints = []
+
+        for result in results:
+            metadata = result.get("metadata", {})
+            hint = {
+                "type": metadata.get("type"),
+                "table_name": metadata.get("table_name"),
+                "column_name": metadata.get("column_name"),
+                "row_count": metadata.get("row_count"),
+                "sample_values": metadata.get("sample_values", []),
+                "nullable": metadata.get("nullable"),
+                "column_type": metadata.get("column_type"),
+                "score": result.get("score", 0.0),
+            }
+            if not any(
+                hint.get(key) not in (None, "", [], {})
+                for key in ("row_count", "sample_values", "nullable", "column_type")
+            ):
+                continue
+            hints.append(hint)
+
+        return hints
 
     def get_status(self) -> Dict[str, Any]:
         """Return retriever status for CLI/debug reporting."""

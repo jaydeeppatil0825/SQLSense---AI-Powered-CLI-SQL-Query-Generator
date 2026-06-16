@@ -7,6 +7,7 @@ This service handles database connection, knowledge base building,
 and business glossary loading for the CLI.
 """
 
+import os
 from typing import Optional, Dict, Any
 from sqlalchemy.engine import Engine
 
@@ -37,6 +38,7 @@ class DatabaseService:
         self.engine: Optional[Engine] = None
         self.knowledge_base: Optional[Dict[str, Any]] = None
         self.business_glossary: Optional[Dict[str, Any]] = None
+        self.knowledge_base_origin: str = "none"
         self.db_config: Dict[str, Any] = {}
         self.last_ai_enrichment_status: str = "skipped"
         self.last_ai_enrichment_message: str = "AI enrichment skipped."
@@ -50,6 +52,42 @@ class DatabaseService:
             source="none",
             stale_reason="vector index not built",
         )
+        self._warm_start_cached_assets()
+
+    def _warm_start_cached_assets(self) -> None:
+        """Warm-load cached KB, glossary, and vector index for a fresh CLI session."""
+        if not os.path.exists(KNOWLEDGE_BASE_PATH):
+            return
+
+        try:
+            self.knowledge_base = load_json(KNOWLEDGE_BASE_PATH)
+            self.knowledge_base_origin = "loaded"
+        except Exception as exc:
+            logger.debug(f"Warm start skipped because KB could not be loaded: {exc}")
+            return
+
+        try:
+            glossary = load_business_glossary("semantic/business_glossary.json")
+            self.business_glossary = self._align_glossary_with_active_knowledge_base(glossary)
+        except Exception:
+            try:
+                has_ai_terms = any(
+                    column.get("business_terms")
+                    for table_data in (self.knowledge_base or {}).values()
+                    for column in table_data.get("columns", [])
+                )
+                self.business_glossary = generate_business_glossary(
+                    self.knowledge_base or {},
+                    use_ai_enrichment=bool(has_ai_terms),
+                )
+            except Exception as exc:
+                logger.debug(f"Warm start skipped because glossary could not be prepared: {exc}")
+                self.business_glossary = None
+
+        try:
+            self._load_persisted_vector_index_only()
+        except Exception as exc:
+            logger.debug(f"Warm start vector refresh skipped: {exc}")
 
     def _align_glossary_with_active_knowledge_base(self, glossary: Dict[str, Any]) -> Dict[str, Any]:
         """Ensure loaded glossary mappings belong to the active knowledge base."""
@@ -116,6 +154,8 @@ class DatabaseService:
                 engine = connect_engine(db_type="sqlite", sqlite_path=sqlite_path)
                 self.engine = engine
                 self.db_config = {"db_type": "sqlite", "sqlite_path": sqlite_path}
+                if self.knowledge_base is not None:
+                    self.refresh_vector_index()
                 logger.info(f"Connected to SQLite: {sqlite_path}")
                 return True, f"Connected to SQLite: {sqlite_path}", engine
             else:
@@ -144,6 +184,8 @@ class DatabaseService:
                     "username": username,
                     "database": database,
                 }
+                if self.knowledge_base is not None:
+                    self.refresh_vector_index()
                 logger.info(f"Connected to {db_type}://{username}@{host}:{port}/{database}")
                 return True, f"Connected to {db_type}://{username}@{host}:{port}/{database}", engine
         except Exception as e:
@@ -269,6 +311,7 @@ class DatabaseService:
             logger.error(f"Failed to generate business glossary: {e}")
         
         self.knowledge_base = final_knowledge_base
+        self.knowledge_base_origin = "built"
         self.last_build_summary = summarize_knowledge_base(final_knowledge_base)
         self.refresh_vector_index()
         return True, "Knowledge base built successfully", final_knowledge_base
@@ -283,6 +326,7 @@ class DatabaseService:
         try:
             knowledge_base = load_json(KNOWLEDGE_BASE_PATH)
             self.knowledge_base = knowledge_base
+            self.knowledge_base_origin = "loaded"
             if self.business_glossary is None:
                 self.load_business_glossary()
             else:
@@ -374,6 +418,9 @@ class DatabaseService:
             "persistence_error": "",
             "knowledge_base_hash": "",
             "glossary_hash": "",
+            "database_name": "",
+            "database_type": "",
+            "schema_fingerprint": "",
             "embedding_backend": self.embedding_service.get_backend_name(),
             "embedding_model": self.embedding_service.get_model_name(),
             "embedding_dimension": self.embedding_service.get_dimension(),
@@ -381,12 +428,67 @@ class DatabaseService:
         details.update(overrides)
         return details
 
+    def _schema_fingerprint_payload(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        for table_name, table_data in (self.knowledge_base or {}).items():
+            payload[table_name] = {
+                "columns": [
+                    {
+                        "name": column.get("name"),
+                        "type": column.get("type"),
+                        "nullable": column.get("nullable"),
+                        "semantic_type": column.get("semantic_type"),
+                    }
+                    for column in table_data.get("columns", [])
+                ],
+                "primary_keys": list(table_data.get("primary_keys", [])),
+                "foreign_keys": list(table_data.get("foreign_keys", [])),
+                "relationships": list(table_data.get("relationships", [])),
+            }
+        return payload
+
+    def _vector_source_context(self) -> Dict[str, Any]:
+        database_type = str(self.db_config.get("db_type", "") or "")
+        database_name = str(self.db_config.get("database", "") or "")
+        if database_type == "sqlite" and not database_name:
+            database_name = str(self.db_config.get("sqlite_path", "") or "")
+
+        schema_fingerprint = self.vector_index_storage._content_hash(self._schema_fingerprint_payload())
+        return {
+            "database_type": database_type,
+            "database_name": database_name,
+            "schema_fingerprint": schema_fingerprint,
+        }
+
     def _build_vector_documents(self) -> list[dict[str, Any]]:
         """Build vector documents from the active KB and glossary."""
         documents = self.vector_index_builder.build_from_knowledge_base(self.knowledge_base or {})
         if self.business_glossary:
             documents.extend(self.vector_index_builder.build_from_glossary(self.business_glossary))
         return documents
+
+    def _load_persisted_vector_index_only(self) -> None:
+        """Load an existing persisted vector index without rebuilding during warm start."""
+        if not self.knowledge_base:
+            return
+
+        loaded, _, documents, details = self.vector_index_storage.load_documents(
+            self.knowledge_base,
+            self.business_glossary,
+            self.embedding_service,
+            source_context=self._vector_source_context(),
+        )
+        if not loaded:
+            self.vector_retriever = None
+            self.vector_index_status = "not_built"
+            self.vector_index_details = self._make_vector_index_details(**details)
+            return
+
+        retriever = VectorRetriever(self.embedding_service)
+        retriever.add_documents(documents)
+        self.vector_retriever = retriever
+        self.vector_index_status = "ready"
+        self.vector_index_details = self._make_vector_index_details(**details)
 
     def refresh_vector_index(self) -> None:
         """
@@ -408,14 +510,29 @@ class DatabaseService:
             self.knowledge_base,
             self.business_glossary,
             self.embedding_service,
+            source_context=self._vector_source_context(),
         )
         rebuild_reason = inspection.get("stale_reason", "")
+
+        if (
+            self.engine is not None
+            and self.knowledge_base_origin != "built"
+            and rebuild_reason in {"database name changed", "schema fingerprint changed"}
+        ):
+            self.vector_retriever = None
+            self.vector_index_status = "stale"
+            stale_details = dict(inspection)
+            stale_details["source"] = "stale"
+            stale_details["stale_reason"] = f"{rebuild_reason}; rebuild the knowledge base for the connected database"
+            self.vector_index_details = self._make_vector_index_details(**stale_details)
+            return
 
         if inspection.get("fresh"):
             loaded, message, documents, load_details = self.vector_index_storage.load_documents(
                 self.knowledge_base,
                 self.business_glossary,
                 self.embedding_service,
+                source_context=self._vector_source_context(),
             )
             if loaded:
                 retriever = VectorRetriever(self.embedding_service)
@@ -455,6 +572,7 @@ class DatabaseService:
             self.knowledge_base,
             self.business_glossary,
             self.embedding_service,
+            source_context=self._vector_source_context(),
         )
         if not saved:
             logger.warning(message)

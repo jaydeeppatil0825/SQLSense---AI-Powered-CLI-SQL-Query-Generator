@@ -241,3 +241,84 @@ def test_database_service_rebuilds_persisted_index_when_glossary_changes(monkeyp
     assert second_status["persistence"]["source"] == "rebuilt"
     assert second_status["persistence"]["rebuilt"] is True
     assert "glossary hash changed" in second_status["persistence"]["stale_reason"]
+
+
+def test_database_service_rebuilds_persisted_index_when_schema_changes(monkeypatch, tmp_path):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
+    first_kb = {
+        "alpha_records": {
+            "module": "reference",
+            "business_purpose": "Stores alpha records",
+            "columns": [
+                {"name": "record_id", "type": "int", "semantic_type": "id"},
+                {"name": "record_name", "type": "varchar", "semantic_type": "name"},
+            ],
+            "relationships": [],
+        }
+    }
+    second_kb = {
+        "alpha_records": {
+            "module": "reference",
+            "business_purpose": "Stores alpha records",
+            "columns": [
+                {"name": "record_id", "type": "int", "semantic_type": "id"},
+                {"name": "record_name", "type": "varchar", "semantic_type": "name"},
+                {"name": "created_on", "type": "date", "semantic_type": "date"},
+            ],
+            "relationships": [],
+        }
+    }
+
+    first_service = DatabaseService()
+    first_service.knowledge_base = first_kb
+    first_service.knowledge_base_origin = "built"
+    first_service.business_glossary = {}
+    first_service.refresh_vector_index()
+
+    second_service = DatabaseService()
+    second_service.knowledge_base = second_kb
+    second_service.knowledge_base_origin = "built"
+    second_service.business_glossary = {}
+    second_service.refresh_vector_index()
+
+    second_status = second_service.get_vector_status()
+    assert second_status["index_status"] == "ready"
+    assert second_status["persistence"]["source"] == "rebuilt"
+    assert "schema fingerprint changed" in second_status["persistence"]["stale_reason"]
+
+
+def test_database_service_marks_loaded_index_stale_when_connected_database_changes(monkeypatch, tmp_path):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
+    knowledge_base = {
+        "orders": {
+            "module": "transaction",
+            "business_purpose": "Stores order rows",
+            "columns": [
+                {"name": "order_id", "type": "int", "semantic_type": "id"},
+                {"name": "amount_value", "type": "decimal", "semantic_type": "money"},
+            ],
+            "relationships": [],
+        }
+    }
+
+    first_service = DatabaseService()
+    first_service.knowledge_base = knowledge_base
+    first_service.knowledge_base_origin = "built"
+    first_service.business_glossary = {}
+    first_service.db_config = {"db_type": "mysql", "database": "alpha_db"}
+    first_service.refresh_vector_index()
+
+    second_service = DatabaseService()
+    second_service.knowledge_base = knowledge_base
+    second_service.knowledge_base_origin = "loaded"
+    second_service.business_glossary = {}
+    second_service.db_config = {"db_type": "mysql", "database": "beta_db"}
+    second_service.engine = object()
+    second_service.refresh_vector_index()
+
+    second_status = second_service.get_vector_status()
+    assert second_status["index_status"] == "stale"
+    assert second_status["persistence"]["source"] == "stale"
+    assert "database name changed" in second_status["persistence"]["stale_reason"]
