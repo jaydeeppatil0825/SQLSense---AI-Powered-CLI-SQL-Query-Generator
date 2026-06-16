@@ -65,6 +65,11 @@ def test_show_all_uses_dynamic_glossary_mapping():
     assert sql == "SELECT client_id, client_name, status_flag, created_at FROM client_directory LIMIT 50;"
 
 
+def test_show_all_uses_dynamic_alias_mapping_without_direct_table_name():
+    sql = generate_simple_sql("Show all client", GENERIC_KB, business_glossary=GLOSSARY)
+    assert sql == "SELECT client_id, client_name, status_flag, created_at FROM client_directory LIMIT 50;"
+
+
 def test_without_glossary_old_business_aliases_do_not_resolve():
     sql = generate_simple_sql("Show all customers", GENERIC_KB)
     assert sql is None

@@ -152,6 +152,39 @@ class _DummyVectorRetriever:
         return {"index_built": True, "document_count": 1}
 
 
+class _NoisyAliasVectorRetriever:
+    def __init__(self, ranked_tables, ranked_columns=None):
+        self.ranked_tables = list(ranked_tables)
+        self.ranked_columns = list(ranked_columns or [])
+
+    def get_relevant_tables(self, query, top_k=5):
+        return self.ranked_tables[:top_k]
+
+    def get_relevant_table_details(self, query, top_k=5):
+        return [
+            {"table_name": table_name, "score": round(0.95 - (index * 0.03), 2)}
+            for index, table_name in enumerate(self.ranked_tables[:top_k])
+        ]
+
+    def get_relevant_columns(self, query, top_k=10):
+        return self.ranked_columns[:top_k]
+
+    def get_relevant_glossary_terms(self, query, top_k=5):
+        return []
+
+    def get_relevant_relationships(self, query, top_k=5):
+        return []
+
+    def get_relevant_semantic_descriptions(self, query, top_k=8):
+        return []
+
+    def get_relevant_profiling_hints(self, query, top_k=8):
+        return []
+
+    def get_status(self):
+        return {"index_built": True, "document_count": len(self.ranked_tables)}
+
+
 def _context(
     selected_table_names,
     *,
@@ -443,3 +476,165 @@ def test_top_vector_table_beats_generic_glossary_aliases_for_simple_list():
 
     assert context["selected_table_names"] == ["alpha_records"]
     assert context["selected_tables"][0]["table"] == "alpha_records"
+
+
+def test_simple_alias_query_collapses_to_single_primary_table_despite_noisy_vector_context():
+    knowledge_base = {
+        "customer_registry": {
+            "columns": [
+                {"name": "customer_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "customer_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["customer_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "product_catalog": {
+            "columns": [
+                {"name": "product_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "product_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["product_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "purchase_orders": {
+            "columns": [
+                {"name": "purchase_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "purchase_code", "type": "VARCHAR(50)", "nullable": False, "semantic_type": "code"},
+            ],
+            "primary_keys": ["purchase_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    glossary = {
+        "customer": {
+            "description": "Customer records",
+            "mapped_columns": [{"table": "customer_registry", "column": "customer_name", "confidence": "high"}],
+            "business_terms": ["client"],
+            "example_questions": ["show all client"],
+        }
+    }
+    retriever = _NoisyAliasVectorRetriever(
+        ["customer_registry", "product_catalog", "purchase_orders"],
+        ranked_columns=[
+            {"table_name": "customer_registry", "column_name": "customer_name", "semantic_type": "name"},
+            {"table_name": "product_catalog", "column_name": "product_name", "semantic_type": "name"},
+            {"table_name": "purchase_orders", "column_name": "purchase_code", "semantic_type": "code"},
+        ],
+    )
+
+    context = build_query_context(
+        "show all client",
+        knowledge_base,
+        glossary,
+        vector_retriever=retriever,
+    )
+
+    assert context["selected_table_names"] == ["customer_registry"]
+    assert context["selected_tables"][0]["table"] == "customer_registry"
+
+
+def test_show_all_client_routes_rule_based_without_ai(monkeypatch):
+    knowledge_base = {
+        "customer_registry": {
+            "columns": [
+                {"name": "customer_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "customer_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["customer_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "product_catalog": {
+            "columns": [
+                {"name": "product_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "product_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["product_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    glossary = {
+        "customer": {
+            "description": "Customer records",
+            "mapped_columns": [{"table": "customer_registry", "column": "customer_name", "confidence": "high"}],
+            "business_terms": ["client"],
+            "example_questions": ["show all client"],
+        }
+    }
+    retriever = _NoisyAliasVectorRetriever(
+        ["customer_registry", "product_catalog"],
+        ranked_columns=[
+            {"table_name": "customer_registry", "column_name": "customer_name", "semantic_type": "name"},
+            {"table_name": "product_catalog", "column_name": "product_name", "semantic_type": "name"},
+        ],
+    )
+    service = QuestionService()
+
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for clear simple alias browse questions")),
+    )
+
+    success, message, sql, error = service.process_question(
+        "show all client",
+        knowledge_base,
+        business_glossary=glossary,
+        vector_retriever=retriever,
+        ai_backend="local",
+    )
+
+    assert success is True
+    assert sql == "SELECT customer_id, customer_name FROM customer_registry LIMIT 50;"
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["selected_table_names"] == ["customer_registry"]
+
+
+def test_ambiguous_simple_table_match_returns_clean_clarification(monkeypatch):
+    knowledge_base = {
+        "alpha_records": {
+            "columns": [
+                {"name": "record_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "record_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["record_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "beta_records": {
+            "columns": [
+                {"name": "record_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "record_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["record_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    retriever = _NoisyAliasVectorRetriever(
+        ["alpha_records", "beta_records"],
+        ranked_columns=[
+            {"table_name": "alpha_records", "column_name": "record_name", "semantic_type": "name"},
+            {"table_name": "beta_records", "column_name": "record_name", "semantic_type": "name"},
+        ],
+    )
+    service = QuestionService()
+
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for ambiguous simple browse questions")),
+    )
+
+    success, message, sql, error = service.process_question(
+        "show all records",
+        knowledge_base,
+        vector_retriever=retriever,
+        ai_backend="local",
+    )
+
+    assert success is False
+    assert sql is None
+    assert "Please specify one of" in message

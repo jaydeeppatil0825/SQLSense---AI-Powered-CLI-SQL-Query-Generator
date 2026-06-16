@@ -350,6 +350,52 @@ def _glossary_matches(question: str, glossary: dict | None) -> list[tuple[str, d
     return matches
 
 
+def _glossary_alias_hits_question(question: str, term: str, term_data: dict[str, Any]) -> bool:
+    normalized_question = _normalize(question)
+    question_terms = set(_content_terms(question))
+    normalized_term = _normalize(term)
+    term_tokens = set(_tokenize(term))
+
+    if normalized_term and normalized_term in normalized_question:
+        return True
+    if term_tokens and term_tokens <= question_terms:
+        return True
+
+    for alias in term_data.get("business_terms", []) or []:
+        normalized_alias = _normalize(alias)
+        alias_tokens = set(_tokenize(alias))
+        if normalized_alias and normalized_alias in normalized_question:
+            return True
+        if alias_tokens and alias_tokens <= question_terms:
+            return True
+
+    return False
+
+
+def _glossary_mapped_tables(term_data: dict[str, Any]) -> set[str]:
+    return {
+        str(mapping.get("table", "")).strip()
+        for mapping in term_data.get("mapped_columns", []) or []
+        if str(mapping.get("table", "")).strip()
+    }
+
+
+def _has_strong_glossary_table_match(
+    question: str,
+    table_name: str,
+    glossary_matches: list[tuple[str, dict[str, Any]]],
+) -> bool:
+    for term, term_data in glossary_matches:
+        mapped_tables = _glossary_mapped_tables(term_data)
+        if table_name not in mapped_tables:
+            continue
+        if len(mapped_tables) != 1:
+            continue
+        if _glossary_alias_hits_question(question, term, term_data):
+            return True
+    return False
+
+
 def _enriched_kb(knowledge_base: dict) -> dict:
     if not knowledge_base:
         return {}
@@ -419,15 +465,19 @@ def _table_score(
             reasons.append("status filter needs a status column")
 
     for term, term_data in glossary_matches:
-        normalized_term = _normalize(term)
-        term_tokens = set(_tokenize(term))
-        direct_term_match = (
-            (normalized_term and normalized_term in normalized_question)
-            or (term_tokens and term_tokens <= question_terms)
-        )
+        direct_term_match = _glossary_alias_hits_question(plan.get("question", ""), term, term_data)
+        mapped_tables = _glossary_mapped_tables(term_data)
+        mapped_table_count = len(mapped_tables)
         glossary_boost = 1.1 if direct_term_match else 0.35
-        if _is_simple_primary_table_question(plan) and not direct_term_match:
-            glossary_boost = 0.15
+        if _is_simple_primary_table_question(plan):
+            if direct_term_match and mapped_table_count == 1:
+                glossary_boost = 1.35
+            elif direct_term_match and mapped_table_count == 2:
+                glossary_boost = 0.55
+            elif direct_term_match:
+                glossary_boost = 0.2
+            else:
+                glossary_boost = 0.1
         for mapping in term_data.get("mapped_columns", []):
             if mapping.get("table") == table_name:
                 score += glossary_boost
@@ -549,25 +599,38 @@ def _select_columns_for_table(
 def _preferred_primary_tables_for_simple_question(
     plan: dict[str, Any],
     scored_tables: list[tuple[str, float, list[str]]],
+    glossary_matches: list[tuple[str, dict[str, Any]]],
     vector_results: dict[str, Any] | None,
 ) -> list[str] | None:
     if not _is_simple_primary_table_question(plan) or not scored_tables:
         return None
 
     top_table, top_score, _ = scored_tables[0]
+    second_table = scored_tables[1][0] if len(scored_tables) > 1 else None
     second_score = scored_tables[1][1] if len(scored_tables) > 1 else 0.0
     question = str(plan.get("question") or "")
     has_direct_match = _table_name_matches_question(question, top_table)
     vector_table_names = list((vector_results or {}).get("table_names") or [])
     has_top_vector_match = bool(vector_table_names and vector_table_names[0] == top_table)
+    has_strong_glossary_match = _has_strong_glossary_table_match(question, top_table, glossary_matches)
+    second_has_strong_glossary_match = bool(
+        second_table
+        and _has_strong_glossary_table_match(question, second_table, glossary_matches)
+    )
 
-    if len(scored_tables) == 1 and (has_direct_match or has_top_vector_match):
+    if len(scored_tables) == 1 and (has_direct_match or has_top_vector_match or has_strong_glossary_match):
         return [top_table]
 
     if second_score <= 0:
-        return [top_table] if (has_direct_match or has_top_vector_match) else None
+        return [top_table] if (has_direct_match or has_top_vector_match or has_strong_glossary_match) else None
 
     if (has_direct_match or has_top_vector_match) and top_score >= (second_score * 1.5):
+        return [top_table]
+
+    if has_strong_glossary_match and not second_has_strong_glossary_match and top_score > second_score:
+        return [top_table]
+
+    if (has_top_vector_match or has_strong_glossary_match) and top_score >= second_score + 0.35:
         return [top_table]
 
     return None
@@ -633,6 +696,7 @@ def _build_selected_table_entries(
     preferred_primary_tables = _preferred_primary_tables_for_simple_question(
         plan,
         scored_tables,
+        glossary_matches,
         vector_results,
     )
     if preferred_primary_tables:

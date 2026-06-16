@@ -151,6 +151,40 @@ def _should_try_rule_based_first(query_context: dict[str, Any]) -> tuple[bool, s
     return True, "simple single-table question with sufficient planner confidence"
 
 
+def _needs_simple_table_clarification(query_context: dict[str, Any]) -> bool:
+    plan = query_context.get("plan") or {}
+    if str(plan.get("intent") or "") not in {"list", "count"}:
+        return False
+    if plan.get("dimension") or plan.get("grouping") or plan.get("filters") or plan.get("date_range"):
+        return False
+    if plan.get("metric"):
+        return False
+
+    selected_tables = list(query_context.get("selected_tables") or [])
+    if len(selected_tables) < 2:
+        return False
+    if _has_clear_primary_table(query_context):
+        return False
+
+    top_confidence = float(selected_tables[0].get("confidence") or 0.0)
+    second_confidence = float(selected_tables[1].get("confidence") or 0.0)
+    return top_confidence >= 0.55 and abs(top_confidence - second_confidence) < 0.12
+
+
+def _clarification_message(query_context: dict[str, Any]) -> str:
+    candidates = [
+        str(entry.get("table", "")).strip()
+        for entry in (query_context.get("selected_tables") or [])[:3]
+        if str(entry.get("table", "")).strip()
+    ]
+    if not candidates:
+        return "Question is ambiguous. Please specify which table or record type you want."
+    return (
+        "Question is ambiguous across multiple possible tables. "
+        f"Please specify one of: {', '.join(candidates)}."
+    )
+
+
 def _set_route(query_context: dict[str, Any], route_used: str, route_reason: str) -> None:
     query_context["route_used"] = route_used
     query_context["route_reason"] = route_reason
@@ -339,6 +373,13 @@ class QuestionService:
             vector_retriever=vector_retriever,
         )
         self.last_query_context = query_context
+        if _needs_simple_table_clarification(query_context):
+            _set_route(
+                query_context,
+                "fallback-failed",
+                "simple table-browse question matched multiple tables with similar confidence",
+            )
+            return False, _clarification_message(query_context), None, None
         scoped_knowledge_base = query_context.get("selected_knowledge_base", knowledge_base)
         full_knowledge_base = query_context.get("knowledge_base", knowledge_base)
         query_plan = query_context.get("plan")

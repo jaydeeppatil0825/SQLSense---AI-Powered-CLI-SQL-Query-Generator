@@ -233,6 +233,34 @@ def test_build_knowledge_base_keeps_generated_glossary_active_and_builds_vector_
     assert vector_status["persistence"]["database_name"] == "dynamic_runtime_db"
 
 
+def test_build_knowledge_base_exposes_module_summary_as_counts(monkeypatch, tmp_path):
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
+    engine = create_engine("sqlite:///:memory:")
+    metadata = MetaData()
+    Table(
+        "customer_records",
+        metadata,
+        Column("record_id", Integer, primary_key=True),
+        Column("record_name", Integer),
+    )
+    metadata.create_all(engine)
+
+    service = DatabaseService()
+    service.engine = engine
+    service.db_config = {"db_type": "sqlite", "sqlite_path": ":memory:"}
+
+    monkeypatch.setattr("core.database_service.save_json", lambda data, path: None)
+    monkeypatch.setattr("core.database_service.save_business_glossary", lambda glossary, path: None)
+
+    success, message, knowledge_base = service.build_knowledge_base(use_ai_enrichment=False)
+
+    assert success is True
+    summary = service.get_last_build_summary()
+    assert isinstance(summary["modules_detected"], dict)
+    assert summary["modules_detected"]
+    assert sum(summary["modules_detected"].values()) == len(knowledge_base)
+
+
 def test_database_service_loads_persisted_index_when_fresh(monkeypatch, tmp_path):
     monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
     monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))

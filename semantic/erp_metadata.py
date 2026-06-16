@@ -7,6 +7,7 @@ staying schema-driven and database-agnostic.
 
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
 import re
 from typing import Any
@@ -319,11 +320,9 @@ def enrich_knowledge_base_for_erp(knowledge_base: dict[str, Any]) -> dict[str, A
 
 def summarize_knowledge_base(knowledge_base: dict[str, Any]) -> dict[str, Any]:
     enriched = enrich_knowledge_base_for_erp(knowledge_base)
-    modules_detected = sorted(
-        {
-            str(table_data.get("module", "reference"))
-            for table_data in enriched.values()
-        }
+    module_counts = Counter(
+        str(table_data.get("module", "reference"))
+        for table_data in enriched.values()
     )
     relationship_signatures = {
         (
@@ -343,9 +342,32 @@ def summarize_knowledge_base(knowledge_base: dict[str, Any]) -> dict[str, Any]:
             if not table_data.get("relationships")
         ]
     )
+    low_confidence_relationships = sorted(
+        [
+            {
+                "from_table": relationship.get("from_table"),
+                "from_column": relationship.get("from_column"),
+                "to_table": relationship.get("to_table"),
+                "to_column": relationship.get("to_column"),
+                "confidence": relationship.get("confidence"),
+                "source": relationship.get("source"),
+            }
+            for table_data in enriched.values()
+            for relationship in table_data.get("relationships", [])
+            if relationship.get("direction") != "incoming"
+            and float(relationship.get("confidence") or 0.0) < 0.9
+        ],
+        key=lambda item: (
+            str(item.get("from_table", "")),
+            str(item.get("from_column", "")),
+            str(item.get("to_table", "")),
+            str(item.get("to_column", "")),
+        ),
+    )
     return {
         "table_count": len(enriched),
-        "modules_detected": modules_detected,
+        "modules_detected": dict(sorted(module_counts.items())),
         "relationship_count": len(relationship_signatures),
+        "low_confidence_relationships": low_confidence_relationships,
         "tables_with_missing_relationships": tables_with_missing_relationships,
     }

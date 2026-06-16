@@ -1,0 +1,18 @@
+{
+  "built_at": "2026-06-16T12:59:14.368844+00:00",
+  "created_at": "2026-06-16T12:59:14.368844+00:00",
+  "database_name": "",
+  "database_type": "",
+  "document_count": 4,
+  "embedding": {
+    "backend": "fallback",
+    "configured_backend": "unsupported",
+    "configured_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "dimension": 384,
+    "model": "deterministic-hash"
+  },
+  "glossary_hash": "6aeb1ae0932a161742bd4e5d870790228bf9e7fcb8f0dbae02f7a8a102152f28",
+  "knowledge_base_hash": "38c60c53139c710e020160de63d66858ef188a720e0a414ce7d41c5e460446e5",
+  "schema_fingerprint": "68cd15dbe8249ecd7c577a2ba21f4fa4b66fd4b6156b071251c6c15dc37be153",
+  "schema_version": 1
+}
