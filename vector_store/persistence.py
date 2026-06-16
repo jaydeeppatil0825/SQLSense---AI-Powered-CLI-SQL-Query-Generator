@@ -9,7 +9,8 @@ persists the derived search layer so it can be reused across CLI sessions.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -271,7 +272,12 @@ class VectorIndexPersistence:
         }
 
     def _content_hash(self, data: Any) -> str:
-        serialized = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
+        serialized = json.dumps(
+            self._json_safe(data),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     def _read_json(self, path: Path) -> Any:
@@ -280,7 +286,42 @@ class VectorIndexPersistence:
     def _write_json_atomic(self, path: Path, data: Any) -> None:
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         tmp_path.write_text(
-            json.dumps(data, indent=2, sort_keys=True, ensure_ascii=True),
+            json.dumps(self._json_safe(data), indent=2, sort_keys=True, ensure_ascii=True),
             encoding="utf-8",
         )
         tmp_path.replace(path)
+
+    def _json_safe(self, value: Any) -> Any:
+        """Recursively convert runtime metadata into JSON-safe structures."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+
+        if isinstance(value, Decimal):
+            return str(value)
+
+        if isinstance(value, bytes):
+            try:
+                return value.decode("utf-8")
+            except UnicodeDecodeError:
+                return value.hex()
+
+        if isinstance(value, dict):
+            return {
+                str(key): self._json_safe(item)
+                for key, item in value.items()
+            }
+
+        if isinstance(value, (list, tuple)):
+            return [self._json_safe(item) for item in value]
+
+        if isinstance(value, set):
+            sanitized_items = [self._json_safe(item) for item in value]
+            return sorted(
+                sanitized_items,
+                key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=True),
+            )
+
+        return str(value)

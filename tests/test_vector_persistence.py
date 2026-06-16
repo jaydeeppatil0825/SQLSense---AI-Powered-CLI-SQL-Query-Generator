@@ -1,5 +1,8 @@
 """Tests for persistent vector index storage."""
 
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
 from vector_store import EmbeddingService, VectorIndexBuilder, VectorIndexPersistence
 
 
@@ -248,3 +251,66 @@ def test_vector_index_persistence_detects_schema_fingerprint_change(monkeypatch,
     )
     assert inspection["fresh"] is False
     assert inspection["stale_reason"] == "schema fingerprint changed"
+
+
+def test_vector_index_persistence_sanitizes_runtime_metadata(monkeypatch, tmp_path):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    service = EmbeddingService()
+    persistence = VectorIndexPersistence(tmp_path / "vector_index")
+
+    knowledge_base = _sample_knowledge_base()
+    glossary = _sample_glossary()
+    documents = [
+        {
+            "text": "Runtime metadata document",
+            "metadata": {
+                "table_name": "stock_positions",
+                "sample_date": date(2026, 6, 16),
+                "sample_datetime": datetime(2026, 6, 16, 12, 30, 45, tzinfo=timezone.utc),
+                "sample_decimal": Decimal("123.45"),
+                "sample_bytes": b"warehouse-a",
+                "nested": {
+                    "values": [Decimal("9.99"), date(2026, 6, 1)],
+                    "tuple_values": ("alpha", datetime(2026, 6, 16, 8, 0, 0)),
+                    "set_values": {"north", "south"},
+                },
+            },
+            "embedding": [0.1] * int(service.get_dimension() or 0),
+            "tokenized_text": ["runtime", "metadata"],
+        }
+    ]
+
+    saved, message, save_details = persistence.save_documents(
+        documents,
+        knowledge_base,
+        glossary,
+        service,
+        source_context=_source_context(),
+    )
+    assert saved is True
+    assert "Saved" in message
+    assert save_details["persisted"] is True
+
+    raw_documents = persistence._read_json(persistence.documents_path)
+    assert raw_documents[0]["metadata"]["sample_date"] == "2026-06-16"
+    assert raw_documents[0]["metadata"]["sample_datetime"] == "2026-06-16T12:30:45+00:00"
+    assert raw_documents[0]["metadata"]["sample_decimal"] == "123.45"
+    assert raw_documents[0]["metadata"]["sample_bytes"] == "warehouse-a"
+    assert raw_documents[0]["metadata"]["nested"]["values"] == ["9.99", "2026-06-01"]
+    assert raw_documents[0]["metadata"]["nested"]["tuple_values"] == ["alpha", "2026-06-16T08:00:00"]
+    assert raw_documents[0]["metadata"]["nested"]["set_values"] == ["north", "south"]
+
+    loaded, load_message, loaded_documents, load_details = persistence.load_documents(
+        knowledge_base,
+        glossary,
+        service,
+        source_context=_source_context(),
+    )
+    assert loaded is True
+    assert "Loaded" in load_message
+    assert load_details["loaded_from_disk"] is True
+    assert load_details["source"] == "disk"
+    assert loaded_documents[0]["metadata"]["sample_date"] == "2026-06-16"
+    assert loaded_documents[0]["metadata"]["sample_datetime"] == "2026-06-16T12:30:45+00:00"
+    assert loaded_documents[0]["metadata"]["sample_decimal"] == "123.45"
+    assert loaded_documents[0]["metadata"]["nested"]["values"] == ["9.99", "2026-06-01"]
