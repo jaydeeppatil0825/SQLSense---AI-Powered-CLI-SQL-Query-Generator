@@ -196,3 +196,110 @@ def test_prompt_includes_selected_columns_and_plan_execution_rules():
     assert "semantic_type=money" in system_message
     assert "Computed join paths between selected tables:" in system_message
     assert "invoice_headers.client_id = client_directory.client_id" in system_message
+
+
+def test_prompt_includes_bridge_table_schema_and_join_predicates_for_grouped_query():
+    knowledge_base = {
+        "entity_groups": {
+            "columns": [
+                {"name": "entity_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "display_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["entity_id"],
+            "foreign_keys": [],
+        },
+        "link_records": {
+            "columns": [
+                {"name": "entity_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "event_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            ],
+            "primary_keys": [],
+            "foreign_keys": [
+                {"column": "entity_id", "referenced_table": "entity_groups", "referenced_column": "entity_id"},
+                {"column": "event_id", "referenced_table": "measure_events", "referenced_column": "event_id"},
+            ],
+        },
+        "measure_events": {
+            "columns": [
+                {"name": "event_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "amount_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+                {"name": "state_flag", "type": "VARCHAR(30)", "nullable": True, "semantic_type": "status"},
+            ],
+            "primary_keys": ["event_id"],
+            "foreign_keys": [],
+        },
+    }
+    selected_tables = [
+        {
+            "table": "entity_groups",
+            "confidence": 0.92,
+            "reason": "dimension table",
+            "selected_columns": [{"column": "display_label", "semantic_type": "name"}],
+        },
+        {
+            "table": "link_records",
+            "confidence": 0.76,
+            "reason": "required bridge",
+            "selected_columns": [
+                {"column": "entity_id", "semantic_type": "id"},
+                {"column": "event_id", "semantic_type": "id"},
+            ],
+        },
+        {
+            "table": "measure_events",
+            "confidence": 0.9,
+            "reason": "measure table",
+            "selected_columns": [
+                {"column": "amount_value", "semantic_type": "money"},
+                {"column": "state_flag", "semantic_type": "status"},
+            ],
+        },
+    ]
+    join_paths = [
+        {
+            "from_table": "entity_groups",
+            "to_table": "measure_events",
+            "path": [
+                {
+                    "from_table": "entity_groups",
+                    "from_column": "entity_id",
+                    "to_table": "link_records",
+                    "to_column": "entity_id",
+                    "join_condition": "entity_groups.entity_id = link_records.entity_id",
+                },
+                {
+                    "from_table": "link_records",
+                    "from_column": "event_id",
+                    "to_table": "measure_events",
+                    "to_column": "event_id",
+                    "join_condition": "link_records.event_id = measure_events.event_id",
+                },
+            ],
+            "length": 2,
+        }
+    ]
+
+    messages = build_sql_prompt(
+        "show open amount by entity",
+        knowledge_base,
+        query_plan={
+            "intent": "list",
+            "metric": "money",
+            "dimension": "entity",
+            "filters": [{"type": "status", "table": "measure_events", "column": "state_flag", "value": "open"}],
+            "date_range": None,
+            "grouping": ["entity"],
+            "sorting": None,
+            "limit": 50,
+            "semantic_hints": {"money", "status"},
+            "matched_glossary_terms": [],
+        },
+        selected_tables=selected_tables,
+        join_paths=join_paths,
+    )
+    system_message = messages[0]["content"]
+
+    assert "TABLE: link_records" in system_message
+    assert "entity_groups.entity_id = link_records.entity_id" in system_message
+    assert "link_records.event_id = measure_events.event_id" in system_message
+    assert "entity_groups.display_label [name]" in system_message

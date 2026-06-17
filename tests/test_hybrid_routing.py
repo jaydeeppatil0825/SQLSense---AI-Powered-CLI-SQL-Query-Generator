@@ -805,3 +805,83 @@ def test_ambiguous_simple_table_match_returns_clean_clarification(monkeypatch):
     assert success is False
     assert sql is None
     assert "Please specify one of" in message
+
+
+BRIDGE_KB = {
+    "entity_groups": {
+        "columns": [
+            {"name": "entity_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "display_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+        ],
+        "primary_keys": ["entity_id"],
+        "foreign_keys": [],
+        "relationships": [],
+    },
+    "link_records": {
+        "columns": [
+            {"name": "link_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "entity_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "event_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+        ],
+        "primary_keys": ["link_id"],
+        "foreign_keys": [
+            {"column": "entity_id", "referenced_table": "entity_groups", "referenced_column": "entity_id"},
+            {"column": "event_id", "referenced_table": "measure_events", "referenced_column": "event_id"},
+        ],
+        "relationships": [],
+    },
+    "measure_events": {
+        "columns": [
+            {"name": "event_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "amount_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+            {"name": "state_flag", "type": "VARCHAR(30)", "nullable": True, "semantic_type": "status", "sample_values": ["open", "closed"]},
+        ],
+        "primary_keys": ["event_id"],
+        "foreign_keys": [],
+        "relationships": [],
+    },
+}
+
+
+def test_complex_grouped_amount_query_promotes_bridge_table_into_ai_context():
+    context = build_query_context("show open amount by entity", BRIDGE_KB, use_vector_retrieval=False)
+
+    assert "entity_groups" in context["selected_table_names"]
+    assert "measure_events" in context["selected_table_names"]
+    assert "link_records" in context["selected_table_names"]
+    assert set(context["selected_knowledge_base"]) >= {"entity_groups", "link_records", "measure_events"}
+
+    bridge_entry = next(entry for entry in context["selected_tables"] if entry["table"] == "link_records")
+    bridge_columns = {column["column"] for column in bridge_entry["selected_columns"]}
+    assert {"entity_id", "event_id"} <= bridge_columns
+
+    display_entry = next(entry for entry in context["selected_tables"] if entry["table"] == "entity_groups")
+    assert display_entry["selected_columns"][0]["column"] == "display_label"
+
+    join_conditions = [
+        edge["join_condition"]
+        for join_path in context["join_paths"]
+        for edge in join_path["path"]
+    ]
+    assert (
+        "entity_groups.entity_id = link_records.entity_id" in join_conditions
+        or "link_records.entity_id = entity_groups.entity_id" in join_conditions
+    )
+    assert (
+        "link_records.event_id = measure_events.event_id" in join_conditions
+        or "measure_events.event_id = link_records.event_id" in join_conditions
+    )
+
+
+def test_complex_grouped_amount_empty_from_is_rejected_with_clean_failure(monkeypatch):
+    service = QuestionService()
+    monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: "SELECT display_label, SUM(amount_value) AS total_amount FROM")
+    monkeypatch.setattr("core.question_service.generate_sql_with_retry", lambda *args, **kwargs: "SELECT display_label, SUM(amount_value) AS total_amount FROM")
+
+    success, message, sql, error = service.process_question("show open amount by entity", BRIDGE_KB, ai_backend="local")
+
+    assert success is False
+    assert sql is None
+    assert "missing a table name after FROM" in message
+    assert "Generated SQL: SELECT display_label, SUM(amount_value) AS total_amount FROM" in error
+    assert "Relevant table candidates" in error

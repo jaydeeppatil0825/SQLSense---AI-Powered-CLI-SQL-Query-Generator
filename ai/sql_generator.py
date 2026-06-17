@@ -481,7 +481,7 @@ def generate_sql_with_retry(
         "Correct the SQL so it follows the plan, selected tables, selected relationships, glossary context, and safety rules. "
         "Use only allowed tables and columns from the schema context. "
         "Qualify columns with table aliases when more than one table is used. "
-        "Output complete SQL only, no ellipsis, no placeholder FROM, no incomplete JOIN."
+        "Output complete SQL only, with valid FROM and JOIN clauses, no ellipsis, no placeholder FROM, no incomplete JOIN."
     )
 
     messages = [

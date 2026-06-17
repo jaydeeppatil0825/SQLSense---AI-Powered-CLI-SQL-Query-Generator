@@ -319,13 +319,15 @@ def _format_generation_failure(
         for entry in retry_context["selected_columns"]
         if entry.get("table") and entry.get("column")
     ) or "none"
+    join_candidates = ", ".join(retry_context.get("join_conditions") or []) or "none"
     return (
         "Could not generate a valid SQL query.\n"
         f"Question: {question}\n"
         f"Generated SQL: {generated_sql or '(empty)'}\n"
         f"Validation reason: {validation_reason}\n"
         f"Relevant table candidates: {table_candidates}\n"
-        f"Relevant column candidates: {column_candidates}"
+        f"Relevant column candidates: {column_candidates}\n"
+        f"Relevant join candidates: {join_candidates}"
     )
 
 
