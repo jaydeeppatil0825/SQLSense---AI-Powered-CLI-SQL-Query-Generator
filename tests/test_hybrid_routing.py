@@ -890,6 +890,54 @@ def test_complex_grouped_amount_empty_from_is_repaired_from_join_paths(monkeypat
     assert service.get_last_query_context()["route_used"] == "deterministic-repair"
 
 
+def test_grouped_amount_repair_uses_metric_table_not_dimension_money_column(monkeypatch):
+    knowledge_base = {
+        "entity_groups": {
+            "columns": [
+                {"name": "entity_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "display_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+                {"name": "allowed_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+            ],
+            "primary_keys": ["entity_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "link_records": BRIDGE_KB["link_records"],
+        "measure_events": {
+            "columns": [
+                {"name": "event_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+                {"name": "settled_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+                {
+                    "name": "state_flag",
+                    "type": "VARCHAR(30)",
+                    "nullable": True,
+                    "semantic_type": "status",
+                    "sample_values": ["open", "closed"],
+                },
+            ],
+            "primary_keys": ["event_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    service = QuestionService()
+    monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: "SELECT display_label, SUM(billed_value) AS total_amount FROM")
+    monkeypatch.setattr("core.question_service.generate_sql_with_retry", lambda *args, **kwargs: "SELECT display_label, SUM(billed_value) AS total_amount FROM")
+
+    success, message, sql, error = service.process_question("show open billed amount by entity", knowledge_base, ai_backend="local")
+
+    assert success is True
+    assert error is None
+    assert "FROM entity_groups" in sql
+    assert "JOIN link_records" in sql
+    assert "JOIN measure_events" in sql
+    assert "SUM((measure_events.billed_value - COALESCE(measure_events.settled_value, 0)))" in sql
+    assert "entity_groups.allowed_value" not in sql
+    assert "GROUP BY entity_groups.display_label" in sql
+    assert service.get_last_query_context()["route_used"] == "deterministic-repair"
+
+
 def test_complex_grouped_amount_empty_from_fails_cleanly_without_join_path(monkeypatch):
     broken_kb = {
         "entity_groups": BRIDGE_KB["entity_groups"],

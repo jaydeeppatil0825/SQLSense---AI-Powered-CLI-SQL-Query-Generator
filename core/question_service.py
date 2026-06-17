@@ -407,10 +407,22 @@ def _semantic_type_for_column(knowledge_base: dict[str, Any], table_name: str, c
     return "general"
 
 
+def _question_terms(query_context: dict[str, Any]) -> set[str]:
+    plan = query_context.get("plan") or {}
+    terms = set(plan.get("question_terms") or [])
+    question = str(plan.get("question") or "")
+    terms.update(token for token in re.split(r"[^a-z0-9]+", question.lower()) if token)
+    return terms
+
+
+def _identifier_tokens(value: str) -> set[str]:
+    return {token for token in re.split(r"[^a-z0-9]+", str(value or "").lower()) if token}
+
+
 def _find_dimension_column(query_context: dict[str, Any]) -> dict[str, Any] | None:
     plan = query_context.get("plan") or {}
     dimension = str(plan.get("dimension") or "").strip()
-    dimension_tokens = {token for token in re.split(r"[^a-z0-9]+", dimension.lower()) if token}
+    dimension_tokens = _identifier_tokens(dimension)
     selected_columns = list(query_context.get("selected_columns") or [])
 
     ranked: list[tuple[float, dict[str, Any]]] = []
@@ -418,8 +430,8 @@ def _find_dimension_column(query_context: dict[str, Any]) -> dict[str, Any] | No
         table_name = str(entry.get("table") or "")
         column_name = str(entry.get("column") or "")
         semantic_type = str(entry.get("semantic_type") or "").lower()
-        table_tokens = {token for token in re.split(r"[^a-z0-9]+", table_name.lower()) if token}
-        column_tokens = {token for token in re.split(r"[^a-z0-9]+", column_name.lower()) if token}
+        table_tokens = _identifier_tokens(table_name)
+        column_tokens = _identifier_tokens(column_name)
 
         score = float(entry.get("confidence") or 0.0)
         if dimension_tokens and (dimension_tokens & table_tokens):
@@ -440,20 +452,93 @@ def _find_dimension_column(query_context: dict[str, Any]) -> dict[str, Any] | No
     return ranked[0][1] if ranked else None
 
 
-def _find_measure_column(query_context: dict[str, Any]) -> dict[str, Any] | None:
+def _find_measure_column(
+    query_context: dict[str, Any],
+    dimension_column: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     selected_columns = list(query_context.get("selected_columns") or [])
+    question_terms = _question_terms(query_context)
+    dimension_table = str((dimension_column or {}).get("table") or "")
     ranked: list[tuple[float, dict[str, Any]]] = []
     for entry in selected_columns:
+        table_name = str(entry.get("table") or "")
+        column_name = str(entry.get("column") or "")
         semantic_type = str(entry.get("semantic_type") or "").lower()
         if semantic_type not in {"money", "quantity", "percentage"}:
             continue
         score = float(entry.get("confidence") or 0.0)
         if semantic_type == "money":
             score += 0.3
+        table_tokens = _identifier_tokens(table_name)
+        column_tokens = _identifier_tokens(column_name)
+        score += 1.2 * len(column_tokens & question_terms)
+        score += 0.5 * len(table_tokens & question_terms)
+        if table_name and table_name == dimension_table:
+            score -= 1.5
+        if _join_path_between(query_context, dimension_table, table_name) is not None:
+            score += 0.8
         ranked.append((score, entry))
 
     ranked.sort(key=lambda item: (-item[0], str(item[1].get("table")), str(item[1].get("column"))))
     return ranked[0][1] if ranked else None
+
+
+def _money_columns_for_table(query_context: dict[str, Any], table_name: str) -> list[dict[str, Any]]:
+    columns = []
+    for entry in query_context.get("selected_columns") or []:
+        if str(entry.get("table") or "") != table_name:
+            continue
+        if str(entry.get("semantic_type") or "").lower() == "money":
+            columns.append(entry)
+    columns.sort(key=lambda entry: (-float(entry.get("confidence") or 0.0), str(entry.get("column") or "")))
+    return columns
+
+
+def _has_same_table_state_context(query_context: dict[str, Any], table_name: str) -> bool:
+    plan = query_context.get("plan") or {}
+    for filter_data in plan.get("filters") or []:
+        if str(filter_data.get("table") or "") == table_name:
+            return True
+    for entry in query_context.get("selected_columns") or []:
+        if str(entry.get("table") or "") != table_name:
+            continue
+        if str(entry.get("semantic_type") or "").lower() == "status":
+            return True
+    return False
+
+
+def _measure_expression(
+    query_context: dict[str, Any],
+    measure_column: dict[str, Any],
+) -> tuple[str | None, str]:
+    table_name = str(measure_column.get("table") or "")
+    column_name = str(measure_column.get("column") or "")
+    primary_sql = _qualified_column(table_name, column_name)
+    if not primary_sql:
+        return None, "total_value"
+
+    semantic_type = str(measure_column.get("semantic_type") or "").lower()
+    if semantic_type != "money" or not _has_same_table_state_context(query_context, table_name):
+        alias = f"total_{column_name}" if _is_safe_sql_identifier(column_name) else "total_value"
+        return primary_sql, alias
+
+    money_columns = [
+        entry
+        for entry in _money_columns_for_table(query_context, table_name)
+        if str(entry.get("column") or "") != column_name
+    ]
+    if len(money_columns) != 1:
+        alias = f"total_{column_name}" if _is_safe_sql_identifier(column_name) else "total_value"
+        return primary_sql, alias
+
+    secondary_name = str(money_columns[0].get("column") or "")
+    secondary_sql = _qualified_column(table_name, secondary_name)
+    if not secondary_sql:
+        alias = f"total_{column_name}" if _is_safe_sql_identifier(column_name) else "total_value"
+        return primary_sql, alias
+
+    alias = f"remaining_{column_name}" if _is_safe_sql_identifier(column_name) else "remaining_value"
+    return f"({primary_sql} - COALESCE({secondary_sql}, 0))", alias
 
 
 def _is_simple_repair_blocked(query_context: dict[str, Any]) -> bool:
@@ -503,7 +588,7 @@ def _build_joined_aggregate_repair_sql(query_context: dict[str, Any], knowledge_
         return None
 
     dimension_column = _find_dimension_column(query_context)
-    measure_column = _find_measure_column(query_context)
+    measure_column = _find_measure_column(query_context, dimension_column)
     if not dimension_column or not measure_column:
         return None
 
@@ -512,7 +597,7 @@ def _build_joined_aggregate_repair_sql(query_context: dict[str, Any], knowledge_
     measure_table = str(measure_column.get("table") or "")
     measure_name = str(measure_column.get("column") or "")
     dimension_sql = _qualified_column(dimension_table, dimension_name)
-    measure_sql = _qualified_column(measure_table, measure_name)
+    measure_sql, alias = _measure_expression(query_context, measure_column)
     if not dimension_sql or not measure_sql:
         return None
 
@@ -558,7 +643,6 @@ def _build_joined_aggregate_repair_sql(query_context: dict[str, Any], knowledge_
             continue
         where_clauses.append(f"{qualified} = {_sql_literal(filter_data.get('value'))}")
 
-    alias = f"total_{measure_name}" if _is_safe_sql_identifier(measure_name) else "total_value"
     sql_parts = [
         f"SELECT {dimension_sql} AS group_value, SUM({measure_sql}) AS {alias}",
         f"FROM {dimension_table}",
