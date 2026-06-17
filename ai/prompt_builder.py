@@ -21,6 +21,11 @@ from semantic.business_glossary import load_business_glossary
 
 _QUERY_RULES = """
 SQL query construction rules:
+  - The first non-whitespace characters in the output must be SELECT.
+  - SELECT must include at least one valid column, expression, or aggregate.
+  - FROM must name a real table from the schema context.
+  - Every JOIN must name a real table and include an ON predicate unless it is an explicit CROSS JOIN.
+  - JOIN ON predicates must use existing columns on both joined tables.
   - Use COUNT(*) or COUNT(column) when the user asks "how many".
   - Use SUM(column) when the user asks for total, amount, balance, or quantity.
   - Use AVG(column) when the user asks for average.
@@ -29,6 +34,7 @@ SQL query construction rules:
   - Add ORDER BY <alias or aggregate> DESC when the user asks "top", "highest", or "most".
   - Add ORDER BY <alias or aggregate> ASC when the user asks "lowest", "least", or "fewest".
   - ORDER BY must reference a selected column or alias.
+  - WHERE, GROUP BY, HAVING, and ORDER BY must use only schema columns or selected aliases.
   - Use WHERE to filter by status, date range, value, or any explicit condition from the prompt context.
   - Use JOIN only when a listed relationship supports it.
   - Never invent table names or column names.
@@ -40,8 +46,9 @@ SQL query construction rules:
 _SAFETY_RULES = """
 Safety rules:
   - Return ONLY a single SELECT statement.
-  - Do NOT use: INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, REPLACE.
-  - Do NOT include markdown fences, backticks, comments, or explanations.
+  - Do NOT use: INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, REPLACE, GRANT, REVOKE.
+  - Do NOT include markdown fences, comments, or explanations.
+  - Use MySQL identifier quoting only when an actual schema identifier requires it.
   - Do NOT include multiple statements separated by semicolons.
   - A trailing semicolon on the final statement is allowed.
 """.strip()

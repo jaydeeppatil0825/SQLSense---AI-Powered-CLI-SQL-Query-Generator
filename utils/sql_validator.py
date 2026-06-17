@@ -23,6 +23,8 @@ _FORBIDDEN_KEYWORDS = [
     "REPLACE",
     "EXEC",
     "EXECUTE",
+    "GRANT",
+    "REVOKE",
 ]
 
 _CLAUSE_KEYWORDS = {
@@ -33,21 +35,22 @@ _CLAUSE_KEYWORDS = {
 _INVALID_TABLE_START_KEYWORDS = {
     "WHERE", "GROUP", "ORDER", "LIMIT", "HAVING", "JOIN", "ON", "USING",
     "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "NATURAL", "UNION", "BY",
+    "SELECT",
 }
 _SQL_FUNCTIONS = {
     "COUNT", "SUM", "AVG", "MIN", "MAX", "DATE_FORMAT", "DATE", "YEAR", "MONTH",
     "DAY", "NOW", "CURDATE", "COALESCE", "IFNULL", "ROUND", "CAST", "UPPER",
-    "LOWER", "TRIM", "SUBSTRING", "CONCAT", "ABS",
+    "LOWER", "TRIM", "SUBSTRING", "CONCAT", "ABS", "IF", "NULLIF",
 }
 _SQL_KEYWORDS = {
     "SELECT", "FROM", "WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER",
     "FULL", "CROSS", "NATURAL", "ON", "USING", "GROUP", "ORDER", "BY",
     "HAVING", "LIMIT", "OFFSET", "UNION", "ALL", "DISTINCT", "AS",
     "CASE", "WHEN", "THEN", "ELSE", "END", "AND", "OR", "NOT", "NULL", "IS",
-    "IN", "LIKE", "BETWEEN", "ASC", "DESC",
+    "IN", "LIKE", "BETWEEN", "ASC", "DESC", "TRUE", "FALSE",
 }
 _PUNCTUATION_TOKENS = {",", ";", "(", ")", ".", "*", "=", "<", ">", "<=", ">=", "!=", "<>"}
-_TOKEN_RE = re.compile(r"`[^`]+`|<=|>=|<>|!=|[(),.;=*<>]|\.|[A-Za-z_][A-Za-z0-9_]*|\d+")
+_TOKEN_RE = re.compile(r"`(?:``|[^`])+`|<=|>=|<>|!=|[(),.;=*<>]|\.|[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?")
 _PREAMBLE_PATTERNS = re.compile(
     r"^("
     r"here\s+is(\s+the)?\s+sql[\s:]*"
@@ -86,6 +89,21 @@ def _normalize_sql_response_text(sql: str) -> str:
     text = re.sub(r"```", "", text).strip()
     text = _PREAMBLE_PATTERNS.sub("", text).strip()
     return text
+
+
+def _has_output_wrapper_or_trailer(raw_sql: str, cleaned_sql: str) -> bool:
+    """Return True when the response contains text beyond the SQL statement."""
+    raw = str(raw_sql or "").strip()
+    cleaned = str(cleaned_sql or "").strip()
+    if not raw or not cleaned:
+        return False
+    if "```" in raw:
+        return True
+    if not re.match(r"^\s*SELECT\b", raw, re.IGNORECASE):
+        return True
+    if raw == cleaned:
+        return False
+    return raw.rstrip("; \t\r\n") != cleaned.rstrip("; \t\r\n")
 
 
 def clean_sql_response(sql: str) -> str:
@@ -145,12 +163,15 @@ def _strip_string_literals(sql: str) -> str:
 
 
 def _is_identifier(token: str) -> bool:
-    normalized = str(token or "").strip("`")
+    normalized = _normalize_identifier(token)
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized))
 
 
 def _normalize_identifier(token: str) -> str:
-    return str(token or "").strip("`")
+    text = str(token or "")
+    if text.startswith("`") and text.endswith("`"):
+        return text[1:-1].replace("``", "`")
+    return text
 
 
 def _tokenize_sql(sql: str) -> list[str]:
@@ -272,6 +293,125 @@ def _validate_join_conditions(sql: str) -> tuple[bool, str]:
     return True, "JOIN conditions are valid."
 
 
+def _table_columns(knowledge_base: dict[str, Any], table_name: str) -> set[str]:
+    return {
+        str(col.get("name", "")).lower()
+        for col in knowledge_base.get(table_name, {}).get("columns", [])
+    }
+
+
+def _resolve_table_for_alias(alias: str, alias_to_table: dict[str, str]) -> str | None:
+    return alias_to_table.get(str(alias or "").lower())
+
+
+def _validate_join_predicates(
+    sql: str,
+    knowledge_base: dict[str, Any],
+    alias_to_table: dict[str, str],
+) -> tuple[bool, str]:
+    """Validate JOIN ON/USING predicates against runtime schema metadata."""
+    tokens = _tokenize_sql(sql)
+    clause_boundaries = {"WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", ";"}
+    join_boundaries = {"JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "NATURAL"}
+    known_aliases = set(alias_to_table.keys())
+
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx].upper() != "JOIN":
+            idx += 1
+            continue
+
+        prev_upper = tokens[idx - 1].upper() if idx > 0 else ""
+        if prev_upper in {"CROSS", "NATURAL"}:
+            idx += 1
+            continue
+
+        cursor = idx + 1
+        while cursor < len(tokens):
+            cursor_upper = tokens[cursor].upper()
+            if cursor_upper in {"ON", "USING"}:
+                break
+            if cursor_upper in clause_boundaries or cursor_upper in join_boundaries:
+                break
+            cursor += 1
+
+        if cursor >= len(tokens) or tokens[cursor].upper() not in {"ON", "USING"}:
+            idx += 1
+            continue
+
+        keyword = tokens[cursor].upper()
+        condition_start = cursor + 1
+        condition_end = condition_start
+        while condition_end < len(tokens):
+            upper = tokens[condition_end].upper()
+            if upper in clause_boundaries or upper in join_boundaries:
+                break
+            condition_end += 1
+        condition_tokens = tokens[condition_start:condition_end]
+
+        if keyword == "USING":
+            using_columns = [
+                _normalize_identifier(token).lower()
+                for token in condition_tokens
+                if _is_identifier(token) and token.upper() not in _SQL_KEYWORDS
+            ]
+            if not using_columns:
+                return False, "SQL has a JOIN USING clause without a column name."
+            for column in using_columns:
+                owner_count = sum(
+                    1
+                    for table_name in set(alias_to_table.values())
+                    if column in _table_columns(knowledge_base, table_name)
+                )
+                if owner_count < 2:
+                    return False, f"JOIN USING column '{column}' does not exist on both joined tables."
+            idx = condition_end
+            continue
+
+        saw_valid_predicate = False
+        pos = 0
+        while pos + 6 < len(condition_tokens):
+            left_alias = condition_tokens[pos]
+            left_dot = condition_tokens[pos + 1]
+            left_column = condition_tokens[pos + 2]
+            operator = condition_tokens[pos + 3]
+            right_alias = condition_tokens[pos + 4]
+            right_dot = condition_tokens[pos + 5]
+            right_column = condition_tokens[pos + 6]
+            if (
+                _is_identifier(left_alias)
+                and left_dot == "."
+                and _is_identifier(left_column)
+                and operator == "="
+                and _is_identifier(right_alias)
+                and right_dot == "."
+                and _is_identifier(right_column)
+            ):
+                left_table = _resolve_table_for_alias(_normalize_identifier(left_alias), alias_to_table)
+                right_table = _resolve_table_for_alias(_normalize_identifier(right_alias), alias_to_table)
+                left_column_name = _normalize_identifier(left_column)
+                right_column_name = _normalize_identifier(right_column)
+                if not left_table or _normalize_identifier(left_alias).lower() not in known_aliases:
+                    return False, f"Alias or table '{_normalize_identifier(left_alias)}' is not defined in JOIN predicate."
+                if not right_table or _normalize_identifier(right_alias).lower() not in known_aliases:
+                    return False, f"Alias or table '{_normalize_identifier(right_alias)}' is not defined in JOIN predicate."
+                if left_column_name.lower() not in _table_columns(knowledge_base, left_table):
+                    return False, f"JOIN predicate column '{_normalize_identifier(left_alias)}.{left_column_name}' does not exist in table '{left_table}'."
+                if right_column_name.lower() not in _table_columns(knowledge_base, right_table):
+                    return False, f"JOIN predicate column '{_normalize_identifier(right_alias)}.{right_column_name}' does not exist in table '{right_table}'."
+                saw_valid_predicate = True
+                pos += 7
+                continue
+            pos += 1
+
+        if not saw_valid_predicate:
+            return False, "JOIN ON clause must contain a valid alias.column = alias.column predicate."
+
+        idx = condition_end
+
+    return True, "JOIN predicates are valid."
+
+
 def _validate_qualified_columns(sql: str, knowledge_base: dict[str, Any], alias_to_table: dict[str, str]) -> tuple[bool, str]:
     """Validate qualified alias.column references against the schema."""
     if not knowledge_base:
@@ -317,18 +457,28 @@ def _validate_single_table_columns(sql: str, knowledge_base: dict[str, Any], ref
         match.group(1).lower()
         for match in re.finditer(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\b", select_segment, re.IGNORECASE)
     }
-    tokens = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", select_segment)
+    tokens = _tokenize_sql(select_segment)
 
-    for token in tokens:
+    for index, token in enumerate(tokens):
+        if not _is_identifier(token):
+            continue
         token_upper = token.upper()
-        token_lower = token.lower()
+        token_lower = _normalize_identifier(token).lower()
+        previous_token = tokens[index - 1] if index > 0 else ""
+        next_token = tokens[index + 1] if index + 1 < len(tokens) else ""
         if token_upper in _SQL_KEYWORDS or token_upper in _SQL_FUNCTIONS:
+            continue
+        if previous_token == "." or next_token == ".":
+            continue
+        if previous_token.upper() == "AS":
+            continue
+        if next_token == "(":
+            continue
+        if token_lower == table_name.lower():
             continue
         if token_lower in known_columns or token_lower in alias_tokens:
             continue
-        if token.isdigit():
-            continue
-        return False, f"Column '{token}' does not exist in table '{table_name}'."
+        return False, f"Column '{_normalize_identifier(token)}' does not exist in table '{table_name}'."
 
     return True, "Single-table columns are valid."
 
@@ -376,9 +526,9 @@ def _validate_unqualified_columns(
     referenced_tables: list[str],
     alias_to_table: dict[str, str],
 ) -> tuple[bool, str]:
-    """Validate unqualified identifiers in multi-table clauses against schema metadata."""
-    if len(referenced_tables) < 2:
-        return True, "Skipping multi-table unqualified column validation."
+    """Validate unqualified identifiers in clauses against schema metadata."""
+    if not referenced_tables:
+        return True, "No referenced tables to validate."
 
     masked_sql = _strip_string_literals(sql)
     select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", masked_sql, re.IGNORECASE | re.DOTALL)
@@ -393,7 +543,7 @@ def _validate_unqualified_columns(
                 continue
 
             token_upper = token.upper()
-            token_lower = token.lower()
+            token_lower = _normalize_identifier(token).lower()
             previous_token = tokens[index - 1] if index > 0 else ""
             next_token = tokens[index + 1] if index + 1 < len(tokens) else ""
 
@@ -414,7 +564,21 @@ def _validate_unqualified_columns(
             if len(matches) > 1:
                 return False, f"Column '{token}' in {clause_name} is ambiguous across tables: {', '.join(matches)}."
 
-    return True, "Unqualified multi-table columns are valid."
+    return True, "Unqualified columns are valid."
+
+
+def _validate_select_list(sql: str) -> tuple[bool, str]:
+    match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", sql, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return False, "SQL SELECT list is missing or incomplete."
+    select_segment = match.group(1).strip()
+    if not select_segment:
+        return False, "SQL SELECT list is empty."
+    if select_segment.endswith(","):
+        return False, "SQL SELECT list has a dangling comma."
+    if not _split_select_expressions(select_segment):
+        return False, "SQL SELECT list does not contain a valid expression."
+    return True, "SELECT list is valid."
 
 
 def _split_select_expressions(select_segment: str) -> list[str]:
@@ -516,7 +680,7 @@ def _looks_like_sql_trailer(text: str) -> bool:
         re.search(
             r"\b("
             r"SELECT|WITH|UNION|FROM|JOIN|WHERE|GROUP|ORDER|HAVING|LIMIT|"
-            r"DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|CREATE|RECREATE|REPLACE|EXEC|EXECUTE"
+            r"DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|CREATE|RECREATE|REPLACE|EXEC|EXECUTE|GRANT|REVOKE"
             r")\b",
             trailer,
             re.IGNORECASE,
@@ -610,6 +774,9 @@ def validate_sql(sql: str) -> tuple[bool, str]:
     inner = stripped[:-1] if stripped.endswith(";") else stripped
     if ";" in inner or _looks_like_sql_trailer(trailing):
         return False, "Multiple SQL statements are not allowed."
+
+    if _has_output_wrapper_or_trailer(sql, stripped):
+        return False, "SQL output contains explanation text, markdown, or non-SQL content outside the SELECT statement."
 
     return True, "SQL is safe"
 
@@ -728,6 +895,9 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
     if not stripped.upper().startswith("SELECT"):
         return False, "SQL does not start with SELECT."
 
+    if _has_output_wrapper_or_trailer(sql, stripped):
+        return False, "SQL output contains explanation text, markdown, or non-SQL content outside the SELECT statement."
+
     # Check 2: comments are not allowed in generated SQL.
     if _contains_sql_comment(stripped):
         return False, "SQL contains comments."
@@ -746,6 +916,10 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
     if re.search(r"\bORDER\s+BY\s*(?:LIMIT\b|;|$)", stripped, re.IGNORECASE):
         return False, "SQL has an incomplete ORDER BY clause."
 
+    select_ok, select_reason = _validate_select_list(stripped)
+    if not select_ok:
+        return False, select_reason
+
     # Check 7: verify table names after FROM and JOIN exist in knowledge base.
     if knowledge_base:
         table_ok, table_reason, referenced_tables, alias_to_table = _extract_table_references(stripped, knowledge_base)
@@ -755,6 +929,10 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
         join_ok, join_reason = _validate_join_conditions(stripped)
         if not join_ok:
             return False, join_reason
+
+        predicate_ok, predicate_reason = _validate_join_predicates(stripped, knowledge_base, alias_to_table)
+        if not predicate_ok:
+            return False, predicate_reason
 
         if re.search(r"\bSELECT\s+(?:\w+\.)?\*", stripped, re.IGNORECASE):
             for table_name in referenced_tables:

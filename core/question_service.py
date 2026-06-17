@@ -43,6 +43,38 @@ def _looks_like_generic_select(sql: str) -> bool:
     return bool(_GENERIC_SELECT_RE.match(str(sql or "").strip()))
 
 
+def _scope_glossary_to_knowledge_base(
+    business_glossary: Optional[Dict[str, Any]],
+    knowledge_base: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Keep glossary mappings that belong to the active runtime schema only."""
+    if not business_glossary:
+        return business_glossary
+
+    active_tables = {str(table_name) for table_name in (knowledge_base or {}).keys()}
+    if not active_tables:
+        return None
+
+    scoped: Dict[str, Any] = {}
+    for term, term_data in business_glossary.items():
+        if not isinstance(term_data, dict):
+            continue
+
+        mappings = [
+            mapping
+            for mapping in (term_data.get("mapped_columns") or [])
+            if str(mapping.get("table", "")).strip() in active_tables
+        ]
+        if not mappings:
+            continue
+
+        scoped_term = dict(term_data)
+        scoped_term["mapped_columns"] = mappings
+        scoped[term] = scoped_term
+
+    return scoped
+
+
 def _estimate_generation_confidence(sql: str, query_context: dict[str, Any]) -> tuple[float, list[str], str]:
     if _looks_like_generic_select(sql):
         return (
@@ -567,6 +599,8 @@ class QuestionService:
         """
         if _UNSAFE_NL_RE.search(question):
             return False, "Unsafe request blocked. Only SELECT questions are allowed.", None, None
+
+        business_glossary = _scope_glossary_to_knowledge_base(business_glossary, knowledge_base)
 
         # Check for ambiguity
         if is_too_ambiguous(question):

@@ -94,7 +94,7 @@ def test_rejects_markdown_and_preamble_after_cleanup_if_sql_missing():
     sql = "```sql\nSELECT record_name FROM LIMIT 50\n```"
     ok, reason = validate_sql_structure(sql, RUNTIME_SCHEMA)
     assert ok is False
-    assert "FROM" in reason or "table name" in reason
+    assert "non-SQL content outside the SELECT" in reason
 
 
 @pytest.mark.parametrize(

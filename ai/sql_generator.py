@@ -482,6 +482,10 @@ def generate_sql_with_retry(
         "Correct the SQL so it follows the plan, selected tables, selected relationships, glossary context, and safety rules. "
         "Use only allowed tables and columns from the schema context. "
         "Qualify columns with table aliases when more than one table is used. "
+        "The first non-whitespace characters must be SELECT. "
+        "Every JOIN must include a real table and an ON predicate using existing columns on both sides. "
+        "Every non-aggregate selected expression must appear in GROUP BY. "
+        "ORDER BY must use a selected alias or valid schema column. "
         "Output complete SQL only, with valid FROM and JOIN clauses, no ellipsis, no placeholder FROM, no incomplete JOIN."
     )
 

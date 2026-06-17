@@ -72,12 +72,43 @@ class TestValidateSqlSelectPrefix:
         valid, _ = validate_sql("  SELECT 1")
         assert valid is True
 
+    def test_non_sql_text_is_rejected(self):
+        valid, msg = validate_sql("Here")
+        assert valid is False
+        assert msg == "Only SELECT queries are allowed."
+
+    def test_preamble_before_select_is_rejected(self):
+        valid, msg = validate_sql("Here is the SQL:\nSELECT id FROM alpha_records")
+        assert valid is False
+        assert "non-SQL content outside the SELECT" in msg
+
+    def test_markdown_wrapped_select_is_rejected_by_validator(self):
+        valid, msg = validate_sql("```sql\nSELECT id FROM alpha_records;\n```")
+        assert valid is False
+        assert "non-SQL content outside the SELECT" in msg
+
+    def test_trailing_explanation_after_select_is_rejected(self):
+        valid, msg = validate_sql("SELECT id FROM alpha_records;\nThis query lists rows.")
+        assert valid is False
+        assert "non-SQL content outside the SELECT" in msg
+
 
 # ---------------------------------------------------------------------------
 # validate_sql — forbidden keyword detection  (Req 8.4, 8.5)
 # ---------------------------------------------------------------------------
 
-FORBIDDEN_KEYWORDS = ["DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE", "CREATE", "RECREATE"]
+FORBIDDEN_KEYWORDS = [
+    "DROP",
+    "DELETE",
+    "UPDATE",
+    "INSERT",
+    "ALTER",
+    "TRUNCATE",
+    "CREATE",
+    "RECREATE",
+    "GRANT",
+    "REVOKE",
+]
 
 class TestValidateSqlForbiddenKeywords:
     @pytest.mark.parametrize("keyword", FORBIDDEN_KEYWORDS)
@@ -323,6 +354,36 @@ GENERIC_KB = {
 
 
 class TestValidateSqlStructure:
+    def test_rejects_raw_non_sql_text(self):
+        valid, msg = validate_sql_structure("Here", GENERIC_KB)
+
+        assert valid is False
+        assert msg == "SQL does not start with SELECT."
+
+    def test_rejects_preamble_text_before_sql(self):
+        valid, msg = validate_sql_structure(
+            "Here is the SQL:\nSELECT record_name FROM alpha_records",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "non-SQL content outside the SELECT" in msg
+
+    def test_rejects_trailing_explanation_text_after_sql(self):
+        valid, msg = validate_sql_structure(
+            "SELECT record_name FROM alpha_records;\nThis query lists records.",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "non-SQL content outside the SELECT" in msg
+
+    def test_rejects_empty_select_list(self):
+        valid, msg = validate_sql_structure("SELECT FROM alpha_records", GENERIC_KB)
+
+        assert valid is False
+        assert "SELECT list" in msg
+
     def test_from_limit_is_rejected(self):
         valid, msg = validate_sql_structure("SELECT record_name FROM LIMIT 50", GENERIC_KB)
 
@@ -343,6 +404,89 @@ class TestValidateSqlStructure:
 
         assert valid is False
         assert "does not exist in table 'alpha_records'" in msg
+
+    def test_valid_qualified_single_table_column_passes(self):
+        valid, msg = validate_sql_structure(
+            "SELECT alpha_records.record_name FROM alpha_records",
+            GENERIC_KB,
+        )
+
+        assert valid is True
+        assert msg == "SQL structure is valid"
+
+    def test_unknown_where_column_is_rejected(self):
+        valid, msg = validate_sql_structure(
+            "SELECT record_name FROM alpha_records WHERE missing_name = 'x'",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "missing_name" in msg
+
+    def test_unknown_order_by_column_is_rejected(self):
+        valid, msg = validate_sql_structure(
+            "SELECT record_name FROM alpha_records ORDER BY missing_name",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "missing_name" in msg
+
+    def test_bad_alias_usage_is_rejected(self):
+        valid, msg = validate_sql_structure(
+            "SELECT z.record_name FROM alpha_records a",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "Alias or table 'z'" in msg
+
+    def test_join_on_unknown_left_column_is_rejected(self):
+        valid, msg = validate_sql_structure(
+            "SELECT a.record_name, b.event_total "
+            "FROM alpha_records a JOIN beta_events b ON a.missing_id = b.owner_id",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "JOIN predicate column 'a.missing_id'" in msg
+
+    def test_join_on_unknown_right_column_is_rejected(self):
+        valid, msg = validate_sql_structure(
+            "SELECT a.record_name, b.event_total "
+            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.missing_id",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "JOIN predicate column 'b.missing_id'" in msg
+
+    def test_join_on_without_column_equality_is_rejected(self):
+        valid, msg = validate_sql_structure(
+            "SELECT a.record_name, b.event_total "
+            "FROM alpha_records a JOIN beta_events b ON a.owner_id = 1",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "alias.column = alias.column" in msg
+
+    def test_quoted_identifiers_are_validated_against_schema(self):
+        quoted_kb = {
+            "select": {
+                "columns": [
+                    {"name": "from", "type": "VARCHAR(100)", "semantic_type": "text"},
+                    {"name": "record_id", "type": "INTEGER", "semantic_type": "id"},
+                ],
+                "primary_keys": ["record_id"],
+                "foreign_keys": [],
+            }
+        }
+
+        valid, msg = validate_sql_structure("SELECT `from` FROM `select`", quoted_kb)
+
+        assert valid is True
+        assert msg == "SQL structure is valid"
 
     def test_unknown_unqualified_column_in_multitable_query_is_rejected(self):
         valid, msg = validate_sql_structure(
