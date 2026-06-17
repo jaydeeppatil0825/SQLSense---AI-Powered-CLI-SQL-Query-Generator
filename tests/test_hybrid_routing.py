@@ -873,15 +873,37 @@ def test_complex_grouped_amount_query_promotes_bridge_table_into_ai_context():
     )
 
 
-def test_complex_grouped_amount_empty_from_is_rejected_with_clean_failure(monkeypatch):
+def test_complex_grouped_amount_empty_from_is_repaired_from_join_paths(monkeypatch):
     service = QuestionService()
     monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: "SELECT display_label, SUM(amount_value) AS total_amount FROM")
     monkeypatch.setattr("core.question_service.generate_sql_with_retry", lambda *args, **kwargs: "SELECT display_label, SUM(amount_value) AS total_amount FROM")
 
     success, message, sql, error = service.process_question("show open amount by entity", BRIDGE_KB, ai_backend="local")
 
+    assert success is True
+    assert error is None
+    assert "FROM entity_groups" in sql
+    assert "JOIN link_records" in sql
+    assert "JOIN measure_events" in sql
+    assert "SUM(measure_events.amount_value)" in sql
+    assert "GROUP BY entity_groups.display_label" in sql
+    assert service.get_last_query_context()["route_used"] == "deterministic-repair"
+
+
+def test_complex_grouped_amount_empty_from_fails_cleanly_without_join_path(monkeypatch):
+    broken_kb = {
+        "entity_groups": BRIDGE_KB["entity_groups"],
+        "measure_events": BRIDGE_KB["measure_events"],
+    }
+    service = QuestionService()
+    monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: "SELECT display_label, SUM(amount_value) AS total_amount FROM")
+    monkeypatch.setattr("core.question_service.generate_sql_with_retry", lambda *args, **kwargs: "SELECT display_label, SUM(amount_value) AS total_amount FROM")
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
+
+    success, message, sql, error = service.process_question("show open amount by entity", broken_kb, ai_backend="local")
+
     assert success is False
     assert sql is None
     assert "missing a table name after FROM" in message
     assert "Generated SQL: SELECT display_label, SUM(amount_value) AS total_amount FROM" in error
-    assert "Relevant table candidates" in error
+    assert "Relevant join candidates: none" in error

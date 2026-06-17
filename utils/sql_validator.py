@@ -417,6 +417,84 @@ def _validate_unqualified_columns(
     return True, "Unqualified multi-table columns are valid."
 
 
+def _split_select_expressions(select_segment: str) -> list[str]:
+    expressions: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in select_segment:
+        if char == "(":
+            depth += 1
+        elif char == ")" and depth > 0:
+            depth -= 1
+        if char == "," and depth == 0:
+            expression = "".join(current).strip()
+            if expression:
+                expressions.append(expression)
+            current = []
+            continue
+        current.append(char)
+    expression = "".join(current).strip()
+    if expression:
+        expressions.append(expression)
+    return expressions
+
+
+def _expression_alias(expression: str) -> str | None:
+    match = re.search(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\s*$", expression, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _expression_without_alias(expression: str) -> str:
+    return re.sub(r"\bAS\s+[A-Za-z_][A-Za-z0-9_]*\s*$", "", expression, flags=re.IGNORECASE).strip()
+
+
+def _normalize_expression(expression: str) -> str:
+    return re.sub(r"\s+", "", str(expression or "").strip().lower())
+
+
+def _validate_group_by_for_aggregates(sql: str) -> tuple[bool, str]:
+    select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", sql, re.IGNORECASE | re.DOTALL)
+    if not select_match:
+        return True, "No SELECT list found."
+
+    select_segment = _strip_string_literals(select_match.group(1))
+    expressions = _split_select_expressions(select_segment)
+    has_aggregate = any(re.search(r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\(", expression, re.IGNORECASE) for expression in expressions)
+    if not has_aggregate:
+        return True, "No aggregate GROUP BY validation needed."
+
+    non_aggregate_expressions = [
+        expression
+        for expression in expressions
+        if not re.search(r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\(", expression, re.IGNORECASE)
+        and _expression_without_alias(expression) not in {"*", ""}
+    ]
+    if not non_aggregate_expressions:
+        return True, "Aggregate query has no non-aggregate SELECT expressions."
+
+    group_match = re.search(r"\bGROUP\s+BY\s+(.*?)(?=\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|\bUNION\b|;|$)", sql, re.IGNORECASE | re.DOTALL)
+    if not group_match:
+        return False, "Aggregate queries with non-aggregate SELECT columns must include GROUP BY."
+
+    grouped_expressions = {
+        _normalize_expression(expression)
+        for expression in _split_select_expressions(_strip_string_literals(group_match.group(1)))
+    }
+
+    for expression in non_aggregate_expressions:
+        expression_without_alias = _expression_without_alias(expression)
+        alias = _expression_alias(expression)
+        normalized_expression = _normalize_expression(expression_without_alias)
+        normalized_alias = _normalize_expression(alias or "")
+        if normalized_expression in grouped_expressions or (normalized_alias and normalized_alias in grouped_expressions):
+            continue
+        return False, f"GROUP BY is missing non-aggregate SELECT expression '{expression_without_alias}'."
+
+    return True, "GROUP BY matches non-aggregate SELECT expressions."
+
+
 def _has_dangling_comma(sql: str) -> bool:
     return bool(re.search(r",\s*(FROM|WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|JOIN|;|$)", sql, re.IGNORECASE))
 
@@ -698,6 +776,10 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
         unqualified_ok, unqualified_reason = _validate_unqualified_columns(stripped, knowledge_base, referenced_tables, alias_to_table)
         if not unqualified_ok:
             return False, unqualified_reason
+
+    group_ok, group_reason = _validate_group_by_for_aggregates(stripped)
+    if not group_ok:
+        return False, group_reason
 
     if _has_dangling_comma(stripped):
         return False, "SQL contains a dangling comma before the next clause."

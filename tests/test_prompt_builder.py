@@ -302,4 +302,9 @@ def test_prompt_includes_bridge_table_schema_and_join_predicates_for_grouped_que
     assert "TABLE: link_records" in system_message
     assert "entity_groups.entity_id = link_records.entity_id" in system_message
     assert "link_records.event_id = measure_events.event_id" in system_message
+    assert (
+        "usable FROM/JOIN skeleton: FROM entity_groups "
+        "JOIN link_records ON entity_groups.entity_id = link_records.entity_id "
+        "JOIN measure_events ON link_records.event_id = measure_events.event_id"
+    ) in system_message
     assert "entity_groups.display_label [name]" in system_message

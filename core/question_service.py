@@ -237,6 +237,31 @@ def _build_validation_retry_context(query_context: dict[str, Any]) -> dict[str, 
     """Build compact dynamic schema/vector context for AI correction prompts."""
     vector_results = query_context.get("vector_results") or {}
     join_paths = list(query_context.get("join_paths") or [])
+    join_conditions = [
+        edge.get("join_condition")
+        or (
+            f"{edge.get('from_table')}.{edge.get('from_column')} = "
+            f"{edge.get('to_table')}.{edge.get('to_column')}"
+        )
+        for join_path in join_paths[:6]
+        for edge in join_path.get("path", [])
+        if edge.get("from_column") and edge.get("to_table") and edge.get("to_column")
+    ]
+    join_skeletons = []
+    for join_path in join_paths[:6]:
+        current = join_path.get("from_table")
+        if not current:
+            continue
+        parts = [f"FROM {current}"]
+        for edge in join_path.get("path", []):
+            to_table = edge.get("to_table")
+            condition = edge.get("join_condition")
+            if not condition and edge.get("from_table") and edge.get("from_column") and edge.get("to_column"):
+                condition = f"{edge.get('from_table')}.{edge.get('from_column')} = {to_table}.{edge.get('to_column')}"
+            if to_table and condition:
+                parts.append(f"JOIN {to_table} ON {condition}")
+        if len(parts) > 1:
+            join_skeletons.append(" ".join(parts))
     return {
         "selected_tables": [
             {
@@ -292,16 +317,8 @@ def _build_validation_retry_context(query_context: dict[str, Any]) -> dict[str, 
             for table_name, table_data in list((query_context.get("selected_knowledge_base") or {}).items())[:6]
         ],
         "join_paths": join_paths,
-        "join_conditions": [
-            edge.get("join_condition")
-            or (
-                f"{edge.get('from_table')}.{edge.get('from_column')} = "
-                f"{edge.get('to_table')}.{edge.get('to_column')}"
-            )
-            for join_path in join_paths[:6]
-            for edge in join_path.get("path", [])
-            if edge.get("from_column") and edge.get("to_table") and edge.get("to_column")
-        ],
+        "join_conditions": join_conditions,
+        "join_skeletons": join_skeletons,
     }
 
 
@@ -329,6 +346,196 @@ def _format_generation_failure(
         f"Relevant column candidates: {column_candidates}\n"
         f"Relevant join candidates: {join_candidates}"
     )
+
+
+def _is_safe_sql_identifier(identifier: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(identifier or "")))
+
+
+def _qualified_column(table_name: str, column_name: str) -> str | None:
+    if not _is_safe_sql_identifier(table_name) or not _is_safe_sql_identifier(column_name):
+        return None
+    return f"{table_name}.{column_name}"
+
+
+def _sql_literal(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _semantic_type_for_column(knowledge_base: dict[str, Any], table_name: str, column_name: str) -> str:
+    for column in knowledge_base.get(table_name, {}).get("columns", []):
+        if str(column.get("name", "")) == str(column_name):
+            return str(column.get("semantic_type", "general")).lower()
+    return "general"
+
+
+def _find_dimension_column(query_context: dict[str, Any]) -> dict[str, Any] | None:
+    plan = query_context.get("plan") or {}
+    dimension = str(plan.get("dimension") or "").strip()
+    dimension_tokens = {token for token in re.split(r"[^a-z0-9]+", dimension.lower()) if token}
+    selected_columns = list(query_context.get("selected_columns") or [])
+
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    for entry in selected_columns:
+        table_name = str(entry.get("table") or "")
+        column_name = str(entry.get("column") or "")
+        semantic_type = str(entry.get("semantic_type") or "").lower()
+        table_tokens = {token for token in re.split(r"[^a-z0-9]+", table_name.lower()) if token}
+        column_tokens = {token for token in re.split(r"[^a-z0-9]+", column_name.lower()) if token}
+
+        score = float(entry.get("confidence") or 0.0)
+        if dimension_tokens and (dimension_tokens & table_tokens):
+            score += 1.4
+        if dimension_tokens and (dimension_tokens & column_tokens):
+            score += 1.0
+        if semantic_type in {"name", "text", "code", "reference"}:
+            score += 1.2
+        if column_tokens & {"name", "label", "title", "display", "segment", "code"}:
+            score += 0.8
+        if semantic_type == "id":
+            score -= 0.5
+
+        if score > 0:
+            ranked.append((score, entry))
+
+    ranked.sort(key=lambda item: (-item[0], str(item[1].get("table")), str(item[1].get("column"))))
+    return ranked[0][1] if ranked else None
+
+
+def _find_measure_column(query_context: dict[str, Any]) -> dict[str, Any] | None:
+    selected_columns = list(query_context.get("selected_columns") or [])
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    for entry in selected_columns:
+        semantic_type = str(entry.get("semantic_type") or "").lower()
+        if semantic_type not in {"money", "quantity", "percentage"}:
+            continue
+        score = float(entry.get("confidence") or 0.0)
+        if semantic_type == "money":
+            score += 0.3
+        ranked.append((score, entry))
+
+    ranked.sort(key=lambda item: (-item[0], str(item[1].get("table")), str(item[1].get("column"))))
+    return ranked[0][1] if ranked else None
+
+
+def _is_simple_repair_blocked(query_context: dict[str, Any]) -> bool:
+    plan = query_context.get("plan") or {}
+    return (
+        str(plan.get("intent") or "") in {"list", "count"}
+        and not plan.get("dimension")
+        and not plan.get("grouping")
+        and not plan.get("filters")
+        and not plan.get("date_range")
+        and not (set(plan.get("semantic_hints") or set()) & {"money", "quantity", "percentage", "date", "status"})
+    )
+
+
+def _reverse_join_edge(edge: dict[str, Any]) -> dict[str, Any]:
+    from_table = edge.get("to_table")
+    from_column = edge.get("to_column")
+    to_table = edge.get("from_table")
+    to_column = edge.get("from_column")
+    return {
+        "from_table": from_table,
+        "from_column": from_column,
+        "to_table": to_table,
+        "to_column": to_column,
+        "join_condition": f"{from_table}.{from_column} = {to_table}.{to_column}",
+    }
+
+
+def _join_path_between(query_context: dict[str, Any], start_table: str, end_table: str) -> list[dict[str, Any]] | None:
+    if start_table == end_table:
+        return []
+    for join_path in query_context.get("join_paths") or []:
+        path = list(join_path.get("path") or [])
+        if join_path.get("from_table") == start_table and join_path.get("to_table") == end_table:
+            return path
+        if join_path.get("from_table") == end_table and join_path.get("to_table") == start_table:
+            return [_reverse_join_edge(edge) for edge in reversed(path)]
+    return None
+
+
+def _build_joined_aggregate_repair_sql(query_context: dict[str, Any], knowledge_base: dict[str, Any]) -> str | None:
+    """Build a conservative grouped aggregate SQL from selected schema and FK paths."""
+    plan = query_context.get("plan") or {}
+    if _is_simple_repair_blocked(query_context):
+        return None
+    if not plan.get("dimension") and not plan.get("grouping"):
+        return None
+
+    dimension_column = _find_dimension_column(query_context)
+    measure_column = _find_measure_column(query_context)
+    if not dimension_column or not measure_column:
+        return None
+
+    dimension_table = str(dimension_column.get("table") or "")
+    dimension_name = str(dimension_column.get("column") or "")
+    measure_table = str(measure_column.get("table") or "")
+    measure_name = str(measure_column.get("column") or "")
+    dimension_sql = _qualified_column(dimension_table, dimension_name)
+    measure_sql = _qualified_column(measure_table, measure_name)
+    if not dimension_sql or not measure_sql:
+        return None
+
+    path = _join_path_between(query_context, dimension_table, measure_table)
+    if path is None:
+        return None
+
+    joined_tables = {dimension_table}
+    join_clauses: list[str] = []
+    current_table = dimension_table
+    for edge in path:
+        from_table = str(edge.get("from_table") or "")
+        from_column = str(edge.get("from_column") or "")
+        to_table = str(edge.get("to_table") or "")
+        to_column = str(edge.get("to_column") or "")
+        if current_table == to_table:
+            edge = _reverse_join_edge(edge)
+            from_table = str(edge.get("from_table") or "")
+            from_column = str(edge.get("from_column") or "")
+            to_table = str(edge.get("to_table") or "")
+            to_column = str(edge.get("to_column") or "")
+        if current_table != from_table:
+            return None
+        left = _qualified_column(from_table, from_column)
+        right = _qualified_column(to_table, to_column)
+        if not left or not right or not _is_safe_sql_identifier(to_table):
+            return None
+        join_clauses.append(f"JOIN {to_table} ON {left} = {right}")
+        joined_tables.add(to_table)
+        current_table = to_table
+
+    if measure_table not in joined_tables:
+        return None
+
+    where_clauses: list[str] = []
+    for filter_data in plan.get("filters") or []:
+        table_name = str(filter_data.get("table") or "")
+        column_name = str(filter_data.get("column") or "")
+        if table_name not in joined_tables:
+            continue
+        qualified = _qualified_column(table_name, column_name)
+        if not qualified:
+            continue
+        where_clauses.append(f"{qualified} = {_sql_literal(filter_data.get('value'))}")
+
+    alias = f"total_{measure_name}" if _is_safe_sql_identifier(measure_name) else "total_value"
+    sql_parts = [
+        f"SELECT {dimension_sql} AS group_value, SUM({measure_sql}) AS {alias}",
+        f"FROM {dimension_table}",
+        *join_clauses,
+    ]
+    if where_clauses:
+        sql_parts.append("WHERE " + " AND ".join(where_clauses))
+    sql_parts.append(f"GROUP BY {dimension_sql}")
+    return " ".join(sql_parts) + ";"
 
 
 class QuestionService:  
@@ -419,6 +626,8 @@ class QuestionService:
         retry_context = _build_validation_retry_context(query_context)
         simple_sql_cache: str | None = None
         simple_sql_loaded = False
+        repair_sql_cache: str | None = None
+        repair_sql_loaded = False
         requested_limit = extract_requested_limit(rewritten_question)
 
         def _validate_candidate_sql(candidate_sql: str, *, source_label: str) -> Tuple[bool, Optional[str], Optional[str]]:
@@ -529,6 +738,17 @@ class QuestionService:
                 simple_sql_cache = _apply_explicit_limit_if_safe(simple_sql_cache.strip())
             return simple_sql_cache
 
+        def _get_join_repair_sql() -> str | None:
+            nonlocal repair_sql_cache, repair_sql_loaded
+            if repair_sql_loaded:
+                return repair_sql_cache
+
+            repair_sql_loaded = True
+            repair_sql_cache = _build_joined_aggregate_repair_sql(query_context, full_knowledge_base)
+            if repair_sql_cache:
+                repair_sql_cache = _apply_explicit_limit_if_safe(repair_sql_cache.strip())
+            return repair_sql_cache
+
         if prefer_rule_based:
             logger.info(f"Using rule-based SQL generator first: {route_reason}")
             simple_sql = _get_simple_sql()
@@ -603,6 +823,19 @@ class QuestionService:
             except Exception as e:
                 ai_failure_reason = str(e)
                 logger.error(f"AI SQL generation failed: {e}")
+
+        repair_sql = _get_join_repair_sql()
+        if repair_sql and ai_failure_reason:
+            logger.info("Trying deterministic joined-aggregate repair from runtime schema and join paths")
+            repair_ok, repair_reason, _ = _validate_candidate_sql(repair_sql, source_label="Deterministic join repair")
+            if repair_ok:
+                _set_route(
+                    query_context,
+                    "deterministic-repair",
+                    "AI route did not produce complete SQL, so a schema/join-path repair was used",
+                )
+                return True, "SQL generated successfully (deterministic join repair)", repair_sql, None
+            logger.warning(f"Deterministic join repair failed validation: {repair_reason}")
 
         # Rule-based fallback remains available for deterministic guardrails and AI recovery.
         simple_sql = _get_simple_sql()

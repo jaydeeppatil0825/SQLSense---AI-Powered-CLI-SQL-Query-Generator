@@ -372,3 +372,24 @@ class TestValidateSqlStructure:
 
         assert valid is True
         assert msg == "SQL structure is valid"
+
+    def test_aggregate_with_non_aggregate_column_requires_group_by(self):
+        valid, msg = validate_sql_structure(
+            "SELECT a.record_name, SUM(b.event_total) AS total_event_total "
+            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "must include GROUP BY" in msg
+
+    def test_group_by_must_include_non_aggregate_select_expression(self):
+        valid, msg = validate_sql_structure(
+            "SELECT a.record_name, SUM(b.event_total) AS total_event_total "
+            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id "
+            "GROUP BY b.event_id",
+            GENERIC_KB,
+        )
+
+        assert valid is False
+        assert "GROUP BY is missing non-aggregate SELECT expression" in msg

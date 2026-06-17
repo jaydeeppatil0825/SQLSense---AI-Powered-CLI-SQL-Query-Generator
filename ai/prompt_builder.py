@@ -239,21 +239,28 @@ def _build_plan_section(query_plan: dict | None, selected_tables: list[dict] | N
         lines.append("Computed join paths between selected tables:")
         for jp in join_paths:
             predicate_parts = []
+            skeleton_parts = []
+            current_table = jp.get("from_table")
+            if current_table:
+                skeleton_parts.append(f"FROM {current_table}")
             for edge in jp.get("path", []):
                 join_condition = edge.get("join_condition")
                 if join_condition:
                     predicate_parts.append(str(join_condition))
-                    continue
-
                 from_table = edge.get("from_table", jp.get("from_table", ""))
                 from_column = edge.get("from_column", "")
                 to_table = edge.get("to_table", "")
                 to_column = edge.get("to_column", "")
-                if from_table and from_column and to_table and to_column:
+                if not join_condition and from_table and from_column and to_table and to_column:
+                    join_condition = f"{from_table}.{from_column} = {to_table}.{to_column}"
                     predicate_parts.append(f"{from_table}.{from_column} = {to_table}.{to_column}")
+                if to_table and join_condition:
+                    skeleton_parts.append(f"JOIN {to_table} ON {join_condition}")
 
             path_str = " AND ".join(predicate_parts) if predicate_parts else "no join predicate available"
             lines.append(f"  - {jp.get('from_table')} -> {jp.get('to_table')}: {path_str}")
+            if len(skeleton_parts) > 1:
+                lines.append(f"    usable FROM/JOIN skeleton: {' '.join(skeleton_parts)}")
 
     lines.append("")
     return lines
