@@ -19,9 +19,7 @@ from typing import Any
 
 
 _COMPLEX_KEYWORDS = {
-    " by ",
     " group ",
-    " top ",
     " highest ",
     " lowest ",
     " monthly ",
@@ -173,6 +171,7 @@ def _pick_table(
         entry for entry in (selected_tables or [])
         if entry.get("table") in knowledge_base
     ]
+    aggregate_intent = str((query_plan or {}).get("intent") or "") in {"total", "average"}
     if len(selected_entries) == 1:
         return str(selected_entries[0]["table"])
     if len(selected_entries) > 1:
@@ -188,6 +187,8 @@ def _pick_table(
         if top_confidence >= 0.85 and (
             (top_confidence - second_confidence) >= 0.15 or second_confidence < 0.7
         ):
+            return str(selected_entries[0]["table"])
+        if aggregate_intent:
             return str(selected_entries[0]["table"])
 
     if query_plan:
@@ -275,14 +276,67 @@ def _pick_measure_column(
 ) -> str | None:
     columns = _table_columns(table_data)
     column_lookup = {str(column.get("name", "")): column for column in columns}
+    primary_keys = {str(value) for value in (table_data.get("primary_keys") or []) if value}
+    foreign_keys = {
+        str(fk.get("column"))
+        for fk in (table_data.get("foreign_keys") or [])
+        if fk.get("column")
+    }
+    question_terms = set(_tokenize(question))
 
+    def _is_identifier_column(column_name: str, column: dict[str, Any]) -> bool:
+        normalized_name = _normalize_identifier(column_name)
+        if column_name in primary_keys or column_name in foreign_keys:
+            return True
+        if normalized_name == "id" or normalized_name.endswith("_id"):
+            return True
+        semantic_type = str(column.get("semantic_type", "")).lower()
+        return semantic_type == "id"
+
+    def _measure_score(column_name: str, column: dict[str, Any]) -> float:
+        if _is_identifier_column(column_name, column):
+            return -1.0
+        semantic_type = str(column.get("semantic_type", "")).lower()
+        column_type = str(column.get("type", "")).lower()
+        tokens = set(_tokenize(column_name))
+        score = 0.0
+
+        if semantic_type == "money":
+            score += 4.0
+        elif semantic_type == "quantity":
+            score += 3.0
+        elif semantic_type == "percentage":
+            score += 2.5
+
+        if _column_type_is_numeric(column_type):
+            score += 2.0
+
+        if tokens & question_terms:
+            score += 1.8 * len(tokens & question_terms)
+        if tokens & {"amount", "value", "total", "cost", "price", "balance", "rate"}:
+            score += 1.4
+        if tokens & {"final", "gross", "net", "subtotal"}:
+            score += 1.0
+        if not (tokens & question_terms) and tokens & {"tax", "gst", "vat", "levy", "rebate", "discount"}:
+            score -= 1.6
+        if tokens & {"type", "name", "label", "status", "state"}:
+            score -= 1.5
+
+        return score
+
+    scored_glossary_candidates: list[tuple[float, str]] = []
     for column_name in glossary_columns:
         column = column_lookup.get(column_name)
         if not column:
             continue
         semantic_type = str(column.get("semantic_type", "")).lower()
-        if semantic_type in {"money", "quantity", "percentage"}:
-            return column_name
+        if semantic_type in {"money", "quantity", "percentage"} and not _is_identifier_column(column_name, column):
+            score = _measure_score(column_name, column)
+            if score > 0:
+                scored_glossary_candidates.append((score + 0.5, column_name))
+    if scored_glossary_candidates:
+        scored_glossary_candidates.sort(key=lambda item: (-item[0], item[1]))
+        return scored_glossary_candidates[0][1]
 
     semantic_hints = set((query_plan or {}).get("semantic_hints") or [])
     preferred_semantics = []
@@ -294,14 +348,27 @@ def _pick_measure_column(
         preferred_semantics.append("percentage")
     preferred_semantics.extend(["money", "quantity", "percentage"])
 
-    for semantic_type in preferred_semantics:
-        for column in columns:
-            if str(column.get("semantic_type", "")).lower() == semantic_type:
-                return str(column.get("name", ""))
+    best_scored: tuple[float, str] | None = None
+    for column in columns:
+        column_name = str(column.get("name", ""))
+        semantic_type = str(column.get("semantic_type", "")).lower()
+        if preferred_semantics and semantic_type not in preferred_semantics and semantic_type not in {"money", "quantity", "percentage"}:
+            continue
+        score = _measure_score(column_name, column)
+        if score <= 0:
+            continue
+        if best_scored is None or score > best_scored[0]:
+            best_scored = (score, column_name)
+
+    if best_scored:
+        return best_scored[1]
 
     for column in columns:
+        column_name = str(column.get("name", ""))
+        if _is_identifier_column(column_name, column):
+            continue
         if _column_type_is_numeric(str(column.get("type", ""))):
-            return str(column.get("name", ""))
+            return column_name
 
     return None
 
@@ -387,6 +454,28 @@ def _resolve_status_value(
     return _status_value_for_question(question, column)
 
 
+def _resolve_filter_value(
+    question: str,
+    filter_data: dict[str, Any],
+    column: dict[str, Any],
+) -> str | None:
+    if filter_data.get("type") == "status":
+        return _resolve_status_value(question, filter_data, column)
+
+    explicit_value = str(filter_data.get("value") or "").strip()
+    if explicit_value:
+        return explicit_value
+
+    for raw_value in (column.get("sample_values") or []):
+        if raw_value is None:
+            continue
+        sample_value = str(raw_value)
+        normalized_value = _normalize(sample_value)
+        if normalized_value and normalized_value in _normalize(question):
+            return sample_value
+    return None
+
+
 def _build_where_clauses(
     question: str,
     table_data: dict[str, Any],
@@ -408,16 +497,24 @@ def _build_where_clauses(
                 clauses.append(f"{date_column} < '{_escape_sql_literal(end_exclusive)}'")
 
     for filter_data in query_plan.get("filters") or []:
-        if filter_data.get("type") != "status":
+        filter_column_name = str(filter_data.get("column") or "")
+        target_column = None
+        if filter_column_name:
+            target_column = next(
+                (column for column in _table_columns(table_data) if str(column.get("name", "")) == filter_column_name),
+                None,
+            )
+        if not target_column or not target_column.get("name"):
+            if filter_data.get("type") != "status":
+                continue
+            target_column = _pick_status_column(table_data)
+        if not target_column or not target_column.get("name"):
             continue
-        status_column = _pick_status_column(table_data)
-        if not status_column or not status_column.get("name"):
-            continue
-        resolved_value = _resolve_status_value(question, filter_data, status_column)
+        resolved_value = _resolve_filter_value(question, filter_data, target_column)
         if resolved_value is None:
             continue
         clauses.append(
-            f"{status_column['name']} = '{_escape_sql_literal(resolved_value)}'"
+            f"{target_column['name']} = '{_escape_sql_literal(resolved_value)}'"
         )
 
     return clauses
@@ -441,6 +538,27 @@ def _default_sort_clause(
         quantity_column = _pick_quantity_column(table_data)
         if quantity_column:
             return f" ORDER BY {quantity_column} {direction}"
+
+    columns = _table_columns(table_data)
+    requested_tokens = set(_tokenize(sort_by))
+    if requested_tokens:
+        ranked_columns: list[tuple[float, str]] = []
+        for column in columns:
+            column_name = str(column.get("name", ""))
+            column_tokens = set(_tokenize(column_name))
+            if not column_tokens:
+                continue
+            overlap = len(requested_tokens & column_tokens)
+            if not overlap:
+                continue
+            score = overlap * 2.0
+            semantic_type = str(column.get("semantic_type", "")).lower()
+            if semantic_type in {"money", "quantity", "percentage", "date"}:
+                score += 1.0
+            ranked_columns.append((score, column_name))
+        ranked_columns.sort(key=lambda item: (-item[0], item[1]))
+        if ranked_columns:
+            return f" ORDER BY {ranked_columns[0][1]} {direction}"
     return ""
 
 
@@ -520,7 +638,8 @@ def _try_show_all(
     limit: int,
 ) -> str | None:
     normalized_question = _normalize(question)
-    if re.search(r"\b(show|list|display|get|fetch|view|see|give)\b", normalized_question):
+    intent = str((query_plan or {}).get("intent") or "")
+    if intent == "list" or re.search(r"\b(show|list|display|get|fetch|view|see|give|tell)\b", normalized_question):
         # Use explicit columns from schema instead of SELECT *
         columns = _table_columns(table_data)
         column_names = [str(col.get("name", "")) for col in columns if col.get("name")]

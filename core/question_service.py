@@ -37,6 +37,31 @@ _GENERIC_SELECT_RE = re.compile(
     r"(?:\s+LIMIT\s+\d+\s*)?;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_ROUTING_FILLER_TERMS = {
+    "show",
+    "count",
+    "list",
+    "display",
+    "get",
+    "fetch",
+    "tell",
+    "me",
+    "all",
+    "from",
+    "in",
+    "of",
+    "for",
+    "to",
+    "with",
+    "by",
+    "sorted",
+    "sort",
+    "latest",
+    "recent",
+    "top",
+    "first",
+    "last",
+}
 
 
 def _looks_like_generic_select(sql: str) -> bool:
@@ -133,11 +158,69 @@ def _has_clear_primary_table(query_context: dict[str, Any]) -> bool:
     if len(selected_tables) == 1:
         return True
 
+    question = str((query_context.get("plan") or {}).get("question") or "")
+    top_table = str(selected_tables[0].get("table") or "")
+    if top_table:
+        table_tokens = _routing_tokens(top_table)
+        question_tokens = _routing_tokens(question)
+        if table_tokens and table_tokens & question_tokens and float(selected_tables[0].get("confidence") or 0.0) >= 0.75:
+            return True
+
     primary_confidence = float(selected_tables[0].get("confidence") or 0.0)
     secondary_confidence = float(selected_tables[1].get("confidence") or 0.0)
     return primary_confidence >= 0.75 and (
         (primary_confidence - secondary_confidence) >= 0.15 or secondary_confidence < 0.65
     )
+
+
+def _routing_tokens(value: str) -> set[str]:
+    tokens = {token for token in re.split(r"[^a-z0-9]+", str(value or "").lower()) if token}
+    expanded = set(tokens)
+    for token in list(tokens):
+        if token.endswith("ies") and len(token) > 3:
+            expanded.add(token[:-3] + "y")
+        elif token.endswith("ses") and len(token) > 3:
+            expanded.add(token[:-2])
+        elif token.endswith("s") and not token.endswith("ss") and len(token) > 1:
+            expanded.add(token[:-1])
+    return expanded
+
+
+def _has_unresolved_simple_terms(query_context: dict[str, Any]) -> bool:
+    plan = query_context.get("plan") or {}
+    query_terms = {
+        term for term in (plan.get("question_terms") or [])
+        if term and term not in _ROUTING_FILLER_TERMS
+    }
+    if not query_terms:
+        return False
+
+    supported_terms: set[str] = set()
+    for table_name in query_context.get("selected_table_names") or []:
+        supported_terms.update(_routing_tokens(table_name))
+    for column_entry in query_context.get("selected_columns") or []:
+        supported_terms.update(_routing_tokens(column_entry.get("column", "")))
+    for filter_data in plan.get("filters") or []:
+        supported_terms.update(_routing_tokens(filter_data.get("column", "")))
+        supported_terms.update(_routing_tokens(filter_data.get("term", "")))
+        supported_terms.update(_routing_tokens(filter_data.get("value", "")))
+    if plan.get("date_range"):
+        supported_terms.update(_routing_tokens(plan["date_range"].get("label", "")))
+        supported_terms.update(_routing_tokens(plan["date_range"].get("start", "")))
+        supported_terms.update(_routing_tokens(plan["date_range"].get("end_exclusive", "")))
+    if plan.get("sorting"):
+        supported_terms.update(_routing_tokens(plan["sorting"].get("by", "")))
+    if plan.get("limit") is not None:
+        supported_terms.update(_routing_tokens(str(plan.get("limit"))))
+    if str(plan.get("intent") or "") == "count":
+        supported_terms.add("count")
+    if str(plan.get("intent") or "") == "total":
+        supported_terms.update({"total", "sum"})
+    if str(plan.get("intent") or "") == "average":
+        supported_terms.update({"average", "avg", "mean"})
+
+    unresolved = query_terms - supported_terms
+    return bool(unresolved)
 
 
 def _should_try_rule_based_first(query_context: dict[str, Any]) -> tuple[bool, str]:
@@ -158,24 +241,21 @@ def _should_try_rule_based_first(query_context: dict[str, Any]) -> tuple[bool, s
     logger.debug(f"[DEBUG ROUTING] Dimension: {plan.get('dimension')}")
     logger.debug(f"[DEBUG ROUTING] Grouping: {plan.get('grouping')}")
 
-    if intent not in {"list", "count"}:
+    if intent not in {"list", "count", "total", "average"}:
         logger.debug(f"[DEBUG ROUTING] Rule-based skipped: intent '{intent}' needs richer reasoning")
         return False, f"intent '{intent}' needs richer reasoning"
     if plan.get("dimension") or plan.get("grouping"):
         logger.debug(f"[DEBUG ROUTING] Rule-based skipped: question asks for grouped or dimensional output")
         return False, "question asks for grouped or dimensional output"
-    if plan.get("date_range"):
-        logger.debug("[DEBUG ROUTING] Rule-based skipped: question requires date-aware filtering")
-        return False, "question requires date-aware filtering"
-    if plan.get("filters"):
-        logger.debug("[DEBUG ROUTING] Rule-based skipped: question requires runtime filters")
-        return False, "question requires runtime filters"
-    if intent == "list" and plan.get("metric"):
-        logger.debug("[DEBUG ROUTING] Rule-based skipped: question implies a business metric instead of a plain table browse")
-        return False, "question implies a business metric instead of a plain table browse"
+    if intent == "list" and plan.get("metric") and not plan.get("filters") and not plan.get("date_range") and not plan.get("sorting"):
+        logger.debug("[DEBUG ROUTING] Rule-based skipped: list question still implies a metric without a simple deterministic filter/date pattern")
+        return False, "list question still implies a metric without a simple deterministic filter/date pattern"
     if not _has_clear_primary_table(query_context):
         logger.debug(f"[DEBUG ROUTING] Rule-based skipped: planner could not isolate one primary table with enough confidence")
         return False, "planner could not isolate one primary table with enough confidence"
+    if _has_unresolved_simple_terms(query_context):
+        logger.debug("[DEBUG ROUTING] Rule-based skipped: query still has unresolved terms outside the deterministic table/column/filter context")
+        return False, "query still has unresolved terms outside the deterministic table/column/filter context"
     if overall_confidence < 0.5 or top_confidence < 0.5:
         logger.debug(f"[DEBUG ROUTING] Rule-based skipped: planner confidence is too low for deterministic SQL (overall: {overall_confidence}, top: {top_confidence})")
         return False, "planner confidence is too low for deterministic SQL"

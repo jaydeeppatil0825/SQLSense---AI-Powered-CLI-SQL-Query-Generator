@@ -39,7 +39,7 @@ _QUESTION_STOP_WORDS = {
     
 }
 
-_MONEY_HINTS = {"amount", "total", "price", "cost", "balance", "value"}
+_MONEY_HINTS = {"amount", "total", "price", "cost", "balance", "value", "revenue"}
 _QUANTITY_HINTS = {"quantity", "qty", "unit", "units", "count", "volume", "number"}
 _PERCENTAGE_HINTS = {"percent", "percentage", "ratio", "rate"}
 
@@ -84,7 +84,31 @@ def _extract_limit(question: str) -> int | None:
     if match:
         return int(match.group(1) or match.group(2))
     return None
-# if match return int (match)
+
+
+def _detect_sorting(question: str) -> dict[str, str] | None:
+    normalized = _normalize(question)
+
+    explicit_match = re.search(r"\b(?:sorted|sort|ordered|order)\s+by\s+([a-z0-9_ ]+)", normalized)
+    if explicit_match:
+        sort_value = explicit_match.group(1)
+        sort_value = re.split(r"\b(?:for|with|where|in|on|from|and|or|limit|top|first|last)\b", sort_value)[0].strip()
+        if sort_value:
+            return {"direction": "asc", "by": sort_value}
+
+    if re.search(r"\b(?:latest|recent|newest|most recent|last)\b", normalized):
+        return {"direction": "desc", "by": "date"}
+
+    if re.search(r"\b(?:oldest|earliest|first)\b", normalized):
+        return {"direction": "asc", "by": "date"}
+
+    top_n_match = re.search(r"\btop\s+\d+\s+[a-z0-9_ ]+?\s+by\s+([a-z0-9_ ]+)", normalized)
+    if top_n_match:
+        sort_value = top_n_match.group(1).strip()
+        if sort_value:
+            return {"direction": "desc", "by": sort_value}
+
+    return None
 
 def _detect_intent(question: str) -> str:
     normalized = _normalize(question)
@@ -99,16 +123,31 @@ def _detect_intent(question: str) -> str:
         return "comparison"
     if re.search(r"\b(trend|monthly|by month|per month|by date|over time)\b", normalized):
         return "trend"
-    if re.search(r"\b(top\s+\d+|highest|largest|lowest|smallest|most|least)\b", normalized):
+    if re.search(r"\b(highest|largest|lowest|smallest|most|least)\b", normalized):
         return "top_n"
+    if re.search(r"\btop\s+\d+\b", normalized):
+        if " by " in normalized or (set(_content_terms(normalized)) & (_MONEY_HINTS | _QUANTITY_HINTS | _PERCENTAGE_HINTS)):
+            return "top_n"
+        return "list"
     if re.search(r"\b(list|show|display|fetch|get)\b", normalized):
         return "list"
     return "list"
 
 
 
-def _detect_dimension(question: str) -> str | None:
+def _detect_dimension(question: str, intent: str | None = None) -> str | None:
     normalized = _normalize(question)
+    if str(intent or "") == "top_n":
+        top_n_match = re.search(r"\btop\s+\d+\s+([a-z0-9_ ]+?)\s+by\s+([a-z0-9_ ]+)", normalized)
+        if top_n_match:
+            return top_n_match.group(1).strip() or None
+    wise_match = re.search(r"\b([a-z0-9_ ]+?)\s+wise\b", normalized)
+    if wise_match:
+        tokens = wise_match.group(1).strip().split()
+        if tokens:
+            return tokens[-1]
+    if re.search(r"\b(?:sorted|sort|ordered|order)\s+by\s+", normalized):
+        return None
     match = re.search(r"\b(?:by|per)\s+([a-z0-9_ ]+)", normalized)
     if not match:
         return None
@@ -140,6 +179,15 @@ def _detect_date_range(question: str) -> dict | None:
             "end_exclusive": f"{today.year + 1}-01-01",
         }
 
+    year_match = re.search(r"\b(?:in|for|during)\s+(20\d{2})\b|\b(20\d{2})\b", normalized)
+    if year_match:
+        year = int(year_match.group(1) or year_match.group(2))
+        return {
+            "label": f"year_{year}",
+            "start": f"{year}-01-01",
+            "end_exclusive": f"{year + 1}-01-01",
+        }
+
     return None
 
 
@@ -162,20 +210,39 @@ def _column_can_hold_status(column: dict[str, Any]) -> bool:
     return any(token in column_name for token in ("status", "state", "stage"))
 
 
+def _column_supports_sample_filter(column: dict[str, Any]) -> bool:
+    semantic_type = str(column.get("semantic_type", "")).lower()
+    if semantic_type in {"status", "name", "text", "code", "reference"}:
+        return True
+
+    column_type = _normalize(str(column.get("type", "")))
+    if any(token in column_type for token in ("char", "text", "enum")):
+        return True
+
+    column_name = _normalize_identifier(column.get("name", ""))
+    return any(
+        token in column_name
+        for token in ("name", "label", "city", "town", "region", "state", "status", "type", "category", "segment")
+    )
+
+
 def _detect_runtime_filters(question: str, candidate_tables: dict[str, Any]) -> list[dict[str, Any]]:
     normalized_question = _normalize(question)
     question_terms = set(_tokenize(question))
+    requested_limit = _extract_limit(question)
     filters: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
 
     for table_name, table_data in candidate_tables.items():
         for column in table_data.get("columns", []):
-            if not _column_can_hold_status(column):
+            if not _column_supports_sample_filter(column):
                 continue
             column_name = str(column.get("name", ""))
             for normalized_value, raw_value in _normalized_sample_values(column):
                 value_terms = set(_tokenize(normalized_value))
                 if not value_terms:
+                    continue
+                if requested_limit is not None and normalized_value == str(requested_limit):
                     continue
                 if normalized_value not in normalized_question and not value_terms <= question_terms:
                     continue
@@ -186,7 +253,7 @@ def _detect_runtime_filters(question: str, candidate_tables: dict[str, Any]) -> 
                 seen.add(signature)
                 filters.append(
                     {
-                        "type": "status",
+                        "type": "status" if _column_can_hold_status(column) else "value",
                         "table": table_name,
                         "column": column_name,
                         "value": raw_value,
@@ -195,6 +262,84 @@ def _detect_runtime_filters(question: str, candidate_tables: dict[str, Any]) -> 
                 )
 
     return filters
+
+
+def _extract_preposition_filter_value(question: str) -> str | None:
+    match = re.search(r"\b(?:from|in)\s+([A-Za-z][A-Za-z0-9 ]*)$", str(question or "").strip(), re.IGNORECASE)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    value = re.split(r"\b(?:by|with|where|and|or|order|sorted|latest|top)\b", value)[0].strip()
+    if not value or re.fullmatch(r"20\d{2}", value, re.IGNORECASE):
+        return None
+    return value
+
+
+def _column_supports_generic_text_filter(column: dict[str, Any]) -> bool:
+    semantic_type = str(column.get("semantic_type", "")).lower()
+    if semantic_type in {"status", "date", "id", "money", "quantity", "percentage"}:
+        return False
+    column_type = _normalize(str(column.get("type", "")))
+    return any(token in column_type for token in ("char", "text", "enum"))
+
+
+def _generic_filter_column_score(column: dict[str, Any], filter_value: str) -> float:
+    score = 0.0
+    semantic_type = str(column.get("semantic_type", "")).lower()
+    if semantic_type in {"name", "text", "code", "reference"}:
+        score += 1.0
+
+    column_name = _normalize_identifier(column.get("name", ""))
+    if any(token in column_name for token in ("town", "city", "location", "site", "address")):
+        score += 2.0
+    elif any(token in column_name for token in ("region", "state", "province", "zone")):
+        score += 1.2
+    elif any(token in column_name for token in ("name", "label", "code", "segment", "category", "type")):
+        score += 0.6
+
+    normalized_filter = _normalize(filter_value)
+    for normalized_value, _ in _normalized_sample_values(column):
+        if normalized_filter == normalized_value:
+            score += 4.0
+            break
+        if normalized_filter in normalized_value or normalized_value in normalized_filter:
+            score += 1.5
+            break
+
+    return score
+
+
+def _detect_generic_value_filters(question: str, candidate_tables: dict[str, Any]) -> list[dict[str, Any]]:
+    filter_value = _extract_preposition_filter_value(question)
+    if not filter_value:
+        return []
+
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    for table_name, table_data in candidate_tables.items():
+        for column in table_data.get("columns", []):
+            if not _column_supports_generic_text_filter(column):
+                continue
+            score = _generic_filter_column_score(column, filter_value)
+            if score <= 0:
+                continue
+            ranked.append(
+                (
+                    score,
+                    {
+                        "type": "value",
+                        "table": table_name,
+                        "column": str(column.get("name", "")),
+                        "value": filter_value,
+                        "term": filter_value,
+                    },
+                )
+            )
+
+    ranked.sort(key=lambda item: (-item[0], item[1]["table"], item[1]["column"]))
+    if not ranked:
+        return []
+    top_score = ranked[0][0]
+    return [filter_data for score, filter_data in ranked if score == top_score][:1]
 
 
 def _default_limit_for_intent(intent: str) -> int | None:
@@ -228,13 +373,19 @@ def _primary_metric_hint(semantic_hints: set[str]) -> str | None:
     return next(iter(sorted(semantic_hints))) if semantic_hints else None
 
 
+def _should_preserve_simple_list_metric(plan: dict[str, Any]) -> bool:
+    if str(plan.get("intent") or "") != "list":
+        return True
+    if plan.get("dimension") or plan.get("grouping"):
+        return True
+    return bool(set(plan.get("semantic_hints") or set()) & {"money", "quantity", "percentage"})
+
+
 def _is_simple_primary_table_question(plan: dict[str, Any]) -> bool:
     if (
-        str(plan.get("intent") or "") == "count"
+        str(plan.get("intent") or "") in {"count", "total", "average"}
         and not plan.get("dimension")
         and not plan.get("grouping")
-        and not plan.get("filters")
-        and not plan.get("date_range")
     ):
         return True
 
@@ -630,6 +781,9 @@ def _preferred_primary_tables_for_simple_question(
 
     if second_score <= 0:
         return [top_table] if (has_direct_match or has_top_vector_match or has_strong_glossary_match) else None
+
+    if str(plan.get("intent") or "") in {"total", "average"} and top_score > second_score:
+        return [top_table]
 
     if (has_direct_match or has_top_vector_match) and top_score >= (second_score * 1.5):
         return [top_table]
@@ -1089,9 +1243,10 @@ def build_query_context(
     enriched_kb = _enriched_kb(knowledge_base)
     normalized_question = _normalize(question)
     intent = _detect_intent(normalized_question)
-    dimension = _detect_dimension(normalized_question)
+    dimension = _detect_dimension(normalized_question, intent)
     date_range = _detect_date_range(normalized_question)
     limit = _extract_limit(normalized_question) or _default_limit_for_intent(intent)
+    sorting = _detect_sorting(normalized_question)
     semantic_hints = _semantic_hints(normalized_question, intent)
     glossary_matches = _glossary_matches(question, business_glossary)
     
@@ -1112,7 +1267,6 @@ def build_query_context(
         logger.debug(f"[DEBUG] Vector table candidates: {vector_results.get('table_names', [])}")
         logger.debug(f"[DEBUG] Vector column candidates: {[col.get('column_name') for col in vector_results.get('columns', [])[:5]]}")
 
-    sorting = None
     if intent == "top_n":
         sorting = {"direction": "desc", "by": "metric"}
     elif intent == "trend":
@@ -1173,9 +1327,15 @@ def build_query_context(
         question,
         _candidate_tables_for_filters(enriched_kb, scored_tables, vector_results),
     )
+    if not filters:
+        filters = _detect_generic_value_filters(
+            question,
+            _candidate_tables_for_filters(enriched_kb, scored_tables, vector_results),
+        )
     if filters:
         plan["filters"] = filters
-        plan["semantic_hints"].add("status")
+        if any(filter_data.get("type") == "status" for filter_data in filters):
+            plan["semantic_hints"].add("status")
         plan["metric"] = _primary_metric_hint(plan["semantic_hints"])
         rescored_by_name: dict[str, tuple[float, list[str]]] = {}
         for table_name, table_data in enriched_kb.items():
@@ -1290,12 +1450,15 @@ def build_query_context(
     
     metric_from_selected_columns = _infer_metric_from_selected_columns(plan, selected_tables)
     metric_from_glossary = _infer_metric_from_glossary_matches(glossary_matches, enriched_kb)
-    if metric_from_selected_columns in {"money", "quantity", "percentage"}:
-        plan["metric"] = metric_from_selected_columns
-    elif metric_from_glossary in {"money", "quantity", "percentage"}:
-        plan["metric"] = metric_from_glossary
+    if _should_preserve_simple_list_metric(plan):
+        if metric_from_selected_columns in {"money", "quantity", "percentage"}:
+            plan["metric"] = metric_from_selected_columns
+        elif metric_from_glossary in {"money", "quantity", "percentage"}:
+            plan["metric"] = metric_from_glossary
+        else:
+            plan["metric"] = metric_from_selected_columns
     else:
-        plan["metric"] = metric_from_selected_columns
+        plan["metric"] = None
 
     return {
         "plan": plan,

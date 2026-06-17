@@ -633,6 +633,215 @@ def test_simple_list_query_routes_rule_based_despite_glossary_noise(monkeypatch)
     assert service.get_last_query_context()["route_used"] == "rule-based"
 
 
+def test_build_query_context_keeps_plain_table_browse_metric_free():
+    glossary = {
+        "accounts": {
+            "mapped_columns": [
+                {"table": "accounts", "column": "account_label", "confidence": "high"},
+                {"table": "accounts", "column": "allowed_credit", "confidence": "high"},
+            ],
+            "business_terms": ["account"],
+        }
+    }
+    kb = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+                {"name": "allowed_credit", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+        }
+    }
+
+    context = build_query_context("show all accounts", kb, glossary, use_vector_retrieval=False)
+
+    assert context["plan"]["intent"] == "list"
+    assert context["plan"]["metric"] is None
+
+
+def test_build_query_context_detects_generic_sample_value_filter_and_explicit_year():
+    kb = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {
+                    "name": "town",
+                    "type": "VARCHAR(50)",
+                    "nullable": True,
+                    "semantic_type": "name",
+                    "sample_values": ["Mumbai", "Chennai"],
+                },
+                {"name": "record_state", "type": "VARCHAR(20)", "nullable": True, "semantic_type": "status"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+        },
+        "deals": {
+            "columns": [
+                {"name": "deal_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "booked_on", "type": "DATE", "nullable": True, "semantic_type": "date"},
+            ],
+            "primary_keys": ["deal_id"],
+            "foreign_keys": [],
+        },
+    }
+
+    accounts_context = build_query_context("tell me accounts from Mumbai", kb, use_vector_retrieval=False)
+    deals_context = build_query_context("show deals in 2025", kb, use_vector_retrieval=False)
+
+    assert accounts_context["plan"]["filters"]
+    assert accounts_context["plan"]["filters"][0]["column"] == "town"
+    assert accounts_context["plan"]["filters"][0]["value"] == "Mumbai"
+    assert deals_context["plan"]["date_range"] == {
+        "label": "year_2025",
+        "start": "2025-01-01",
+        "end_exclusive": "2026-01-01",
+    }
+
+
+def test_build_query_context_uses_sorting_not_grouping_for_sorted_by_queries():
+    kb = {
+        "items": {
+            "columns": [
+                {"name": "item_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "item_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+                {"name": "sell_rate", "type": "DECIMAL(12,2)", "nullable": False, "semantic_type": "percentage"},
+            ],
+            "primary_keys": ["item_id"],
+            "foreign_keys": [],
+        }
+    }
+
+    context = build_query_context("show items sorted by sell rate", kb, use_vector_retrieval=False)
+
+    assert context["plan"]["intent"] == "list"
+    assert context["plan"]["dimension"] is None
+    assert context["plan"]["grouping"] == []
+    assert context["plan"]["sorting"] == {"direction": "asc", "by": "sell rate"}
+
+
+def test_build_query_context_treats_plain_top_n_browse_as_limited_list():
+    kb = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+        }
+    }
+
+    context = build_query_context("show top 5 accounts", kb, use_vector_retrieval=False)
+
+    assert context["plan"]["intent"] == "list"
+    assert context["plan"]["limit"] == 5
+    assert context["plan"]["filters"] == []
+
+
+def test_simple_sample_value_filter_routes_rule_based_without_ai(monkeypatch):
+    kb = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+                {
+                    "name": "town",
+                    "type": "VARCHAR(50)",
+                    "nullable": True,
+                    "semantic_type": "name",
+                    "sample_values": ["Mumbai", "Chennai"],
+                },
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "deals": {
+            "columns": [
+                {"name": "deal_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "account_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "gross_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+            ],
+            "primary_keys": ["deal_id"],
+            "foreign_keys": [{"column": "account_id", "referenced_table": "accounts", "referenced_column": "account_id"}],
+            "relationships": [],
+        },
+    }
+    service = QuestionService()
+
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple single-table sample-value filters")),
+    )
+
+    success, message, sql, error = service.process_question(
+        "tell me accounts from Mumbai",
+        kb,
+        ai_backend="local",
+    )
+
+    assert success is True
+    assert sql == "SELECT account_id, account_label, town FROM accounts WHERE town = 'Mumbai' LIMIT 50;"
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["selected_table_names"][0] == "accounts"
+
+
+def test_simple_top_n_browse_routes_rule_based_without_ai(monkeypatch):
+    kb = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+    service = QuestionService()
+
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple top-N browse questions")),
+    )
+
+    success, message, sql, error = service.process_question("show top 5 accounts", kb, ai_backend="local")
+
+    assert success is True
+    assert sql == "SELECT account_id, account_label FROM accounts LIMIT 5;"
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+
+
+def test_single_table_total_routes_rule_based_without_ai(monkeypatch):
+    kb = {
+        "operating_costs": {
+            "columns": [
+                {"name": "cost_id", "type": "INTEGER", "nullable": False, "semantic_type": "money"},
+                {"name": "cost_type", "type": "VARCHAR(50)", "nullable": False, "semantic_type": "money"},
+                {"name": "spent_value", "type": "DECIMAL(12,2)", "nullable": False, "semantic_type": "money"},
+            ],
+            "primary_keys": ["cost_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+    service = QuestionService()
+
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for clear single-table totals")),
+    )
+
+    success, message, sql, error = service.process_question("show total operating cost", kb, ai_backend="local")
+
+    assert success is True
+    assert sql == "SELECT SUM(spent_value) AS total_spent_value FROM operating_costs;"
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+
+
 def test_top_vector_table_beats_generic_glossary_aliases_for_simple_list():
     context = build_query_context(
         "show all primary entries",

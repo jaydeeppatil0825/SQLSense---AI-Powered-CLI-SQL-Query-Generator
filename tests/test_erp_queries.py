@@ -200,7 +200,7 @@ def test_erp_total_sales_this_month(monkeypatch):
     assert "SUM(final_amount)" in sql
     assert "FROM sales_invoices" in sql
     assert f"invoice_date >= '{start_date}'" in sql
-    assert service.get_last_query_context()["route_used"] == "ai"
+    assert service.get_last_query_context()["route_used"] == "rule-based"
     assert service.get_last_query_context()["selected_table_names"] != list(_erp_knowledge_base().keys())
 
 

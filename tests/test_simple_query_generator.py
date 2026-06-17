@@ -108,6 +108,22 @@ def test_total_uses_dynamic_date_filter_from_plan():
     )
 
 
+def test_list_uses_explicit_year_date_range_from_plan():
+    query_plan = {
+        "intent": "list",
+        "date_range": {"start": "2025-01-01", "end_exclusive": "2026-01-01"},
+    }
+    sql = generate_simple_sql(
+        "Show invoices in 2025",
+        {"invoice_headers": GENERIC_KB["invoice_headers"]},
+        query_plan=query_plan,
+    )
+    assert sql == (
+        "SELECT invoice_id, client_id, invoice_date, workflow_status, total_due "
+        "FROM invoice_headers WHERE invoice_date >= '2025-01-01' AND invoice_date < '2026-01-01' LIMIT 50;"
+    )
+
+
 def test_latest_uses_dynamic_date_column():
     sql = generate_simple_sql("Show latest 10 invoices", GENERIC_KB)
     assert sql == "SELECT invoice_id, client_id, invoice_date, workflow_status, total_due FROM invoice_headers ORDER BY invoice_date DESC LIMIT 10;"
@@ -119,6 +135,60 @@ def test_status_filter_uses_dynamic_status_column():
     assert sql == "SELECT invoice_id, client_id, invoice_date, workflow_status, total_due FROM invoice_headers WHERE workflow_status = 'Pending' LIMIT 50;"
 
 
+def test_generic_sample_value_filter_uses_runtime_column():
+    query_plan = {
+        "intent": "list",
+        "filters": [{"type": "value", "column": "client_name", "value": "Acme Retail", "term": "acme retail"}],
+    }
+    kb = {
+        "client_directory": {
+            "columns": [
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {
+                    "name": "client_name",
+                    "type": "VARCHAR(100)",
+                    "nullable": False,
+                    "semantic_type": "name",
+                    "sample_values": ["Acme Retail", "North Supply"],
+                },
+                {"name": "status_flag", "type": "VARCHAR(20)", "nullable": True, "semantic_type": "status"},
+            ],
+            "primary_keys": ["client_id"],
+            "foreign_keys": [],
+        }
+    }
+    sql = generate_simple_sql("Show clients from Acme Retail", kb, query_plan=query_plan)
+    assert sql == "SELECT client_id, client_name, status_flag FROM client_directory WHERE client_name = 'Acme Retail' LIMIT 50;"
+
+
+def test_list_intent_without_browse_verb_still_generates_single_table_select():
+    query_plan = {
+        "intent": "list",
+        "filters": [{"type": "value", "column": "town", "value": "Mumbai", "term": "Mumbai"}],
+    }
+    kb = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+                {
+                    "name": "town",
+                    "type": "VARCHAR(50)",
+                    "nullable": True,
+                    "semantic_type": "name",
+                    "sample_values": ["Mumbai", "Chennai"],
+                },
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+        }
+    }
+
+    sql = generate_simple_sql("Tell me accounts from Mumbai", kb, query_plan=query_plan)
+
+    assert sql == "SELECT account_id, account_label, town FROM accounts WHERE town = 'Mumbai' LIMIT 50;"
+
+
 def test_simple_generator_uses_quantity_columns_without_hardcoded_tables():
     query_plan = {"intent": "average", "semantic_hints": {"quantity"}}
     sql = generate_simple_sql(
@@ -127,6 +197,63 @@ def test_simple_generator_uses_quantity_columns_without_hardcoded_tables():
         query_plan=query_plan,
     )
     assert sql == "SELECT AVG(quantity_on_hand) AS average_quantity_on_hand FROM stock_positions;"
+
+
+def test_total_prefers_non_identifier_measure_column():
+    kb = {
+        "operating_costs": {
+            "columns": [
+                {"name": "cost_id", "type": "INTEGER", "nullable": False, "semantic_type": "money"},
+                {"name": "cost_type", "type": "VARCHAR(50)", "nullable": False, "semantic_type": "money"},
+                {"name": "spent_value", "type": "DECIMAL(12,2)", "nullable": False, "semantic_type": "money"},
+            ],
+            "primary_keys": ["cost_id"],
+            "foreign_keys": [],
+        }
+    }
+    query_plan = {"intent": "total", "semantic_hints": {"money"}}
+
+    sql = generate_simple_sql("Show total operating cost", kb, query_plan=query_plan)
+
+    assert sql == "SELECT SUM(spent_value) AS total_spent_value FROM operating_costs;"
+
+
+def test_total_prefers_primary_selected_table_for_simple_single_table_aggregate():
+    query_plan = {"intent": "total", "semantic_hints": {"money"}}
+    selected_tables = [
+        {"table": "invoice_headers", "confidence": 0.92, "selected_columns": [{"column": "total_due", "semantic_type": "money"}]},
+        {"table": "stock_positions", "confidence": 0.66, "selected_columns": [{"column": "quantity_on_hand", "semantic_type": "quantity"}]},
+    ]
+    vector_results = {"table_names": ["stock_positions", "invoice_headers"]}
+
+    sql = generate_simple_sql(
+        "Show total due",
+        GENERIC_KB,
+        query_plan=query_plan,
+        selected_tables=selected_tables,
+        vector_results=vector_results,
+    )
+
+    assert sql == "SELECT SUM(total_due) AS total_total_due FROM invoice_headers;"
+
+
+def test_list_sorting_uses_runtime_sort_column():
+    query_plan = {"intent": "list", "sorting": {"direction": "asc", "by": "sell rate"}}
+    kb = {
+        "items": {
+            "columns": [
+                {"name": "item_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "item_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+                {"name": "sell_rate", "type": "DECIMAL(12,2)", "nullable": False, "semantic_type": "percentage"},
+            ],
+            "primary_keys": ["item_id"],
+            "foreign_keys": [],
+        }
+    }
+
+    sql = generate_simple_sql("Show items sorted by sell rate", kb, query_plan=query_plan)
+
+    assert sql == "SELECT item_id, item_label, sell_rate FROM items ORDER BY sell_rate ASC LIMIT 50;"
 
 
 def test_complex_questions_return_none_for_ai_path():
