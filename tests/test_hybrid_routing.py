@@ -938,6 +938,77 @@ def test_grouped_amount_repair_uses_metric_table_not_dimension_money_column(monk
     assert service.get_last_query_context()["route_used"] == "deterministic-repair"
 
 
+def test_pending_billed_amount_by_account_uses_repair_before_retry(monkeypatch, caplog):
+    knowledge_base = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+                {"name": "allowed_credit", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "deals": {
+            "columns": [
+                {"name": "deal_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "account_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            ],
+            "primary_keys": ["deal_id"],
+            "foreign_keys": [
+                {"column": "account_id", "referenced_table": "accounts", "referenced_column": "account_id"},
+            ],
+            "relationships": [],
+        },
+        "billing_notes": {
+            "columns": [
+                {"name": "billing_note_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "deal_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+                {"name": "settled_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+                {
+                    "name": "settlement_state",
+                    "type": "VARCHAR(30)",
+                    "nullable": True,
+                    "semantic_type": "status",
+                    "sample_values": ["pending", "settled"],
+                },
+            ],
+            "primary_keys": ["billing_note_id"],
+            "foreign_keys": [
+                {"column": "deal_id", "referenced_table": "deals", "referenced_column": "deal_id"},
+            ],
+            "relationships": [],
+        },
+    }
+    service = QuestionService()
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: "SELECT a.account_label, SUM(bn.billed_value) AS pending_billed_amount FROM",
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI retry should not be called when deterministic repair can build a full query")),
+    )
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
+
+    success, message, sql, error = service.process_question("show pending billed amount by account", knowledge_base, ai_backend="local")
+
+    assert success is True
+    assert error is None
+    assert sql is not None
+    assert sql.startswith("SELECT ")
+    assert "FROM accounts" in sql
+    assert "JOIN deals ON accounts.account_id = deals.account_id" in sql
+    assert "JOIN billing_notes ON deals.deal_id = billing_notes.deal_id" in sql
+    assert "SUM((billing_notes.billed_value - COALESCE(billing_notes.settled_value, 0)))" in sql
+    assert "GROUP BY accounts.account_label" in sql
+    assert service.get_last_query_context()["route_used"] == "deterministic-repair"
+    assert "missing a FROM clause" not in caplog.text
+    assert "missing a table name after FROM" not in caplog.text
+
+
 def test_complex_grouped_amount_empty_from_fails_cleanly_without_join_path(monkeypatch):
     broken_kb = {
         "entity_groups": BRIDGE_KB["entity_groups"],

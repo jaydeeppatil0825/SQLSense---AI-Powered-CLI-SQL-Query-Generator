@@ -380,6 +380,25 @@ def _format_generation_failure(
     )
 
 
+def _is_repairable_structural_failure(validation_reason: str | None) -> bool:
+    reason = str(validation_reason or "").lower()
+    if not reason:
+        return False
+    return any(
+        token in reason
+        for token in (
+            "missing a from clause",
+            "missing a table name after from",
+            "missing a valid table name after from",
+            "does not start with select",
+            "only select queries are allowed",
+            "non-sql content outside the select statement",
+            "incomplete join",
+            "join without an on or using condition",
+        )
+    )
+
+
 def _is_safe_sql_identifier(identifier: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(identifier or "")))
 
@@ -867,6 +886,28 @@ class QuestionService:
                 repair_sql_cache = _apply_explicit_limit_if_safe(repair_sql_cache.strip())
             return repair_sql_cache
 
+        def _try_deterministic_join_repair(
+            *,
+            failure_reason: str | None,
+            route_reason: str,
+        ) -> tuple[bool, str | None, str | None]:
+            if not _is_repairable_structural_failure(failure_reason):
+                return False, None, None
+
+            repair_sql = _get_join_repair_sql()
+            if not repair_sql:
+                return False, None, None
+
+            repair_ok, repair_reason, _ = _validate_candidate_sql(
+                repair_sql,
+                source_label="Deterministic join repair",
+            )
+            if not repair_ok:
+                return False, None, repair_reason
+
+            _set_route(query_context, "deterministic-repair", route_reason)
+            return True, repair_sql, None
+
         if prefer_rule_based:
             logger.info(f"Using rule-based SQL generator first: {route_reason}")
             simple_sql = _get_simple_sql()
@@ -903,6 +944,14 @@ class QuestionService:
                     _set_route(query_context, "ai", "AI was selected for a complex or low-confidence question")
                     return True, "SQL generated successfully (AI)", candidate_sql, None
 
+                repair_success, repair_sql, repair_reason = _try_deterministic_join_repair(
+                    failure_reason=ai_reason,
+                    route_reason="AI route produced incomplete SQL, so deterministic join repair was used",
+                )
+                if repair_success and repair_sql:
+                    logger.info("AI SQL was structurally incomplete; using deterministic join repair from runtime schema and join paths")
+                    return True, "SQL generated successfully (deterministic join repair)", repair_sql, None
+
                 logger.warning(f"AI SQL did not meet validation requirements: {ai_reason}. Retrying...")
                 retry_generate_kwargs = {
                     "query_plan": query_plan,
@@ -935,6 +984,15 @@ class QuestionService:
                 if retry_ok:
                     _set_route(query_context, "ai-retry", "AI retry corrected the first invalid SQL attempt")
                     return True, "SQL generated successfully (AI, corrected)", retry_sql, None
+
+                repair_success, repair_sql, repair_reason = _try_deterministic_join_repair(
+                    failure_reason=retry_reason or ai_reason,
+                    route_reason="AI retry still produced incomplete SQL, so deterministic join repair was used",
+                )
+                if repair_success and repair_sql:
+                    logger.info("AI retry remained structurally incomplete; using deterministic join repair from runtime schema and join paths")
+                    return True, "SQL generated successfully (deterministic join repair)", repair_sql, None
+
                 ai_failure_reason = retry_reason or ai_reason
                 ai_rejected_sql = retry_sql
                 logger.warning(f"AI retry did not meet validation requirements: {ai_failure_reason}")
@@ -944,16 +1002,15 @@ class QuestionService:
 
         repair_sql = _get_join_repair_sql()
         if repair_sql and ai_failure_reason:
-            logger.info("Trying deterministic joined-aggregate repair from runtime schema and join paths")
-            repair_ok, repair_reason, _ = _validate_candidate_sql(repair_sql, source_label="Deterministic join repair")
-            if repair_ok:
-                _set_route(
-                    query_context,
-                    "deterministic-repair",
-                    "AI route did not produce complete SQL, so a schema/join-path repair was used",
-                )
-                return True, "SQL generated successfully (deterministic join repair)", repair_sql, None
-            logger.warning(f"Deterministic join repair failed validation: {repair_reason}")
+            repair_success, validated_repair_sql, repair_reason = _try_deterministic_join_repair(
+                failure_reason=ai_failure_reason,
+                route_reason="AI route did not produce complete SQL, so a schema/join-path repair was used",
+            )
+            if repair_success and validated_repair_sql:
+                logger.info("Trying deterministic joined-aggregate repair from runtime schema and join paths")
+                return True, "SQL generated successfully (deterministic join repair)", validated_repair_sql, None
+            if repair_reason:
+                logger.warning(f"Deterministic join repair failed validation: {repair_reason}")
 
         # Rule-based fallback remains available for deterministic guardrails and AI recovery.
         simple_sql = _get_simple_sql()
