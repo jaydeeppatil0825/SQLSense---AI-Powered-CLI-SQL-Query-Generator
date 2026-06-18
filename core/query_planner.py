@@ -8,6 +8,8 @@ from copy import deepcopy
 from datetime import date
 from typing import Any
 import re
+from sqlalchemy.sql.expression import cast
+from typing_extensions import no_type_check_decorator
 
 from semantic.erp_metadata import enrich_knowledge_base_for_erp
 from vector_store import VectorIndexBuilder, VectorRetriever, EmbeddingService
@@ -101,7 +103,7 @@ def _detect_sorting(question: str) -> dict[str, str] | None:
 
     if re.search(r"\b(?:oldest|earliest|first)\b", normalized):
         return {"direction": "asc", "by": "date"}
-
+    
     top_n_match = re.search(r"\btop\s+\d+\s+[a-z0-9_ ]+?\s+by\s+([a-z0-9_ ]+)", normalized)
     if top_n_match:
         sort_value = top_n_match.group(1).strip()
@@ -115,10 +117,13 @@ def _detect_intent(question: str) -> str:
 
     if re.search(r"\b(count|how many|number of)\b", normalized):
         return "count"
+    
     if re.search(r"\b(average|avg|mean)\b", normalized):
         return "average"
+    
     if re.search(r"\b(total|sum)\b", normalized):
         return "total"
+    
     if re.search(r"\b(compare|comparison|versus|vs)\b", normalized):
         return "comparison"
     if re.search(r"\b(trend|monthly|by month|per month|by date|over time)\b", normalized):
@@ -191,6 +196,9 @@ def _detect_date_range(question: str) -> dict | None:
     return None
 
 
+
+
+
 def _normalized_sample_values(column: dict[str, Any]) -> list[tuple[str, str]]:
     values = []
     for raw_value in column.get("sample_values", []) or []:
@@ -224,6 +232,8 @@ def _column_supports_sample_filter(column: dict[str, Any]) -> bool:
         token in column_name
         for token in ("name", "label", "city", "town", "region", "state", "status", "type", "category", "segment")
     )
+
+
 
 
 def _detect_runtime_filters(question: str, candidate_tables: dict[str, Any]) -> list[dict[str, Any]]:

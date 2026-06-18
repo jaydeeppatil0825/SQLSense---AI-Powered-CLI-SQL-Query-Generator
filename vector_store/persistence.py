@@ -60,6 +60,8 @@ class VectorIndexPersistence:
             },
         }
 
+
+
     def inspect_index(
         self,
         knowledge_base: dict[str, Any] | None,
@@ -77,12 +79,14 @@ class VectorIndexPersistence:
 
         if not manifest_exists or not documents_exists:
             missing = []
-            if not manifest_exists:
+            if not manifest_exists: 
                 missing.append("manifest")
             if not documents_exists:
                 missing.append("documents")
             details["stale_reason"] = f"missing persisted index file(s): {', '.join(missing)}"
             return details
+    
+    
 
         try:
             manifest = self._read_json(self.manifest_path)
@@ -130,6 +134,9 @@ class VectorIndexPersistence:
         if int(manifest_embedding.get("dimension", 0) or 0) != int(signature["embedding"]["dimension"] or 0):
             details["stale_reason"] = "embedding dimension changed"
             return details
+               
+
+
 
         details["fresh"] = True
         details["is_fresh"] = True

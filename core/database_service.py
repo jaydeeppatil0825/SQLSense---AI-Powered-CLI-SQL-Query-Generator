@@ -10,7 +10,6 @@ and business glossary loading for the CLI.
 import os
 from typing import Optional, Dict, Any
 from sqlalchemy.engine import Engine
-
 from db.connection import connect_engine, get_engine, list_accessible_databases, SUPPORTED_DB_TYPES
 from semantic.knowledge_base_builder import build_knowledge_base
 from semantic.erp_metadata import enrich_knowledge_base_for_erp, summarize_knowledge_base

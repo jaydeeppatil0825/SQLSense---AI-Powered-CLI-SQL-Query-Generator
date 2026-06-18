@@ -73,6 +73,7 @@ def test_embedding_service_uses_local_sentence_transformer_when_available(monkey
     assert service.get_dimension() == 8
     assert len(service.embed("warehouse stock")) == 8
     assert all(len(embedding) == 8 for embedding in service.embed_batch(["stock", "warehouse"]))
+   
 
 
 def test_index_builder_build_from_knowledge_base():
@@ -174,6 +175,8 @@ def test_retriever_search_finds_relevant_stock_documents():
 
     assert results
     assert any("stock" in result["text"].lower() or "warehouse" in result["text"].lower() for result in results)
+
+
 
 
 def test_retriever_get_relevant_tables():

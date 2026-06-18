@@ -38,8 +38,8 @@ def test_generate_business_glossary_from_kb():
     assert "total due" in glossary
     assert glossary["total due"]["mapped_columns"][0]["table"] == "invoice_headers"
     assert glossary["total due"]["mapped_columns"][0]["column"] == "total_due"
-    assert "money" in glossary
-    assert any(mapping["column"] == "total_due" for mapping in glossary["money"]["mapped_columns"])
+    # No generic fallback terms like "money" should be in glossary
+    assert "money" not in glossary
 
 
 def test_generate_business_glossary_from_ai_enriched_kb():
@@ -104,10 +104,10 @@ def test_search_business_glossary():
     assert search_business_glossary("nonexistent", glossary) == {}
 
 
-def test_load_business_glossary_missing_file_uses_generic_fallback():
+def test_load_business_glossary_missing_file_uses_empty_fallback():
     glossary = load_business_glossary("nonexistent_path.json")
-    assert "money" in glossary
-    assert "quantity" in glossary
+    # No generic fallback - should return empty dict
+    assert glossary == {}
 
 
 def test_load_business_glossary_invalid_json_falls_back(tmp_path):
@@ -116,8 +116,8 @@ def test_load_business_glossary_invalid_json_falls_back(tmp_path):
 
     glossary = load_business_glossary(str(invalid_path))
 
-    assert "date" in glossary
-    assert "status" in glossary
+    # No generic fallback - should return empty dict
+    assert glossary == {}
 
 
 def test_load_business_glossary_unreadable_falls_back(monkeypatch):
@@ -127,8 +127,8 @@ def test_load_business_glossary_unreadable_falls_back(monkeypatch):
     monkeypatch.setattr("utils.file_utils.load_json", fake_load_json)
     glossary = load_business_glossary("semantic/business_glossary.json")
 
-    assert "name" in glossary
-    assert "code" in glossary
+    # No generic fallback - should return empty dict
+    assert glossary == {}
 
 
 def test_generate_glossary_with_empty_knowledge_base():

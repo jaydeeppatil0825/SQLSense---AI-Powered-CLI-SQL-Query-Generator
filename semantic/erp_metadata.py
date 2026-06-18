@@ -13,74 +13,6 @@ import re
 from typing import Any
 
 
-_MODULE_RULES: tuple[tuple[str, str], ...] = (
-    ("transaction", "transaction"),
-    ("invoice", "transaction"),
-    ("payment", "transaction"),
-    ("order", "transaction"),
-    ("shipment", "transaction"),
-    ("return", "transaction"),
-    ("event", "transaction"),
-    ("entry", "transaction"),
-    ("record", "transaction"),
-    ("balance", "snapshot"),
-    ("position", "snapshot"),
-    ("stock", "snapshot"),
-    ("summary", "snapshot"),
-    ("directory", "reference"),
-    ("master", "reference"),
-    ("catalog", "reference"),
-    ("category", "reference"),
-    ("branch", "reference"),
-    ("warehouse", "reference"),
-    ("customer", "reference"),
-    ("supplier", "reference"),
-    ("vendor", "reference"),
-)
-
-_SEMANTIC_PATTERNS: tuple[tuple[str, str], ...] = (
-    ("amount", "money"),
-    ("price", "money"),
-    ("cost", "money"),
-    ("total", "money"),
-    ("balance", "money"),
-    ("value", "money"),
-    ("tax", "money"),
-    ("discount", "money"),
-    ("salary", "money"),
-    ("wage", "money"),
-    ("credit", "money"),
-    ("debit", "money"),
-    ("due", "money"),
-    ("outstanding", "money"),
-    ("quantity", "quantity"),
-    ("qty", "quantity"),
-    ("count", "quantity"),
-    ("stock", "quantity"),
-    ("volume", "quantity"),
-    ("weight", "quantity"),
-    ("status", "status"),
-    ("state", "status"),
-    ("stage", "status"),
-    ("active", "status"),
-    ("inactive", "status"),
-    ("date", "date"),
-    ("time", "date"),
-    ("month", "date"),
-    ("year", "date"),
-    ("created", "date"),
-    ("updated", "date"),
-    ("name", "name"),
-    ("title", "name"),
-    ("description", "text"),
-    ("note", "text"),
-    ("comment", "text"),
-    ("code", "code"),
-    ("reference", "code"),
-    ("identifier", "id"),
-)
-
-
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip().lower())
 
@@ -131,29 +63,98 @@ def sanitize_business_purpose(text: str, table_name: str, module_name: str) -> s
     return cleaned
 
 
-def classify_semantic_type(column_name: str, table_name: str = "") -> str:
-    normalized_name = _normalize_identifier(column_name)
-    tokens = [token for token in normalized_name.split("_") if token]
+def classify_semantic_type(
+    column_name: str,
+    table_name: str = "",
+    column_type: str = "",
+    is_primary_key: bool = False,
+    is_foreign_key: bool = False,
+    sample_values: list | None = None,
+) -> str:
+    """
+    Classify semantic type from strong structural facts plus weak candidate evidence.
 
+    Direct structural facts:
+    - primary key / foreign key / *_id -> id
+    - date/datetime/timestamp -> date
+    - boolean type or boolean-only profile values -> boolean
+
+    Everything else remains a candidate for later AI/KB enrichment:
+    - numeric_candidate
+    - text_candidate
+    - category_candidate
+    """
+    normalized_name = _normalize_identifier(column_name)
+    column_type_lower = str(column_type or "").lower()
+    profiled_values = [value for value in (sample_values or []) if value is not None]
+    name_tokens = {token for token in normalized_name.split("_") if token}
+
+    def _type_contains(*tokens: str) -> bool:
+        return any(token in column_type_lower for token in tokens)
+
+    if is_primary_key or is_foreign_key:
+        return "id"
     if normalized_name == "id" or normalized_name.endswith("_id"):
         return "id"
-    if normalized_name.startswith("is_") or normalized_name.startswith("has_"):
+    if _type_contains("date", "datetime", "timestamp"):
+        return "date"
+    if _type_contains("boolean", "bool", "bit"):
         return "boolean"
 
-    for pattern, semantic_type in _SEMANTIC_PATTERNS:
-        if pattern in normalized_name or pattern in tokens:
-            return semantic_type
+    if profiled_values:
+        normalized_profile = {str(value).strip().lower() for value in profiled_values}
+        boolean_profile_values = {"true", "false", "yes", "no", "1", "0"}
+        if normalized_profile and normalized_profile <= boolean_profile_values:
+            return "boolean"
 
-    if tokens and tokens[-1] in {"id", "key"}:
-        return "id"
+    if _type_contains("decimal", "numeric", "float", "double", "real", "int", "integer", "bigint", "smallint", "tinyint"):
+        return "numeric_candidate"
+    if _type_contains("enum", "set"):
+        return "category_candidate"
+    if _type_contains("varchar", "char", "text", "string", "nvarchar", "nchar", "json"):
+        if name_tokens & {"status", "state", "type", "category", "segment", "code", "flag"}:
+            return "category_candidate"
+        return "text_candidate"
+
+    if name_tokens & {"status", "state", "type", "category", "segment", "code", "flag"}:
+        return "category_candidate"
+    if name_tokens & {"name", "label", "title", "text", "description", "comment", "note"}:
+        return "text_candidate"
+    if name_tokens & {
+        "amount",
+        "total",
+        "price",
+        "cost",
+        "balance",
+        "value",
+        "qty",
+        "quantity",
+        "units",
+        "rate",
+        "percent",
+        "percentage",
+    }:
+        return "numeric_candidate"
+
     return "general"
 
 
 def _infer_module_name(table_name: str) -> str:
     normalized_name = _normalize_identifier(table_name)
-    for pattern, module_name in _MODULE_RULES:
-        if pattern in normalized_name:
-            return module_name
+    if any(keyword in normalized_name for keyword in ["customer", "client", "account"]):
+        return "reference"
+    if any(keyword in normalized_name for keyword in ["vendor", "supplier", "provider"]):
+        return "reference"
+    if any(keyword in normalized_name for keyword in ["item", "product", "material"]):
+        return "reference"
+    if any(keyword in normalized_name for keyword in ["invoice", "order", "transaction"]):
+        return "transaction"
+    if any(keyword in normalized_name for keyword in ["payment", "receipt", "settlement"]):
+        return "transaction"
+    if any(keyword in normalized_name for keyword in ["inventory", "stock", "warehouse"]):
+        return "inventory"
+    if any(keyword in normalized_name for keyword in ["employee", "staff", "personnel"]):
+        return "reference"
     return "reference"
 
 
@@ -163,15 +164,29 @@ def _column_confidence(column_name: str, semantic_type: str) -> float:
         return 0.55
     if semantic_type == "id" and (normalized_name == "id" or normalized_name.endswith("_id")):
         return 0.98
-    if semantic_type in {"money", "quantity", "date", "status", "name", "code"}:
+    if semantic_type in {"date", "boolean"}:
         return 0.95
-    return 0.85
+    if semantic_type in {"numeric_candidate", "text_candidate", "category_candidate"}:
+        return 0.68
+    return 0.8
 
 
 def _column_reason(column_name: str, semantic_type: str) -> str:
     if semantic_type == "general":
-        return "Used generic fallback classification."
-    return f"Matched generic semantic pattern for {semantic_type}."
+        return "No strong structural fact was found; semantic meaning remains unresolved."
+    if semantic_type == "id":
+        return "Structural fact: primary/foreign-key or _id identifier column."
+    if semantic_type == "date":
+        return "Structural fact: date/datetime/timestamp column."
+    if semantic_type == "boolean":
+        return "Structural fact: boolean type or boolean-like profile values."
+    if semantic_type == "numeric_candidate":
+        return "Candidate evidence: numeric-like type or numeric-style column meaning."
+    if semantic_type == "text_candidate":
+        return "Candidate evidence: text-like type or label-style column meaning."
+    if semantic_type == "category_candidate":
+        return "Candidate evidence: categorical/code-like type or column meaning."
+    return f"Structural semantic classification: {semantic_type}."
 
 
 def _append_relationship(target: list[dict[str, Any]], relationship: dict[str, Any]) -> None:
@@ -293,13 +308,27 @@ def enrich_knowledge_base_for_erp(knowledge_base: dict[str, Any]) -> dict[str, A
         for column in table_data.get("columns", []):
             semantic_type = str(column.get("semantic_type") or "")
             if not semantic_type or semantic_type == "general":
-                semantic_type = classify_semantic_type(column.get("name", ""), table_name=table_name)
+                semantic_type = classify_semantic_type(
+                    column.get("name", ""),
+                    table_name=table_name,
+                    column_type=column.get("type", ""),
+                    is_primary_key=str(column.get("name", "")) in set(table_data.get("primary_keys", [])),
+                    is_foreign_key=str(column.get("name", "")) in {
+                        str(fk.get("column", ""))
+                        for fk in table_data.get("foreign_keys", [])
+                    },
+                    sample_values=column.get("sample_values", []),
+                )
             column["semantic_type"] = semantic_type
-            column["confidence"] = max(float(column.get("confidence", 0.0) or 0.0), _column_confidence(column.get("name", ""), semantic_type))
+            column["confidence"] = max(
+                float(column.get("confidence", 0.0) or 0.0),
+                _column_confidence(column.get("name", ""), semantic_type),
+            )
             column["reason"] = sanitize_short_text(
                 column.get("reason", ""),
                 fallback=_column_reason(column.get("name", ""), semantic_type),
             )
+            column["is_date"] = bool(semantic_type == "date")
 
     for relationship in detected_relationships:
         from_table = relationship.get("from_table")

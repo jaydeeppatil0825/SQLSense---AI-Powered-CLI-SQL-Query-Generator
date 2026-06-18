@@ -1,4 +1,4 @@
-from semantic.semantic_mapper import SEMANTIC_MAP, GENERIC_SEMANTIC_PATTERNS, add_semantic_mapping
+from semantic.semantic_mapper import SEMANTIC_MAP, add_semantic_mapping
 
 
 def test_empty_schema_returns_input_unchanged():
@@ -6,7 +6,11 @@ def test_empty_schema_returns_input_unchanged():
     assert add_semantic_mapping(schema) is schema
 
 
-def test_semantic_mapping_reclassifies_legacy_domain_specific_types():
+def test_semantic_map_backward_compatibility_alias_is_empty():
+    assert SEMANTIC_MAP == {}
+
+
+def test_legacy_domain_specific_types_are_reduced_to_candidates_without_strong_facts():
     schema = {
         "client_directory": {
             "columns": [
@@ -18,123 +22,118 @@ def test_semantic_mapping_reclassifies_legacy_domain_specific_types():
 
     result = add_semantic_mapping(schema)
 
-    assert result["client_directory"]["columns"][0]["semantic_type"] == "name"
-    assert result["client_directory"]["columns"][1]["semantic_type"] == "code"
+    assert result["client_directory"]["columns"][0]["semantic_type"] == "text_candidate"
+    assert result["client_directory"]["columns"][1]["semantic_type"] == "category_candidate"
 
 
-def test_generic_patterns_classify_money_columns():
+def test_numeric_types_only_become_numeric_candidates():
     schema = {
         "transactions": {
             "columns": [
-                {"name": "amount"},
-                {"name": "total_price"},
-                {"name": "cost"},
-                {"name": "outstanding_balance"},
+                {"name": "amount", "type": "DECIMAL(10,2)"},
+                {"name": "total_price", "type": "numeric"},
+                {"name": "cost", "type": "float"},
+                {"name": "outstanding_balance", "type": "double precision"},
             ]
         }
     }
 
     result = add_semantic_mapping(schema)
 
-    assert result["transactions"]["columns"][0]["semantic_type"] == "money"
-    assert result["transactions"]["columns"][1]["semantic_type"] == "money"
-    assert result["transactions"]["columns"][2]["semantic_type"] == "money"
-    assert result["transactions"]["columns"][3]["semantic_type"] == "money"
+    assert all(
+        column["semantic_type"] == "numeric_candidate"
+        for column in result["transactions"]["columns"]
+    )
 
 
-def test_generic_patterns_classify_quantity_columns():
+def test_integer_like_types_do_not_become_quantity_without_ai_enrichment():
     schema = {
         "inventory": {
             "columns": [
-                {"name": "quantity"},
-                {"name": "qty"},
-                {"name": "stock_level"},
-                {"name": "units"},
+                {"name": "quantity", "type": "int"},
+                {"name": "qty", "type": "bigint"},
+                {"name": "stock_level", "type": "smallint"},
+                {"name": "units", "type": "integer"},
             ]
         }
     }
 
     result = add_semantic_mapping(schema)
 
-    assert result["inventory"]["columns"][0]["semantic_type"] == "quantity"
-    assert result["inventory"]["columns"][1]["semantic_type"] == "quantity"
-    assert result["inventory"]["columns"][2]["semantic_type"] == "quantity"
-    assert result["inventory"]["columns"][3]["semantic_type"] == "quantity"
+    assert all(
+        column["semantic_type"] == "numeric_candidate"
+        for column in result["inventory"]["columns"]
+    )
 
 
-def test_generic_patterns_classify_date_columns():
+def test_date_types_are_strong_facts_and_set_is_date():
     schema = {
         "events": {
             "columns": [
-                {"name": "created_at"},
-                {"name": "updated_at"},
-                {"name": "start_date"},
-                {"name": "invoice_date"},
+                {"name": "created_at", "type": "datetime"},
+                {"name": "updated_at", "type": "timestamp"},
+                {"name": "start_date", "type": "date"},
             ]
         }
     }
 
     result = add_semantic_mapping(schema)
 
-    assert result["events"]["columns"][0]["semantic_type"] == "date"
-    assert result["events"]["columns"][1]["semantic_type"] == "date"
-    assert result["events"]["columns"][2]["semantic_type"] == "date"
-    assert result["events"]["columns"][3]["semantic_type"] == "date"
+    for column in result["events"]["columns"]:
+        assert column["semantic_type"] == "date"
+        assert column["is_date"] is True
 
 
-def test_generic_patterns_classify_status_columns():
+def test_boolean_type_and_boolean_profile_values_are_strong_facts():
     schema = {
         "tasks": {
             "columns": [
-                {"name": "status"},
-                {"name": "is_active"},
-                {"name": "is_enabled"},
-                {"name": "completed"},
+                {"name": "is_active", "type": "boolean"},
+                {"name": "enabled_flag", "type": "varchar", "sample_values": [True, False, True]},
+                {"name": "completed", "type": "varchar"},
             ]
         }
     }
 
     result = add_semantic_mapping(schema)
 
-    assert result["tasks"]["columns"][0]["semantic_type"] == "status"
+    assert result["tasks"]["columns"][0]["semantic_type"] == "boolean"
     assert result["tasks"]["columns"][1]["semantic_type"] == "boolean"
-    assert result["tasks"]["columns"][2]["semantic_type"] == "boolean"
-    assert result["tasks"]["columns"][3]["semantic_type"] == "status"
+    assert result["tasks"]["columns"][2]["semantic_type"] == "text_candidate"
 
 
-def test_data_type_inference():
+def test_id_columns_win_over_existing_ai_guesses():
     schema = {
-        "generic_table": {
+        "records": {
+            "primary_keys": ["record_id"],
+            "foreign_keys": [{"column": "owner_id"}],
             "columns": [
-                {"name": "some_field", "type": "int"},
-                {"name": "another_field", "type": "decimal"},
-                {"name": "text_field", "type": "varchar"},
-                {"name": "date_field", "type": "date"},
+                {"name": "record_id", "type": "int", "semantic_type": "money"},
+                {"name": "owner_id", "type": "int", "semantic_type": "name"},
+                {"name": "created_on", "type": "timestamp", "semantic_type": "text_candidate"},
+            ],
+        }
+    }
+
+    result = add_semantic_mapping(schema)
+
+    assert result["records"]["columns"][0]["semantic_type"] == "id"
+    assert result["records"]["columns"][1]["semantic_type"] == "id"
+    assert result["records"]["columns"][2]["semantic_type"] == "date"
+    assert result["records"]["columns"][2]["is_date"] is True
+
+
+def test_non_structural_ai_enrichment_can_remain_when_no_strong_fact_exists():
+    schema = {
+        "orders": {
+            "columns": [
+                {"name": "final_amount", "type": "decimal", "semantic_type": "money"},
+                {"name": "customer_label", "type": "varchar", "semantic_type": "name"},
             ]
         }
     }
 
     result = add_semantic_mapping(schema)
 
-    assert result["generic_table"]["columns"][0]["semantic_type"] == "id"
-    assert result["generic_table"]["columns"][1]["semantic_type"] == "money"
-    assert result["generic_table"]["columns"][2]["semantic_type"] == "text"
-    assert result["generic_table"]["columns"][3]["semantic_type"] == "date"
-
-
-def test_sample_value_inference():
-    schema = {
-        "data": {
-            "columns": [
-                {"name": "is_active_flag", "sample_values": [True, False, True]},
-                {"name": "generic_percent", "sample_values": [25, 50, 75, 100]},
-                {"name": "generic_date", "sample_values": ["2024-01-01", "2024-02-01"]},
-            ]
-        }
-    }
-
-    result = add_semantic_mapping(schema)
-
-    assert result["data"]["columns"][0]["semantic_type"] == "boolean"
-    assert result["data"]["columns"][1]["semantic_type"] == "percentage"
-    assert result["data"]["columns"][2]["semantic_type"] == "date"
+    assert result["orders"]["columns"][0]["semantic_type"] == "money"
+    assert result["orders"]["columns"][1]["semantic_type"] == "name"

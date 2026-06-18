@@ -21,44 +21,7 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
-_GENERIC_FALLBACK_GLOSSARY = {
-    "money": {
-        "description": "Monetary values such as totals, prices, balances, or costs.",
-        "mapped_columns": [],
-        "example_questions": ["Show total amount"],
-        "business_terms": ["amount", "total", "price", "cost", "balance"],
-    },
-    "quantity": {
-        "description": "Counts or measurable quantities.",
-        "mapped_columns": [],
-        "example_questions": ["Show total quantity"],
-        "business_terms": ["qty", "count", "units", "stock"],
-    },
-    "date": {
-        "description": "Date or time information.",
-        "mapped_columns": [],
-        "example_questions": ["Show latest records"],
-        "business_terms": ["time", "month", "year", "recent"],
-    },
-    "status": {
-        "description": "State or lifecycle information.",
-        "mapped_columns": [],
-        "example_questions": ["Show pending records"],
-        "business_terms": ["state", "active", "inactive", "pending"],
-    },
-    "name": {
-        "description": "Names or labels used to identify records.",
-        "mapped_columns": [],
-        "example_questions": ["Show names"],
-        "business_terms": ["title", "label"],
-    },
-    "code": {
-        "description": "Codes, references, or external identifiers.",
-        "mapped_columns": [],
-        "example_questions": ["Show reference codes"],
-        "business_terms": ["reference", "ref", "identifier"],
-    },
-}
+
 
 
 def _normalize(value: str) -> str:
@@ -247,51 +210,13 @@ def _add_entry(
 
 
 def get_default_business_glossary() -> Dict[str, Any]:
-    """Return a generic fallback glossary with no database-specific mappings."""
-    return {
-        term: {
-            "description": data["description"],
-            "mapped_columns": list(data.get("mapped_columns", [])),
-            "example_questions": list(data.get("example_questions", [])),
-            "business_terms": list(data.get("business_terms", [])),
-        }
-        for term, data in _GENERIC_FALLBACK_GLOSSARY.items()
-    }
+    """Return an empty glossary - no hardcoded fallback terms."""
+    return {}
 
 
 def _semantic_aliases(term: str, semantic_type: str) -> list[str]:
-    aliases = [term]
-    if semantic_type == "money":
-        aliases.extend(["amount", "total", "value", "balance"])
-    elif semantic_type == "quantity":
-        aliases.extend(["qty", "count", "stock", "units"])
-    elif semantic_type == "date":
-        aliases.extend(["time", "month", "year"])
-    elif semantic_type == "status":
-        aliases.extend(["state"])
-    elif semantic_type == "name":
-        aliases.extend(["label", "title"])
-    elif semantic_type == "code":
-        aliases.extend(["reference", "ref"])
-    return _unique_preserve_order(aliases)
-
-
-def _build_semantic_rollups(knowledge_base: dict) -> dict[str, list[dict[str, Any]]]:
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for table_name, table_data in knowledge_base.items():
-        for column in table_data.get("columns", []):
-            semantic_type = str(column.get("semantic_type", "general")).lower()
-            if semantic_type in {"general", "", "text", "boolean", "id"}:
-                continue
-            grouped[semantic_type].append(
-                {
-                    "table": table_name,
-                    "column": column.get("name", ""),
-                    "type": column.get("type", ""),
-                    "confidence": "medium",
-                }
-            )
-    return grouped
+    # No hardcoded semantic aliases - only use the term itself
+    return [term]
 
 
 def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = False) -> Dict[str, Any]:
@@ -302,7 +227,6 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
     1. Table names and table descriptions
     2. Column names and semantic types
     3. AI-enriched business terms already attached to columns/tables
-    4. Generic semantic rollups such as money/date/quantity
     """
     logger.info("Generating business glossary")
 
@@ -374,28 +298,6 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                     example_questions=_example_questions_for_column(table_name, column),
                     business_terms=[human_column, table_name, human_table],
                 )
-
-    for semantic_type, mappings in _build_semantic_rollups(knowledge_base).items():
-        base_entry = _GENERIC_FALLBACK_GLOSSARY.get(semantic_type)
-        if not base_entry:
-            continue
-        _add_entry(
-            glossary,
-            semantic_type,
-            description=base_entry["description"],
-            mappings=mappings[:8],
-            example_questions=base_entry.get("example_questions", []),
-            business_terms=base_entry.get("business_terms", []),
-        )
-        for alias in base_entry.get("business_terms", []):
-            _add_entry(
-                glossary,
-                alias,
-                description=base_entry["description"],
-                mappings=mappings[:8],
-                example_questions=base_entry.get("example_questions", []),
-                business_terms=[semantic_type],
-            )
 
     logger.info(f"Generated glossary with {len(glossary)} terms")
     return glossary

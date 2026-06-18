@@ -1,5 +1,5 @@
 {
     "database_type": "mysql",
     "database_name": "dynamic_ops_lab",
-    "schema_fingerprint": "a1b1dd4c5a32bbc71a63894a1698bd480ad9361759acb16174b1c8ffb3d7aa6c"
+    "schema_fingerprint": "bd86d001ac2106f95c9ae48769aa11f95cda97ccb73be1e06cdcba88979800d2"
 }
