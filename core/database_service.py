@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any
 from sqlalchemy.engine import Engine
 from db.connection import connect_engine, get_engine, list_accessible_databases, SUPPORTED_DB_TYPES
 from ai.sql_generator import check_ollama_status
+from core.ai_backend_service import get_ai_backend_service
 from semantic.knowledge_base_builder import build_knowledge_base
 from semantic.erp_metadata import enrich_knowledge_base_for_erp, summarize_knowledge_base
 from semantic.business_glossary import load_business_glossary, generate_business_glossary, save_business_glossary
@@ -462,6 +463,22 @@ class DatabaseService:
                         enriched_kb = knowledge_base
                     else:
                         enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
+                elif ai_backend == "nvidia":
+                    backend_ok, backend_message = get_ai_backend_service().test_backend_connection("nvidia")
+                    if not backend_ok:
+                        self.last_ai_enrichment_status = "fallback"
+                        backend_message_lower = str(backend_message or "").lower()
+                        if "timed out" in backend_message_lower or "timeout" in backend_message_lower:
+                            self.last_ai_enrichment_message = "NVIDIA backend timed out. Using rule-based enrichment."
+                        elif "empty response" in backend_message_lower:
+                            self.last_ai_enrichment_message = "NVIDIA backend returned an empty response. Using rule-based enrichment."
+                        else:
+                            self.last_ai_enrichment_message = "NVIDIA backend is not connected. Using rule-based enrichment."
+                        logger.info(f"{self.last_ai_enrichment_message} Probe result: {backend_message}")
+                        print(f"  {self.last_ai_enrichment_message}")
+                        enriched_kb = knowledge_base
+                    else:
+                        enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
                 else:
                     enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
                 
@@ -488,7 +505,12 @@ class DatabaseService:
                         self.last_ai_enrichment_message = "Could not save enriched knowledge base. Using rule-based enrichment."
                 else:
                     # enrich_knowledge_base_with_ai returned the original dict — enrichment failed
-                    if self.last_ai_enrichment_message != "Ollama is not running. Using rule-based enrichment.":
+                    if self.last_ai_enrichment_message not in {
+                        "Ollama is not running. Using rule-based enrichment.",
+                        "NVIDIA backend timed out. Using rule-based enrichment.",
+                        "NVIDIA backend returned an empty response. Using rule-based enrichment.",
+                        "NVIDIA backend is not connected. Using rule-based enrichment.",
+                    }:
                         reason = get_last_enrichment_reason() or "AI enrichment returned no changes"
                         self.last_ai_enrichment_status = "fallback"
                         if "timed out" in reason.lower():

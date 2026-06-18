@@ -26,6 +26,14 @@ _DEFAULT_LOCAL_MODEL = "llama3"
 _DEFAULT_LOCAL_URL = "http://localhost:11434"
 _DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 _DEFAULT_NVIDIA_URL = "https://integrate.api.nvidia.com/v1"
+_BACKEND_TEST_MAX_TOKENS = 8
+
+
+def _response_preview(text: str, limit: int = 80) -> str:
+    preview = " ".join(str(text or "").split())
+    if len(preview) <= limit:
+        return preview
+    return preview[: limit - 3] + "..."
 
 
 def _normalize_backend_name(value: str | None) -> str:
@@ -277,23 +285,28 @@ class AIBackendService:
             max_tokens=max_tokens,
         )
 
-    def test_backend_connection(self) -> Tuple[bool, str]:
-        """Test the current AI backend connection."""
+    def test_backend_connection(self, backend: str | None = None) -> Tuple[bool, str]:
+        """Test the selected AI backend connection."""
         self.refresh_from_env()
-        if self.active_backend == "nvidia":
+        selected_backend = _normalize_backend_name(backend or self.active_backend)
+
+        if selected_backend == "nvidia":
             try:
                 content = self.call_backend(
                     [
-                        {"role": "system", "content": "Return only valid JSON or SQL as requested."},
-                        {"role": "user", "content": "Reply with only: OK"},
+                        {"role": "system", "content": "You are a connection health check. Reply with exactly OK and no other text."},
+                        {"role": "user", "content": "OK"},
                     ],
                     backend="nvidia",
                     temperature=0,
-                    max_tokens=16,
+                    max_tokens=_BACKEND_TEST_MAX_TOKENS,
                 ).strip()
+                if not content:
+                    return False, "NVIDIA backend returned an empty response."
+                preview = _response_preview(content)
                 if content == "OK":
-                    return True, f"NVIDIA backend connected. Model replied: {content}"
-                return False, f"NVIDIA backend returned unexpected response: {content or '[empty]'}"
+                    return True, f"NVIDIA backend connected. Response preview: {preview}"
+                return True, f"NVIDIA backend connected. Response preview: {preview} (health check did not return exact OK)"
             except Exception as exc:
                 logger.debug(f"NVIDIA connection test failed: {exc}")
                 return False, str(exc)

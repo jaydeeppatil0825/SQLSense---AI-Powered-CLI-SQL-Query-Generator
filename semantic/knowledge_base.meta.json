@@ -1,5 +1,5 @@
 {
     "database_type": "mysql",
-    "database_name": "pcsoft_erp_test",
-    "schema_fingerprint": "f2da00d63bc1b550656a09ce2978a8bcebe98568c204ba800912f5c16213e651"
+    "database_name": "schema_learning_lab",
+    "schema_fingerprint": "cda7fdce383b74a638ecb9c5b31575cce052ca832a9d1f558c8e86371490cf06"
 }

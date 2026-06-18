@@ -45,6 +45,49 @@ def test_build_knowledge_base_falls_back_when_ollama_is_not_running(monkeypatch,
     )
 
 
+def test_build_knowledge_base_skips_nvidia_ai_enrichment_when_backend_not_connected(monkeypatch, tmp_path):
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
+    engine = create_engine("sqlite:///:memory:")
+    metadata = MetaData()
+    Table(
+        "orders",
+        metadata,
+        Column("order_id", Integer, primary_key=True),
+        Column("final_amount", Integer),
+    )
+    metadata.create_all(engine)
+
+    service = DatabaseService()
+    service.engine = engine
+
+    monkeypatch.setattr("core.database_service.save_json", lambda data, path: None)
+    monkeypatch.setattr("core.database_service.save_business_glossary", lambda glossary, path: None)
+
+    class FakeBackendService:
+        def test_backend_connection(self, backend=None):
+            return False, "NVIDIA backend returned an empty response."
+
+    monkeypatch.setattr("core.database_service.get_ai_backend_service", lambda: FakeBackendService())
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("AI enrichment should not run when NVIDIA preflight fails")
+
+    monkeypatch.setattr("core.database_service.enrich_knowledge_base_with_ai", fail_if_called)
+
+    success, message, knowledge_base = service.build_knowledge_base(
+        use_ai_enrichment=True,
+        ai_backend="nvidia",
+    )
+
+    assert success is True
+    assert message == "Knowledge base built successfully"
+    assert "orders" in knowledge_base
+    assert service.get_last_ai_enrichment_result() == (
+        "fallback",
+        "NVIDIA backend returned an empty response. Using rule-based enrichment.",
+    )
+
+
 def test_connect_database_fails_cleanly_for_missing_database_and_clears_stale_state(monkeypatch, tmp_path):
     monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
     service = DatabaseService()

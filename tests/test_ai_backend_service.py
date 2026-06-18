@@ -11,6 +11,7 @@ def test_backend_uses_nvidia_when_env_requests_it(monkeypatch):
     monkeypatch.setenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
     monkeypatch.setenv("NVIDIA_TEMPERATURE", "1")
     monkeypatch.setenv("NVIDIA_MAX_TOKENS", "16384")
+    monkeypatch.setenv("NVIDIA_TIMEOUT", "60")
 
     service = AIBackendService()
 
@@ -53,6 +54,7 @@ def test_local_backend_connection_status_not_running(monkeypatch):
 def test_nvidia_backend_connection_uses_ok_probe(monkeypatch):
     monkeypatch.setenv("AI_BACKEND", "nvidia")
     monkeypatch.setenv("NVIDIA_API_KEY", "secret")
+    monkeypatch.setenv("NVIDIA_TIMEOUT", "45")
     service = AIBackendService()
 
     response = MagicMock()
@@ -64,7 +66,44 @@ def test_nvidia_backend_connection_uses_ok_probe(monkeypatch):
 
     assert ok is True
     assert "NVIDIA backend connected" in message
+    assert "Response preview: OK" in message
     request_json = mock_post.call_args.kwargs["json"]
-    assert request_json["messages"][1]["content"] == "Reply with only: OK"
+    assert request_json["messages"][0]["content"] == "You are a connection health check. Reply with exactly OK and no other text."
+    assert request_json["messages"][1]["content"] == "OK"
     assert request_json["temperature"] == 0
-    assert request_json["max_tokens"] == 16
+    assert request_json["max_tokens"] == 8
+    assert mock_post.call_args.kwargs["timeout"] == 45
+
+
+def test_nvidia_backend_connection_accepts_non_empty_non_ok_response(monkeypatch):
+    monkeypatch.setenv("AI_BACKEND", "nvidia")
+    monkeypatch.setenv("NVIDIA_API_KEY", "secret")
+    service = AIBackendService()
+
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"choices": [{"message": {"content": "OK - backend reachable"}}]}
+
+    with patch("core.ai_backend_service.requests.post", return_value=response):
+        ok, message = service.test_backend_connection()
+
+    assert ok is True
+    assert "NVIDIA backend connected" in message
+    assert "Response preview: OK - backend reachable" in message
+    assert "did not return exact OK" in message
+
+
+def test_nvidia_backend_connection_rejects_empty_response(monkeypatch):
+    monkeypatch.setenv("AI_BACKEND", "nvidia")
+    monkeypatch.setenv("NVIDIA_API_KEY", "secret")
+    service = AIBackendService()
+
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"choices": [{"message": {"content": ""}}]}
+
+    with patch("core.ai_backend_service.requests.post", return_value=response):
+        ok, message = service.test_backend_connection()
+
+    assert ok is False
+    assert message == "NVIDIA backend returned an empty response."
