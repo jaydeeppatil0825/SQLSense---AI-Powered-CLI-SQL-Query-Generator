@@ -11,10 +11,10 @@ import os
 from typing import Optional, Dict, Any
 from sqlalchemy.engine import Engine
 from db.connection import connect_engine, get_engine, list_accessible_databases, SUPPORTED_DB_TYPES
+from ai.sql_generator import check_ollama_status
 from semantic.knowledge_base_builder import build_knowledge_base
 from semantic.erp_metadata import enrich_knowledge_base_for_erp, summarize_knowledge_base
 from semantic.business_glossary import load_business_glossary, generate_business_glossary, save_business_glossary
-from ai.sql_generator import check_ollama_status
 from semantic.ai_semantic_enricher import (
     enrich_knowledge_base_with_ai,
     _describe_ai_enrichment_failure,
@@ -452,11 +452,18 @@ class DatabaseService:
         # AI semantic enrichment — failure must NEVER stop KB generation
         if use_ai_enrichment:
             try:
-                ai_backend = "local"
-                ollama_ok, _ = check_ollama_status()
-                if not ollama_ok:
-                    raise ConnectionError("Ollama is not running")
-                enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
+                if ai_backend == "local":
+                    ollama_ok, _ = check_ollama_status()
+                    if not ollama_ok:
+                        self.last_ai_enrichment_status = "fallback"
+                        self.last_ai_enrichment_message = "Ollama is not running. Using rule-based enrichment."
+                        logger.info(self.last_ai_enrichment_message)
+                        print(f"  {self.last_ai_enrichment_message}")
+                        enriched_kb = knowledge_base
+                    else:
+                        enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
+                else:
+                    enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
                 
                 if enriched_kb is not knowledge_base:
                     final_knowledge_base = enrich_knowledge_base_for_erp(enriched_kb)
@@ -481,16 +488,17 @@ class DatabaseService:
                         self.last_ai_enrichment_message = "Could not save enriched knowledge base. Using rule-based enrichment."
                 else:
                     # enrich_knowledge_base_with_ai returned the original dict — enrichment failed
-                    reason = get_last_enrichment_reason() or "AI enrichment returned no changes"
-                    self.last_ai_enrichment_status = "fallback"
-                    if "timed out" in reason.lower():
-                        self.last_ai_enrichment_message = "Local AI timed out. Using rule-based fallback."
-                    elif reason == "Ollama is not running":
-                        self.last_ai_enrichment_message = "Ollama is not running. Using rule-based enrichment."
-                    else:
-                        self.last_ai_enrichment_message = f"{reason}. Using rule-based fallback."
-                    logger.info(self.last_ai_enrichment_message)
-                    print(f"  {self.last_ai_enrichment_message}")
+                    if self.last_ai_enrichment_message != "Ollama is not running. Using rule-based enrichment.":
+                        reason = get_last_enrichment_reason() or "AI enrichment returned no changes"
+                        self.last_ai_enrichment_status = "fallback"
+                        if "timed out" in reason.lower():
+                            self.last_ai_enrichment_message = "Local AI timed out. Using rule-based fallback."
+                        elif reason == "Ollama is not running":
+                            self.last_ai_enrichment_message = "Ollama is not running. Using rule-based enrichment."
+                        else:
+                            self.last_ai_enrichment_message = f"{reason}. Using rule-based fallback."
+                        logger.info(self.last_ai_enrichment_message)
+                        print(f"  {self.last_ai_enrichment_message}")
             except Exception as e:
                 # Catch everything so a timeout or network error never stops KB generation
                 reason = _describe_ai_enrichment_failure(e, ai_backend)

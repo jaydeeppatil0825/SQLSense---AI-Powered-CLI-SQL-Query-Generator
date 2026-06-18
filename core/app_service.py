@@ -14,7 +14,7 @@ from core.question_service import QuestionService
 from core.result_service import ResultService
 from core.chart_service import ChartService
 from core.insight_service import InsightService
-from core.ai_backend_service import AIBackendService
+from core.ai_backend_service import get_ai_backend_service
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -29,7 +29,7 @@ class AppService:
         self.result_service = ResultService()
         self.chart_service = ChartService()
         self.insight_service = InsightService()
-        self.ai_backend_service = AIBackendService()
+        self.ai_backend_service = get_ai_backend_service()
     
     # Database operations
     def connect_database(

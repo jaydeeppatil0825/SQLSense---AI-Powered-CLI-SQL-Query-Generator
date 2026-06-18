@@ -30,9 +30,9 @@ def test_enrichment_adds_generic_modules_semantics_and_relationship_confidence()
 
     assert enriched["invoice_headers"]["module"] == "transaction"
     assert enriched["client_directory"]["module"] == "reference"
-    assert enriched["invoice_headers"]["columns"][3]["semantic_type"] == "money"
-    assert enriched["invoice_headers"]["columns"][4]["semantic_type"] == "status"
-    assert enriched["invoice_headers"]["columns"][3]["confidence"] >= 0.9
+    assert enriched["invoice_headers"]["columns"][3]["semantic_type"] == "numeric_candidate"
+    assert enriched["invoice_headers"]["columns"][4]["semantic_type"] == "category_candidate"
+    assert enriched["invoice_headers"]["columns"][3]["confidence"] >= 0.65
     assert enriched["invoice_headers"]["columns"][3]["reason"]
     assert enriched["invoice_headers"]["table_name"] == "invoice_headers"
 

@@ -924,7 +924,7 @@ def _infer_metric_from_selected_columns(
     for table_entry in selected_tables:
         for column_entry in table_entry.get("selected_columns", []):
             semantic_type = str(column_entry.get("semantic_type", "")).lower()
-            if semantic_type in {"", "general", "unknown"}:
+            if semantic_type in {"", "general", "unknown", "numeric_candidate", "text_candidate", "category_candidate"}:
                 semantic_type = str(_infer_generic_semantic_type(str(column_entry.get("column", ""))) or "")
             if semantic_type not in {"money", "quantity", "percentage", "date", "status"}:
                 continue
@@ -958,7 +958,7 @@ def _infer_metric_from_glossary_matches(
                     semantic_type = str(column.get("semantic_type", "")).lower()
                     break
 
-            if semantic_type in {"", "general", "unknown"}:
+            if semantic_type in {"", "general", "unknown", "numeric_candidate", "text_candidate", "category_candidate"}:
                 semantic_type = str(_infer_generic_semantic_type(column_name) or "")
             if semantic_type not in {"money", "quantity", "percentage"}:
                 continue

@@ -65,14 +65,16 @@ class SessionState:
 # ── Small helpers ─────────────────────────────────────────────────────────────
 
 def _current_backend_from_env() -> str:
-    """Read LLM_BACKEND from .env; fall back to 'local' for unknown values."""
-    return "local"
+    """Read AI_BACKEND from env; fall back to local for unknown values."""
+    backend = (os.getenv("AI_BACKEND") or os.getenv("LLM_BACKEND") or "local").strip().lower()
+    return backend if backend in {"local", "nvidia"} else "local"
 
 
 def _backend_label(state: SessionState) -> str:
     """One-line label for the active AI backend shown in the menu header."""
     config = state.app_service.get_backend_config()
-    return f"local ({config.get('model', 'llama3')})"
+    backend = config.get("active_backend", _current_backend_from_env())
+    return f"{backend} ({config.get('model', 'unknown')})"
 
 
 def _db_label(state: SessionState) -> str:
@@ -713,43 +715,57 @@ def handle_execute_last_sql(state: SessionState) -> None:
 def handle_ai_backend_settings(state: SessionState) -> None:
     """
     AI Backend Settings submenu.
-    Shows and configures the local Ollama backend.
+    Shows and configures the active AI backend.
     """
     logger.info("User chose option 5: AI Backend Settings")
 
     while True:
         config = state.app_service.get_backend_config()
         success, message = state.app_service.test_backend_connection()
-        status = "running" if success else "not running"
+        backend_name = config.get("active_backend", "local")
+        status = "connected" if success else "not connected"
 
         print()
         print("=" * 52)
         print("  AI Backend Settings")
         print("=" * 52)
-        print("  Current backend: local")
-        print(f"  Model: {config.get('model', 'llama3')}")
-        print(f"  URL: {config.get('api_url', 'http://localhost:11434')}")
+        print(f"  Current backend: {backend_name}")
+        print(f"  Model: {config.get('model', 'unknown')}")
+        print(f"  URL: {config.get('api_url', 'not set')}")
+        if backend_name == "nvidia":
+            print(f"  Temperature: {config.get('temperature', 0)}")
+            print(f"  Max tokens: {config.get('max_tokens', 2048)}")
         print(f"  Timeout: {config.get('timeout', 60)} seconds")
-        print(f"  Ollama status: {status}")
-        if not success:
+        print(f"  Backend status: {status}")
+        if success:
+            print(f"  Last test: {message}")
+        elif backend_name == "local":
             print("  Ollama is not running. Using rule-based fallback when needed.")
+        else:
+            print(f"  NVIDIA test failed: {message}")
         print("-" * 52)
-        print("  1) Change local model or URL")
-        print("  2) Refresh Ollama status")
-        print("  3) Back")
+        print("  1) Use local backend")
+        print("  2) Use NVIDIA backend")
+        print("  3) Test active backend")
+        print("  4) Refresh status")
+        print("  5) Back")
         print("=" * 52)
 
-        choice = _input("  Choose an option (1-3): ")
+        choice = _input("  Choose an option (1-5): ")
 
-        if not choice or choice not in {"1", "2", "3"}:
-            print("  Invalid option. Please choose 1 to 3.")
+        if not choice or choice not in {"1", "2", "3", "4", "5"}:
+            print("  Invalid option. Please choose 1 to 5.")
             continue
 
         if choice == "1":
             handle_use_local_llm(state)
         elif choice == "2":
-            continue
+            handle_use_nvidia(state)
         elif choice == "3":
+            handle_test_backend_connection(state)
+        elif choice == "4":
+            continue
+        elif choice == "5":
             logger.info("User returned from AI Backend Settings")
             return
 
@@ -761,11 +777,13 @@ def handle_use_local_llm(state: SessionState) -> None:
     print("\n  Local LLM API Configuration")
     print("-" * 52)
     
-    # Show current settings
     config = state.app_service.get_backend_config()
-    print(f"  Current API URL: {config.get('api_url', 'Not set')}")
-    print(f"  Current Model: {config.get('model', 'Not set')}")
-    print(f"  Current Timeout: {config.get('timeout', 60)} seconds")
+    current_url = config.get("api_url", "http://localhost:11434")
+    current_model = config.get("model", "llama3")
+    current_timeout = config.get("timeout", 60)
+    print(f"  Current API URL: {current_url}")
+    print(f"  Current Model: {current_model}")
+    print(f"  Current Timeout: {current_timeout} seconds")
     
     # Allow user to change settings
     new_url = _input("  Enter Local LLM API URL (press Enter to keep current): ")
@@ -773,19 +791,19 @@ def handle_use_local_llm(state: SessionState) -> None:
     new_timeout = _input("  Enter Timeout seconds (press Enter to keep current): ")
     
     if new_url or new_model or new_timeout:
-        url = new_url if new_url else config.get('api_url', 'http://localhost:11434')
-        model = new_model if new_model else config.get('model', 'llama3')
+        url = new_url if new_url else current_url
+        model = new_model if new_model else current_model
         if new_timeout:
             try:
                 timeout = max(int(new_timeout), 1)
             except ValueError:
-                timeout = config.get('timeout', 60)
+                timeout = current_timeout
                 print(f"  Invalid timeout. Keeping {timeout} seconds.")
             os.environ["LOCAL_TIMEOUT"] = str(timeout)
         state.app_service.set_local_backend(model, url)
         print(f"\n  Active backend: local ({model})")
         print(f"  API URL: {url}")
-        print(f"  Timeout: {os.environ.get('LOCAL_TIMEOUT', config.get('timeout', 60))} seconds")
+        print(f"  Timeout: {os.environ.get('LOCAL_TIMEOUT', current_timeout)} seconds")
     else:
         print("  No changes made.")
 
@@ -797,10 +815,15 @@ def handle_use_nvidia(state: SessionState) -> None:
     print("\n  NVIDIA API Configuration")
     print("-" * 52)
     
-    # Show current settings
-    config = state.app_service.get_backend_config()
-    print(f"  Current Model: {config.get('model', 'Not set')}")
-    print(f"  Current Base URL: {config.get('api_url', 'Not set')}")
+    current_config = state.app_service.get_backend_config()
+    current_model = os.getenv("NVIDIA_MODEL", current_config.get("model", "nvidia/nemotron-3-ultra-550b-a55b"))
+    current_base_url = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
+    current_temperature = os.getenv("NVIDIA_TEMPERATURE", "1")
+    current_max_tokens = os.getenv("NVIDIA_MAX_TOKENS", "16384")
+    print(f"  Current Model: {current_model}")
+    print(f"  Current Base URL: {current_base_url}")
+    print(f"  Current Temperature: {current_temperature}")
+    print(f"  Current Max Tokens: {current_max_tokens}")
     
     # Get API key
     api_key = _input("  Enter NVIDIA API key (or press Enter to use NVIDIA_API_KEY from .env): ")
@@ -812,10 +835,10 @@ def handle_use_nvidia(state: SessionState) -> None:
             return
     
     # Get model
-    model = _input("  Enter NVIDIA model (default: meta/llama-3.1-405b-instruct): ") or "meta/llama-3.1-405b-instruct"
+    model = _input(f"  Enter NVIDIA model (default: {current_model}): ") or current_model
     
     # Get base URL (optional)
-    base_url = _input("  Enter NVIDIA base URL (default: https://integrate.api.nvidia.com/v1): ") or "https://integrate.api.nvidia.com/v1"
+    base_url = _input(f"  Enter NVIDIA base URL (default: {current_base_url}): ") or current_base_url
     
     # Set backend
     state.app_service.set_nvidia_backend(model, api_key, base_url)
@@ -823,7 +846,7 @@ def handle_use_nvidia(state: SessionState) -> None:
     print("\n  ✅ NVIDIA backend configured successfully!")
     print(f"  Model: {model}")
     print(f"  Base URL: {base_url}")
-    print("\n  Note: API key is stored in memory for this session only.")
+    print("\n  Note: API key is read from env unless you override it for this session.")
 
 
 def handle_view_current_backend(state: SessionState) -> None:

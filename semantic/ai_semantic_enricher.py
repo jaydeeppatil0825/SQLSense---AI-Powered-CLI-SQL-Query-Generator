@@ -3,8 +3,8 @@ semantic/ai_semantic_enricher.py
 =================================
 AI-powered enrichment of the knowledge base with business meaning.
 
-This module uses the local Ollama backend to enrich one table at a time.
-Small prompts keep local Llama3 responsive and allow partial success when one
+This module uses the configured AI backend to enrich one table at a time.
+Small prompts keep requests compact and allow partial success when one
 table fails or times out.
 """
 
@@ -14,7 +14,7 @@ import copy
 import json
 import re
 
-from ai.sql_generator import _call_ai_backend
+from core.ai_backend_service import call_ai_backend as _call_ai_backend
 from semantic.erp_metadata import build_rule_based_business_purpose, sanitize_business_purpose, sanitize_short_text
 from utils.logger import get_logger
 
@@ -450,7 +450,7 @@ def _chunk_columns(columns: list[dict], size: int = 3) -> list[list[dict]]:
 
 def enrich_knowledge_base_with_ai(knowledge_base: dict, backend: str = "local") -> dict:
     """
-    Enrich the knowledge base one table at a time with local Ollama.
+    Enrich the knowledge base one table at a time with the configured backend.
 
     If one table fails, only that table falls back to the rule-based version and
     the rest of the enrichment continues.
@@ -460,8 +460,6 @@ def enrich_knowledge_base_with_ai(knowledge_base: dict, backend: str = "local") 
     _LAST_ENRICHMENT_REASON = None
     _LAST_ENRICHED_TABLES = []
     _LAST_FALLBACK_TABLES = {}
-    backend = "local"
-
     logger.info("Starting AI semantic enrichment")
     enriched_kb = copy.deepcopy(knowledge_base)
 

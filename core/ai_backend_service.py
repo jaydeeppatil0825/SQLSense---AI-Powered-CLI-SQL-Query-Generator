@@ -1,81 +1,127 @@
 """
 core/ai_backend_service.py
 ==========================
-AI Backend service for AI backend management.
-
-This service handles CLI AI backend configuration and testing.
+Central AI backend service for CLI AI configuration, testing, and chat calls.
 """
+
+from __future__ import annotations
 
 from typing import Optional, Tuple
 import os
 
+from dotenv import load_dotenv
+
 from utils.logger import get_logger
 
+try:
+    import requests
+except ImportError:  # pragma: no cover
+    requests = None
+
+
+load_dotenv()
 logger = get_logger()
+
+_DEFAULT_LOCAL_MODEL = "llama3"
+_DEFAULT_LOCAL_URL = "http://localhost:11434"
+_DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
+_DEFAULT_NVIDIA_URL = "https://integrate.api.nvidia.com/v1"
+
+
+def _normalize_backend_name(value: str | None) -> str:
+    backend = str(value or "").strip().lower()
+    if backend in {"nvidia", "local"}:
+        return backend
+    return "local"
+
+
+def _read_int_env(name: str, default: int, minimum: int = 1) -> int:
+    raw = str(os.getenv(name, str(default)) or str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(value, minimum)
+
+
+def _read_float_env(name: str, default: float) -> float:
+    raw = str(os.getenv(name, str(default)) or str(default)).strip()
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _sync_backend_env(backend: str) -> None:
+    os.environ["AI_BACKEND"] = backend
+    os.environ["LLM_BACKEND"] = backend
 
 
 class AIBackendService:
-    """Service for AI backend management."""
+    """Service for AI backend management and shared chat completions."""
 
     def __init__(self):
-        self.active_backend: str = "local"
-        self.local_model: str = "llama3"
-        self.local_api_url: str = "http://localhost:11434"
-        self.local_timeout: int = 120
-       
-        
-        
-        # Load from environment variables
-        self.local_model = os.getenv("LOCAL_MODEL", "llama3")
-        self.local_api_url = os.getenv("LOCAL_API_URL", "http://localhost:11434")
-        self.local_timeout = self._read_local_timeout()
+        self._load_from_env()
 
-        # The active CLI workflow is local-only. Legacy NVIDIA attributes remain
-        # on the class so old imports/tests do not break, but env values cannot
-        # switch the running CLI away from Ollama.
-        self.active_backend = "local"
-        os.environ["LLM_BACKEND"] = "local"
-        os.environ.setdefault("LOCAL_MODEL", self.local_model)
-        os.environ.setdefault("LOCAL_API_URL", self.local_api_url)
-        os.environ.setdefault("LOCAL_TIMEOUT", str(self.local_timeout))
+    def _load_from_env(self) -> None:
+        self.active_backend = _normalize_backend_name(
+            os.getenv("AI_BACKEND") or os.getenv("LLM_BACKEND") or "local"
+        )
+        self.local_model = (os.getenv("LOCAL_MODEL") or _DEFAULT_LOCAL_MODEL).strip() or _DEFAULT_LOCAL_MODEL
+        self.local_api_url = (os.getenv("LOCAL_API_URL") or _DEFAULT_LOCAL_URL).strip().rstrip("/")
+        self.local_timeout = _read_int_env("LOCAL_TIMEOUT", 120)
 
-    def _read_local_timeout(self) -> int:
-        raw = os.getenv("LOCAL_TIMEOUT", "120").strip()
-        try:
-            timeout = int(raw)
-        except ValueError:
-            return 120
-        return max(timeout, 1)
-    
-    def set_local_backend(self, model: str, api_url: str) -> None:
-        """
-        Set local LLM backend.
-        
-        Args:
-            model: Model name
-            api_url: API URL
-        """
-        self.active_backend = "local"
-        self.local_model = model or "llama3"
-        self.local_api_url = (api_url or "http://localhost:11434").rstrip("/")
-        self.local_timeout = self._read_local_timeout()
-        os.environ["LLM_BACKEND"] = "local"
+        self.nvidia_model = (os.getenv("NVIDIA_MODEL") or _DEFAULT_NVIDIA_MODEL).strip() or _DEFAULT_NVIDIA_MODEL
+        self.nvidia_base_url = (os.getenv("NVIDIA_BASE_URL") or _DEFAULT_NVIDIA_URL).strip().rstrip("/")
+        self.nvidia_api_key = (os.getenv("NVIDIA_API_KEY") or "").strip()
+        self.nvidia_temperature = _read_float_env("NVIDIA_TEMPERATURE", 1.0)
+        self.nvidia_max_tokens = _read_int_env("NVIDIA_MAX_TOKENS", 16384)
+        self.nvidia_timeout = _read_int_env("NVIDIA_TIMEOUT", 60)
+
+        _sync_backend_env(self.active_backend)
         os.environ["LOCAL_MODEL"] = self.local_model
         os.environ["LOCAL_API_URL"] = self.local_api_url
         os.environ["LOCAL_TIMEOUT"] = str(self.local_timeout)
-        logger.info(f"Backend switched to local: {model} at {api_url}")
-    
+        os.environ["NVIDIA_MODEL"] = self.nvidia_model
+        os.environ["NVIDIA_BASE_URL"] = self.nvidia_base_url
+        os.environ["NVIDIA_TEMPERATURE"] = str(self.nvidia_temperature)
+        os.environ["NVIDIA_MAX_TOKENS"] = str(self.nvidia_max_tokens)
+        os.environ["NVIDIA_TIMEOUT"] = str(self.nvidia_timeout)
+        if self.nvidia_api_key:
+            os.environ["NVIDIA_API_KEY"] = self.nvidia_api_key
+
+    def refresh_from_env(self) -> None:
+        """Reload configuration from environment variables."""
+        self._load_from_env()
+
+    def set_local_backend(self, model: str, api_url: str) -> None:
+        """Set local Ollama backend."""
+        self.active_backend = "local"
+        self.local_model = (model or _DEFAULT_LOCAL_MODEL).strip() or _DEFAULT_LOCAL_MODEL
+        self.local_api_url = (api_url or _DEFAULT_LOCAL_URL).strip().rstrip("/")
+        self.local_timeout = _read_int_env("LOCAL_TIMEOUT", self.local_timeout)
+        _sync_backend_env("local")
+        os.environ["LOCAL_MODEL"] = self.local_model
+        os.environ["LOCAL_API_URL"] = self.local_api_url
+        os.environ["LOCAL_TIMEOUT"] = str(self.local_timeout)
+        logger.info(f"Backend switched to local: {self.local_model} at {self.local_api_url}")
+
     def set_nvidia_backend(self, model: str, api_key: str, base_url: str = "") -> None:
-        """
-        Set NVIDIA backend.
-        
-        Args:
-            model: Model name
-            api_key: NVIDIA API key
-            base_url: NVIDIA API base URL (optional, defaults to NVIDIA's standard URL)
-        """
-        logger.info("NVIDIA backend configuration ignored; CLI is local-only")
-    
+        """Set NVIDIA backend using env-backed settings."""
+        self.active_backend = "nvidia"
+        self.nvidia_model = (model or self.nvidia_model or _DEFAULT_NVIDIA_MODEL).strip() or _DEFAULT_NVIDIA_MODEL
+        self.nvidia_base_url = (base_url or self.nvidia_base_url or _DEFAULT_NVIDIA_URL).strip().rstrip("/")
+        if api_key:
+            self.nvidia_api_key = api_key.strip()
+            os.environ["NVIDIA_API_KEY"] = self.nvidia_api_key
+        _sync_backend_env("nvidia")
+        os.environ["NVIDIA_MODEL"] = self.nvidia_model
+        os.environ["NVIDIA_BASE_URL"] = self.nvidia_base_url
+        os.environ["NVIDIA_TEMPERATURE"] = str(self.nvidia_temperature)
+        os.environ["NVIDIA_MAX_TOKENS"] = str(self.nvidia_max_tokens)
+        os.environ["NVIDIA_TIMEOUT"] = str(self.nvidia_timeout)
+        logger.info(f"Backend switched to NVIDIA: {self.nvidia_model} at {self.nvidia_base_url}")
+
     def set_custom_backend(
         self,
         api_url: str,
@@ -83,72 +129,240 @@ class AIBackendService:
         auth_header: str = "",
         auth_token: str = "",
     ) -> None:
-        """
-        Set custom AI backend.
-        
-        Args:
-            api_url: API URL
-            model: Model name
-            auth_header: Auth header
-            auth_token: Auth token
-        """
-        logger.info("Custom backend configuration ignored; CLI is local-only")
-    
+        """Legacy no-op placeholder kept for backward compatibility."""
+        logger.info("Custom backend is not configured for the active CLI workflow")
+
     def get_active_backend(self) -> str:
         """Get active backend."""
         return self.active_backend
-    
+
     def get_backend_config(self) -> dict:
-        """
-        Get current backend configuration.
-        
-        Returns:
-            Dictionary with backend configuration
-        """
-        config = {
-            "active_backend": self.active_backend,
-        }
-        
-        if self.active_backend == "local":
-            config["model"] = self.local_model
-            config["api_url"] = self.local_api_url
-            config["timeout"] = self.local_timeout
-        
+        """Get current backend configuration."""
+        config = {"active_backend": self.active_backend}
+        if self.active_backend == "nvidia":
+            config.update(
+                {
+                    "model": self.nvidia_model,
+                    "api_url": self.nvidia_base_url,
+                    "temperature": self.nvidia_temperature,
+                    "max_tokens": self.nvidia_max_tokens,
+                    "timeout": self.nvidia_timeout,
+                }
+            )
+        else:
+            config.update(
+                {
+                    "model": self.local_model,
+                    "api_url": self.local_api_url,
+                    "timeout": self.local_timeout,
+                }
+            )
         return config
-    
+
+    def _call_local(
+        self,
+        messages: list[dict],
+        response_format: dict | str | None = None,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        if requests is None:
+            raise RuntimeError(
+                "The 'requests' package is required for the local backend. Run: pip install requests"
+            )
+
+        payload = {
+            "model": self.local_model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": 0 if temperature is None else temperature,
+                "num_predict": max_tokens or 300,
+            },
+        }
+        if response_format:
+            payload["format"] = response_format
+
+        try:
+            response = requests.post(
+                f"{self.local_api_url}/api/chat",
+                json=payload,
+                timeout=self.local_timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if "message" in data and isinstance(data["message"], dict):
+                return data["message"].get("content", "")
+            if data.get("choices"):
+                return data["choices"][0].get("message", {}).get("content", "")
+            raise RuntimeError("Ollama response did not contain generated content.")
+        except requests.exceptions.Timeout as exc:
+            raise TimeoutError("Local AI timed out.") from exc
+        except requests.exceptions.ConnectionError as exc:
+            raise ConnectionError("Ollama is not running.") from exc
+        except Exception as exc:
+            raise RuntimeError("Local AI failed. Using rule-based fallback where possible.") from exc
+
+    def _call_nvidia(
+        self,
+        messages: list[dict],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        if requests is None:
+            raise RuntimeError(
+                "The 'requests' package is required for the NVIDIA backend. Run: pip install requests"
+            )
+        if not self.nvidia_api_key:
+            raise ValueError("NVIDIA_API_KEY is required for NVIDIA backend")
+
+        payload = {
+            "model": self.nvidia_model,
+            "messages": messages,
+            "temperature": self.nvidia_temperature if temperature is None else temperature,
+            "max_tokens": self.nvidia_max_tokens if max_tokens is None else max_tokens,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.nvidia_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            response = requests.post(
+                f"{self.nvidia_base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=self.nvidia_timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data.get("choices"):
+                return data["choices"][0].get("message", {}).get("content", "")
+            raise RuntimeError("NVIDIA API response did not contain generated content.")
+        except requests.exceptions.ConnectionError as exc:
+            raise ConnectionError(
+                "NVIDIA API is unreachable. Please check your network connection and NVIDIA_BASE_URL."
+            ) from exc
+        except requests.exceptions.HTTPError as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code == 401:
+                raise ValueError("Invalid NVIDIA_API_KEY") from exc
+            raise RuntimeError(f"NVIDIA API returned error: {exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"NVIDIA backend failed: {exc}") from exc
+
+    def call_backend(
+        self,
+        messages: list[dict],
+        backend: str | None = None,
+        response_format: dict | str | None = None,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Dispatch chat completions to the selected backend."""
+        selected_backend = _normalize_backend_name(backend or self.active_backend)
+        self.refresh_from_env()
+        if backend:
+            selected_backend = _normalize_backend_name(backend)
+
+        if selected_backend == "nvidia":
+            return self._call_nvidia(messages, temperature=temperature, max_tokens=max_tokens)
+        return self._call_local(
+            messages,
+            response_format=response_format,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
     def test_backend_connection(self) -> Tuple[bool, str]:
-        """
-        Test current AI backend connection.
-        
-        Returns:
-            (success, message)
-        """
-        if self.active_backend == "local":
+        """Test the current AI backend connection."""
+        self.refresh_from_env()
+        if self.active_backend == "nvidia":
             try:
-                import requests
-                response = requests.get(f"{self.local_api_url.rstrip('/')}/api/tags", timeout=5)
-                if response.status_code == 200:
-                    models = response.json().get("models", [])
-                    model_names = [m.get('name', 'unknown') for m in models[:5]]
-                    if model_names:
-                        return True, f"Ollama is running. Available models: {', '.join(model_names)}"
-                    return True, "Ollama is running."
-                else:
-                    return False, "Ollama is not running."
-            except Exception as e:
-                logger.debug(f"Ollama connection test failed: {e}")
-                return False, "Ollama is not running."
-        
-        return False, "Unknown backend"
-    
+                content = self.call_backend(
+                    [
+                        {"role": "system", "content": "Return only valid JSON or SQL as requested."},
+                        {"role": "user", "content": "Reply with only: OK"},
+                    ],
+                    backend="nvidia",
+                    temperature=0,
+                    max_tokens=16,
+                ).strip()
+                if content == "OK":
+                    return True, f"NVIDIA backend connected. Model replied: {content}"
+                return False, f"NVIDIA backend returned unexpected response: {content or '[empty]'}"
+            except Exception as exc:
+                logger.debug(f"NVIDIA connection test failed: {exc}")
+                return False, str(exc)
+
+        try:
+            response = requests.get(f"{self.local_api_url}/api/tags", timeout=5)
+            if response.status_code == 200:
+                models = response.json().get("models", [])
+                model_names = [m.get("name", "unknown") for m in models[:5]]
+                if model_names:
+                    return True, f"Ollama is running. Available models: {', '.join(model_names)}"
+                return True, "Ollama is running."
+            return False, "Ollama is not running."
+        except Exception as exc:
+            logger.debug(f"Ollama connection test failed: {exc}")
+            return False, "Ollama is not running."
+
     def is_local_backend(self) -> bool:
         """Check if using local backend."""
         return self.active_backend == "local"
-    
+
     def is_nvidia_backend(self) -> bool:
         """Check if using NVIDIA backend."""
-        return False
-    
+        return self.active_backend == "nvidia"
+
     def is_custom_backend(self) -> bool:
         """Check if using custom backend."""
         return False
+
+
+_SHARED_BACKEND_SERVICE: AIBackendService | None = None
+
+
+def get_ai_backend_service() -> AIBackendService:
+    """Return the shared AI backend service instance."""
+    global _SHARED_BACKEND_SERVICE
+    if _SHARED_BACKEND_SERVICE is None:
+        _SHARED_BACKEND_SERVICE = AIBackendService()
+    return _SHARED_BACKEND_SERVICE
+
+
+def call_ai_backend(
+    messages: list[dict],
+    backend: str | None = None,
+    response_format: dict | str | None = None,
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Shared module-level helper for AI calls across the CLI project."""
+    return get_ai_backend_service().call_backend(
+        messages,
+        backend=backend,
+        response_format=response_format,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+def check_ollama_status(api_url: str | None = None, timeout: int = 5) -> tuple[bool, str]:
+    """Return whether the local Ollama server is reachable."""
+    if requests is None:
+        return False, "The 'requests' package is required to check Ollama."
+
+    base_url = (api_url or os.getenv("LOCAL_API_URL") or _DEFAULT_LOCAL_URL).strip().rstrip("/")
+    try:
+        response = requests.get(f"{base_url}/api/tags", timeout=timeout)
+        if response.status_code != 200:
+            return False, "Ollama is not running."
+        return True, "Ollama is running."
+    except Exception:
+        return False, "Ollama is not running."
