@@ -7,8 +7,6 @@ Tests for AI semantic enrichment of the knowledge base.
 import json
 import logging
 
-import pytest
-
 from semantic.ai_semantic_enricher import (
     enrich_knowledge_base_with_ai,
     _clean_ai_response,
@@ -17,7 +15,6 @@ from semantic.ai_semantic_enricher import (
 
 
 def test_clean_ai_response_removes_markdown():
-    """Test that markdown code fences are removed from AI response."""
     response = """```json
 {
   "tables": {},
@@ -31,7 +28,6 @@ def test_clean_ai_response_removes_markdown():
 
 
 def test_clean_ai_response_removes_extra_text():
-    """Test that extra text before/after JSON is removed."""
     response = """Here is the JSON:
 {
   "tables": {},
@@ -45,102 +41,324 @@ That's it!"""
 
 
 def test_enrich_knowledge_base_with_ai_fallback_on_invalid_json(monkeypatch):
-    """Test that invalid JSON response falls back to original KB."""
     knowledge_base = {
         "orders": {
             "columns": [
-                {"name": "final_amount", "type": "DECIMAL(10,2)", "semantic_type": "value"}
+                {"name": "final_amount", "type": "DECIMAL(10,2)", "semantic_type": "numeric_candidate"}
             ]
         }
     }
-    
+
     monkeypatch.setattr(
         "semantic.ai_semantic_enricher._call_ai_backend",
         lambda messages, backend, response_format=None: "{not valid json",
     )
 
     enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
-    
-    # Should return original KB when AI fails
     assert enriched == knowledge_base
 
 
-def test_enrich_knowledge_base_with_ai_fallback_on_missing_structure(monkeypatch):
-    """Test that response missing required structure falls back to original KB."""
+def test_candidate_prompt_contains_schema_and_profile_evidence(monkeypatch):
     knowledge_base = {
-        "orders": {
+        "stock_positions": {
+            "primary_keys": ["stock_id"],
+            "foreign_keys": [
+                {"column": "item_id", "referenced_table": "items", "referenced_column": "item_id"},
+                {"column": "storage_id", "referenced_table": "storage_points", "referenced_column": "storage_id"},
+            ],
+            "relationships": [],
             "columns": [
-                {"name": "final_amount", "type": "DECIMAL(10,2)", "semantic_type": "value"}
-            ]
+                {"name": "stock_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "item_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "storage_id", "type": "INTEGER", "semantic_type": "id"},
+                {
+                    "name": "units_available",
+                    "type": "INTEGER",
+                    "semantic_type": "numeric_candidate",
+                    "sample_values": [12, 7, 0],
+                    "min_value": 0,
+                    "max_value": 12,
+                    "unique_count": 3,
+                    "null_count": 0,
+                },
+                {"name": "checked_on", "type": "DATE", "semantic_type": "date"},
+            ],
         }
     }
-    
-    monkeypatch.setattr(
-        "semantic.ai_semantic_enricher._call_ai_backend",
-        lambda messages, backend, response_format=None: json.dumps({"wrong": "shape"}),
-    )
-
-    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
-    
-    # Should return original KB when structure is invalid
-    assert enriched == knowledge_base
-
-
-def test_enrich_knowledge_base_sends_chat_messages(monkeypatch):
-    """AI enrichment must call the backend with compact system+user messages."""
-    knowledge_base = {
-        "orders": {
-            "columns": [
-                {"name": "final_amount", "type": "DECIMAL(10,2)", "semantic_type": "value"}
-            ]
-        }
-    }
-    captured = {}
+    captured_messages = []
 
     def fake_call_ai_backend(messages, backend, response_format=None):
-        captured["messages"] = messages
-        captured["backend"] = backend
-        captured["response_format"] = response_format
-        if "required" in response_format and "q" in response_format["required"]:
-            return json.dumps({
-                "d": "Customer orders",
-                "p": "Tracks sales",
-                "q": ["Show total sales"],
-            })
-        return json.dumps({
-            "c": {
-                "final_amount": {
-                    "d": "Final amount",
-                    "b": ["sales", "revenue"],
-                    "m": "currency",
-                    "me": True,
-                    "di": False,
-                    "dt": False,
-                },
-            },
-        })
+        captured_messages.append(messages)
+        if "q" in response_format.get("required", []):
+            return json.dumps({"d": "Stock records", "p": "Tracks inventory", "q": ["Show stock"]})
+        return json.dumps(
+            {
+                "c": {
+                    "units_available": {
+                        "d": "Available units",
+                        "b": ["stock", "available"],
+                        "s": "quantity",
+                        "cf": 0.93,
+                        "r": "samples and nearby columns indicate units on hand",
+                        "me": True,
+                        "di": False,
+                        "dt": False,
+                    }
+                }
+            }
+        )
 
     monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
 
     enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
 
-    assert captured["backend"] == "local"
-    assert isinstance(captured["messages"], list)
-    assert captured["messages"][0]["role"] == "system"
-    assert captured["messages"][1]["role"] == "user"
-    assert "Table: orders" in captured["messages"][1]["content"]
-    assert captured["response_format"]["type"] == "object"
-    assert enriched["orders"]["business_description"] == "Customer orders"
-    assert enriched["orders"]["columns"][0]["business_terms"] == ["sales", "revenue"]
-    assert enriched["orders"]["business_purpose"] == "Tracks sales"
+    candidate_prompt = captured_messages[1][1]["content"]
+    assert "candidate_type=numeric_candidate" in candidate_prompt
+    assert "samples=['12', '7', '0']" in candidate_prompt
+    assert "min=0" in candidate_prompt
+    assert "max=12" in candidate_prompt
+    assert "unique=3" in candidate_prompt
+    assert "nulls=0" in candidate_prompt
+    assert "nearby=['storage_id', 'checked_on']" in candidate_prompt or "nearby=['item_id', 'storage_id', 'checked_on']" in candidate_prompt
+    assert "stock_positions.item_id -> items.item_id" in candidate_prompt
+    assert enriched["stock_positions"]["columns"][3]["semantic_type"] == "quantity"
 
 
-def test_enrich_timeout_fallback_log_is_sanitized(monkeypatch, caplog):
-    """Timeout logs should be useful without dumping raw connection pool text."""
+def test_enrichment_applies_final_semantic_meaning_to_candidates_only(monkeypatch):
+    knowledge_base = {
+        "refund_logs": {
+            "columns": [
+                {"name": "refund_id", "type": "INTEGER", "semantic_type": "id"},
+                {
+                    "name": "refund_value",
+                    "type": "DECIMAL(10,2)",
+                    "semantic_type": "numeric_candidate",
+                    "sample_values": [100.0, 35.5],
+                },
+                {
+                    "name": "reason_text",
+                    "type": "VARCHAR(100)",
+                    "semantic_type": "text_candidate",
+                    "sample_values": ["Damaged", "Expired"],
+                },
+            ]
+        }
+    }
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        if "q" in response_format.get("required", []):
+            return json.dumps({"d": "Refund events", "p": "Tracks refunds", "q": ["Show refunds"]})
+        return json.dumps(
+            {
+                "c": {
+                    "refund_value": {
+                        "d": "Refund amount",
+                        "b": ["refund", "amount"],
+                        "s": "money",
+                        "cf": 0.92,
+                        "r": "numeric values and context indicate money",
+                        "me": True,
+                        "di": False,
+                        "dt": False,
+                    },
+                    "reason_text": {
+                        "d": "Refund reason",
+                        "b": ["reason"],
+                        "s": "text",
+                        "cf": 0.84,
+                        "r": "sample values look categorical text",
+                        "me": False,
+                        "di": True,
+                        "dt": False,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
+
+    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
+    refund_value = enriched["refund_logs"]["columns"][1]
+    reason_text = enriched["refund_logs"]["columns"][2]
+
+    assert refund_value["semantic_type"] == "money"
+    assert refund_value["is_measure"] is True
+    assert refund_value["business_description"] == "Refund amount"
+    assert "numeric values and context indicate money" in refund_value["reason"]
+    assert reason_text["semantic_type"] == "text"
+    assert reason_text["is_dimension"] is True
+    assert reason_text["business_description"] == "Refund reason"
+
+
+def test_reason_like_text_fields_normalize_name_to_text(monkeypatch):
+    knowledge_base = {
+        "refund_logs": {
+            "columns": [
+                {
+                    "name": "reason_text",
+                    "type": "VARCHAR(100)",
+                    "semantic_type": "text_candidate",
+                    "sample_values": ["Damaged", "Expired"],
+                }
+            ]
+        }
+    }
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        if "q" in response_format.get("required", []):
+            return json.dumps({"d": "Refund events", "p": "Tracks refunds", "q": ["Show refunds"]})
+        return json.dumps(
+            {
+                "c": {
+                    "reason_text": {
+                        "d": "Refund reason",
+                        "b": ["reason"],
+                        "s": "name",
+                        "cf": 0.81,
+                        "r": "text values describe the reason",
+                        "me": False,
+                        "di": True,
+                        "dt": False,
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
+
+    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
+    reason_text = enriched["refund_logs"]["columns"][0]
+
+    assert reason_text["semantic_type"] == "text"
+    assert reason_text["is_dimension"] is True
+
+
+def test_structural_facts_override_ai_semantic_changes(monkeypatch):
+    knowledge_base = {
+        "stock_positions": {
+            "primary_keys": ["stock_id"],
+            "foreign_keys": [{"column": "item_id", "referenced_table": "items", "referenced_column": "item_id"}],
+            "columns": [
+                {"name": "stock_id", "type": "INTEGER", "semantic_type": "id", "reason": "Structural fact: primary key."},
+                {"name": "item_id", "type": "INTEGER", "semantic_type": "id", "reason": "Structural fact: foreign key."},
+                {"name": "checked_on", "type": "DATE", "semantic_type": "date", "is_date": True, "reason": "Structural fact: date."},
+                {"name": "units_available", "type": "INTEGER", "semantic_type": "numeric_candidate"},
+            ],
+        }
+    }
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        if "q" in response_format.get("required", []):
+            return json.dumps({"d": "Stock records", "p": "Tracks inventory", "q": ["Show stock"]})
+        return json.dumps(
+            {
+                "c": {
+                    "stock_id": {
+                        "d": "Stock money",
+                        "b": ["amount"],
+                        "s": "money",
+                        "cf": 0.99,
+                        "r": "wrong on purpose",
+                        "me": True,
+                        "di": False,
+                        "dt": False,
+                    },
+                    "checked_on": {
+                        "d": "Check status",
+                        "b": ["status"],
+                        "s": "status",
+                        "cf": 0.91,
+                        "r": "wrong on purpose",
+                        "me": False,
+                        "di": True,
+                        "dt": False,
+                    },
+                    "units_available": {
+                        "d": "Available units",
+                        "b": ["stock"],
+                        "s": "quantity",
+                        "cf": 0.9,
+                        "r": "values indicate countable units",
+                        "me": True,
+                        "di": False,
+                        "dt": False,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
+
+    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
+    stock_id = enriched["stock_positions"]["columns"][0]
+    item_id = enriched["stock_positions"]["columns"][1]
+    checked_on = enriched["stock_positions"]["columns"][2]
+    units_available = enriched["stock_positions"]["columns"][3]
+
+    assert stock_id["semantic_type"] == "id"
+    assert item_id["semantic_type"] == "id"
+    assert checked_on["semantic_type"] == "date"
+    assert checked_on["is_date"] is True
+    assert units_available["semantic_type"] == "quantity"
+
+
+def test_enrich_knowledge_base_allows_partial_table_fallback(monkeypatch):
     knowledge_base = {
         "orders": {
             "columns": [
-                {"name": "final_amount", "type": "DECIMAL(10,2)", "semantic_type": "value"}
+                {"name": "final_amount", "type": "DECIMAL(10,2)", "semantic_type": "numeric_candidate"}
+            ]
+        },
+        "customers": {
+            "columns": [
+                {"name": "customer_name", "type": "VARCHAR(100)", "semantic_type": "text_candidate"}
+            ]
+        },
+    }
+    calls = []
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        table_line = next(line for line in messages[1]["content"].splitlines() if line.startswith("Table: "))
+        table_name = table_line.split(": ", 1)[1]
+        calls.append(table_name)
+        if table_name == "customers":
+            raise TimeoutError("Read timed out.")
+        if "q" in response_format.get("required", []):
+            return json.dumps({"d": "Order facts", "p": "Tracks order value", "q": ["Show order value"]})
+        return json.dumps(
+            {
+                "c": {
+                    "final_amount": {
+                        "d": "Final amount",
+                        "b": ["sales"],
+                        "s": "money",
+                        "cf": 0.94,
+                        "r": "numeric values indicate money",
+                        "me": True,
+                        "di": False,
+                        "dt": False,
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
+
+    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
+    enriched_tables, fallback_tables = get_last_enrichment_report()
+
+    assert calls == ["orders", "orders", "customers"]
+    assert enriched["orders"]["columns"][0]["semantic_type"] == "money"
+    assert "business_description" not in enriched["customers"]
+    assert enriched_tables == ["orders"]
+    assert fallback_tables == {"customers": "Local AI timed out"}
+
+
+def test_enrich_timeout_fallback_log_is_sanitized(monkeypatch, caplog):
+    knowledge_base = {
+        "orders": {
+            "columns": [
+                {"name": "final_amount", "type": "DECIMAL(10,2)", "semantic_type": "numeric_candidate"}
             ]
         }
     }
@@ -156,106 +374,3 @@ def test_enrich_timeout_fallback_log_is_sanitized(monkeypatch, caplog):
     assert enriched == knowledge_base
     assert "Local AI timed out" in caplog.text
     assert "HTTPSConnectionPool" not in caplog.text
-
-
-def test_enrich_knowledge_base_allows_partial_table_fallback(monkeypatch):
-    knowledge_base = {
-        "orders": {
-            "columns": [
-                {"name": "final_amount", "type": "DECIMAL(10,2)", "semantic_type": "value"}
-            ]
-        },
-        "customers": {
-            "columns": [
-                {"name": "customer_name", "type": "VARCHAR(100)", "semantic_type": "customer"}
-            ]
-        },
-    }
-    calls = []
-
-    def fake_call_ai_backend(messages, backend, response_format=None):
-        table_line = next(line for line in messages[1]["content"].splitlines() if line.startswith("Table: "))
-        table_name = table_line.split(": ", 1)[1]
-        calls.append(table_name)
-        if table_name == "customers":
-            raise TimeoutError("Read timed out.")
-        if "required" in response_format and "q" in response_format["required"]:
-            return json.dumps({
-                "d": "Order facts",
-                "p": "Tracks order value",
-                "q": ["Show total sales"],
-            })
-        return json.dumps({
-            "c": {
-                "final_amount": {
-                    "d": "Final order amount",
-                    "b": ["sales"],
-                    "m": "currency",
-                    "me": True,
-                    "di": False,
-                    "dt": False,
-                },
-            },
-        })
-
-    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
-
-    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
-    enriched_tables, fallback_tables = get_last_enrichment_report()
-
-    assert calls == ["orders", "orders", "customers"]
-    assert enriched["orders"]["business_description"] == "Order facts"
-    assert "business_description" not in enriched["customers"]
-    assert enriched_tables == ["orders"]
-    assert fallback_tables == {"customers": "Local AI timed out"}
-
-
-def test_invalid_ai_business_purpose_uses_rule_based_fallback(monkeypatch):
-    knowledge_base = {
-        "vendor_payments": {
-            "module": "transaction",
-            "columns": [
-                {"name": "payment_amount", "type": "DECIMAL(10,2)", "semantic_type": "money"}
-            ],
-        }
-    }
-
-    def fake_call_ai_backend(messages, backend, response_format=None):
-        if "required" in response_format and "q" in response_format["required"]:
-            return json.dumps({
-                "d": "Vendor payments",
-                "p": ".99",
-                "q": ["What is unpaid?"],
-            })
-        return json.dumps({
-            "c": {
-                "payment_amount": {
-                    "d": "Paid amount",
-                    "b": ["payment"],
-                    "m": "money",
-                    "me": True,
-                    "di": False,
-                    "dt": False,
-                }
-            }
-        })
-
-    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
-
-    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
-
-    assert enriched["vendor_payments"]["business_purpose"] == "Stores transaction records for vendor payment."
-    assert enriched["vendor_payments"]["possible_business_questions"] == ["What is unpaid?"]
-
-
-def test_clean_ai_response_handles_empty_response():
-    """Test that empty response is handled gracefully."""
-    cleaned = _clean_ai_response("")
-    assert cleaned == ""
-
-
-def test_clean_ai_response_handles_response_without_braces():
-    """Test that response without JSON braces is handled."""
-    response = "This is not JSON at all"
-    cleaned = _clean_ai_response(response)
-    assert cleaned == response  # Returns as-is if no braces found

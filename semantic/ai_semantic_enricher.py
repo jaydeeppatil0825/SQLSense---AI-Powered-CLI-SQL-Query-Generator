@@ -63,17 +63,40 @@ _COLUMN_JSON_FORMAT = {
                         "items": {"type": "string"},
                         "maxItems": 2,
                     },
-                    "m": {"type": "string"},
+                    "s": {"type": "string"},
+                    "cf": {"type": "number"},
+                    "r": {"type": "string"},
                     "me": {"type": "boolean"},
                     "di": {"type": "boolean"},
                     "dt": {"type": "boolean"},
                 },
-                "required": ["d", "b", "m", "me", "di", "dt"],
+                "required": ["d", "b", "s", "cf", "r", "me", "di", "dt"],
             },
         },
     },
     "required": ["c"],
 }
+
+_CANDIDATE_TYPES = {"numeric_candidate", "text_candidate", "category_candidate"}
+_STRUCTURAL_TYPES = {"id", "date", "boolean"}
+_FINAL_SEMANTIC_TYPES = {
+    "money",
+    "quantity",
+    "date",
+    "status",
+    "id",
+    "name",
+    "text",
+    "boolean",
+    "percentage",
+    "code",
+    "reference",
+    "general",
+    "numeric_candidate",
+    "text_candidate",
+    "category_candidate",
+}
+_AI_RETURN_SEMANTIC_TYPES = _FINAL_SEMANTIC_TYPES - _CANDIDATE_TYPES
 
 
 def _describe_ai_enrichment_failure(exc: Exception, backend: str) -> str:
@@ -139,25 +162,135 @@ def _table_summary_prompt(table_name: str, table_data: dict) -> str:
     )
 
 
-def _column_batch_prompt(table_name: str, columns: list[dict]) -> str:
-    """Build a compact prompt for a small batch of columns."""
+def _is_structural_semantic(column: dict) -> bool:
+    return str(column.get("semantic_type", "general")).lower() in _STRUCTURAL_TYPES
+
+
+def _candidate_columns(table_data: dict) -> list[dict]:
+    return [
+        column
+        for column in table_data.get("columns", [])
+        if str(column.get("semantic_type", "general")).lower() in _CANDIDATE_TYPES
+    ]
+
+
+def _nearby_column_names(table_data: dict, column_name: str, radius: int = 2) -> list[str]:
+    columns = list(table_data.get("columns", []))
+    names = [str(column.get("name", "")) for column in columns]
+    try:
+        index = names.index(column_name)
+    except ValueError:
+        return []
+
+    nearby: list[str] = []
+    start = max(0, index - radius)
+    end = min(len(names), index + radius + 1)
+    for idx in range(start, end):
+        if idx == index:
+            continue
+        candidate = names[idx].strip()
+        if candidate:
+            nearby.append(candidate)
+    return nearby
+
+
+def _column_relationship_hints(table_name: str, column_name: str, table_data: dict) -> list[str]:
+    hints: list[str] = []
+    for foreign_key in table_data.get("foreign_keys", []):
+        if str(foreign_key.get("column", "")) != column_name:
+            continue
+        referenced_table = str(foreign_key.get("referenced_table", "")).strip()
+        referenced_column = str(foreign_key.get("referenced_column", "")).strip()
+        if referenced_table and referenced_column:
+            hints.append(f"{table_name}.{column_name} -> {referenced_table}.{referenced_column}")
+
+    for relationship in table_data.get("relationships", []):
+        if str(relationship.get("from_column", "")) == column_name:
+            from_table = str(relationship.get("from_table", "")).strip()
+            to_table = str(relationship.get("to_table", "")).strip()
+            to_column = str(relationship.get("to_column", "")).strip()
+            if from_table and to_table and to_column:
+                hints.append(f"{from_table}.{column_name} -> {to_table}.{to_column}")
+        elif str(relationship.get("to_column", "")) == column_name:
+            from_table = str(relationship.get("from_table", "")).strip()
+            from_column = str(relationship.get("from_column", "")).strip()
+            to_table = str(relationship.get("to_table", "")).strip()
+            if from_table and from_column and to_table:
+                hints.append(f"{from_table}.{from_column} -> {to_table}.{column_name}")
+    return list(dict.fromkeys(hints))[:4]
+
+
+def _table_relationship_hints(table_name: str, table_data: dict) -> list[str]:
+    hints: list[str] = []
+    for foreign_key in table_data.get("foreign_keys", []):
+        from_column = str(foreign_key.get("column", "")).strip()
+        referenced_table = str(foreign_key.get("referenced_table", "")).strip()
+        referenced_column = str(foreign_key.get("referenced_column", "")).strip()
+        if from_column and referenced_table and referenced_column:
+            hints.append(f"{table_name}.{from_column} -> {referenced_table}.{referenced_column}")
+    for relationship in table_data.get("relationships", []):
+        from_table = str(relationship.get("from_table", "")).strip()
+        from_column = str(relationship.get("from_column", "")).strip()
+        to_table = str(relationship.get("to_table", "")).strip()
+        to_column = str(relationship.get("to_column", "")).strip()
+        if from_table and from_column and to_table and to_column:
+            hints.append(f"{from_table}.{from_column} -> {to_table}.{to_column}")
+    return list(dict.fromkeys(hints))[:8]
+
+def _profile_summary(column: dict) -> str:
+    samples = [str(value) for value in (column.get("sample_values", []) or []) if value is not None][:5]
+    return (
+        f"samples={samples or []} | "
+        f"min={column.get('min_value', None)} | "
+        f"max={column.get('max_value', None)} | "
+        f"unique={column.get('unique_count', None)} | "
+        f"nulls={column.get('null_count', None)}"
+    )
+
+
+def _column_batch_prompt(table_name: str, table_data: dict, columns: list[dict]) -> str:
+    """Build a compact prompt for candidate columns using profiling and schema context."""
     lines = [
         f"Table: {table_name}",
         "Return JSON only using key c.",
-        "Keep every description under 5 words.",
+        "Decide final semantic meaning only for the listed candidate columns.",
+        "Never change structural facts like id/date/boolean.",
+        "Keep every description under 8 words.",
         "Use at most 2 short business terms.",
-        "Columns:",
+        "Allowed semantic_type values: money, quantity, percentage, status, name, text, code, reference, date, general.",
+        "Do not return numeric_candidate, text_candidate, or category_candidate.",
+        "Candidate columns:",
     ]
     for col in columns:
         col_name = col.get("name", "")
         col_type = col.get("type", "")
         sem_type = col.get("semantic_type", "general")
-        lines.append(f"- {col_name} | type={col_type} | semantic_type={sem_type}")
+        pk_flag = bool(col.get("is_primary_key", False))
+        fk_flag = bool(col.get("is_foreign_key", False))
+        nearby = _nearby_column_names(table_data, str(col_name))
+        relationships = _column_relationship_hints(table_name, str(col_name), table_data)
+        lines.append(
+            f"- {col_name} | type={col_type} | candidate_type={sem_type} | "
+            f"pk={pk_flag} | fk={fk_flag} | {_profile_summary(col)} | "
+            f"nearby={nearby} | relationships={relationships}"
+        )
+
+    table_relationships = _table_relationship_hints(table_name, table_data)
+    if table_relationships:
+        lines.append("Table relationships:")
+        for hint in table_relationships:
+            lines.append(f"- {hint}")
+
+    lines.append("Other table columns:")
+    for col in table_data.get("columns", []):
+        lines.append(
+            f"- {col.get('name', '')} | type={col.get('type', '')} | semantic_type={col.get('semantic_type', 'general')}"
+        )
 
     return (
         "\n".join(lines)
         + "\n\nReturn JSON in exactly this shape:\n"
-        + '{"c":{"column_name":{"d":"...","b":["..."],"m":"general","me":false,"di":false,"dt":false}}}\n'
+        + '{"c":{"column_name":{"d":"...","b":["..."],"s":"quantity","cf":0.84,"r":"sample values and nearby columns indicate units","me":true,"di":false,"dt":false}}}\n'
         + "Only include columns from this table."
     )
 
@@ -194,10 +327,12 @@ def _parse_column_enrichment(response: str) -> dict:
                     for item in col_info.get("b", [])
                     if str(item).strip()
                 ][:2],
-                "metric_type": str(col_info.get("m", "general")).strip() or "general",
-                "is_measure": bool(col_info.get("me", False)),
-                "is_dimension": bool(col_info.get("di", False)),
-                "is_date": bool(col_info.get("dt", False)),
+                "semantic_type": str(col_info.get("s", col_info.get("m", "general"))).strip() or "general",
+                "confidence": float(col_info.get("cf", 0.0) or 0.0),
+                "reason": str(col_info.get("r", "")).strip(),
+                "is_measure": bool(col_info.get("me", col_info.get("is_measure", False))),
+                "is_dimension": bool(col_info.get("di", col_info.get("is_dimension", False))),
+                "is_date": bool(col_info.get("dt", col_info.get("is_date", False))),
             }
             for col_name, col_info in data["c"].items()
             if isinstance(col_info, dict)
@@ -232,19 +367,80 @@ def _apply_table_enrichment(table_name: str, table_data: dict, enrichment: dict)
     table_data["possible_business_questions"] = clean_questions
 
 
+def _normalize_ai_semantic_type(value: str, fallback: str) -> str:
+    semantic_type = str(value or "").strip().lower()
+    if semantic_type in _AI_RETURN_SEMANTIC_TYPES:
+        return semantic_type
+    return str(fallback or "general").strip().lower() or "general"
+
+
+def _finalize_candidate_semantic_type(column: dict, col_info: dict, semantic_type: str) -> str:
+    column_type = str(column.get("type", "")).lower()
+    combined_text = " ".join(
+        [
+            str(column.get("name", "")),
+            str(col_info.get("business_description", "")),
+            str(col_info.get("reason", "")),
+            " ".join(str(value) for value in col_info.get("business_terms", [])),
+        ]
+    ).lower()
+    tokens = {token for token in re.split(r"[^a-z0-9]+", combined_text) if token}
+
+    is_measure = bool(col_info.get("is_measure", False))
+    is_dimension = bool(col_info.get("is_dimension", False))
+
+    if semantic_type == "name" and {"reason", "description", "comment", "note", "text", "message"} & tokens:
+        return "text"
+    if semantic_type not in _CANDIDATE_TYPES | {"general"}:
+        return semantic_type
+
+    if {"percent", "percentage", "ratio"} & tokens or ("rate" in tokens and is_measure):
+        return "percentage"
+    if is_measure:
+        if any(token in column_type for token in ("decimal", "numeric", "float", "double", "real")):
+            if {"unit", "units", "qty", "quantity", "count", "volume"} & tokens:
+                return "quantity"
+            return "money"
+        if any(token in column_type for token in ("int", "integer", "bigint", "smallint", "tinyint")):
+            return "quantity"
+
+    if {"status", "state", "stage"} & tokens:
+        return "status"
+    if {"code", "reference"} & tokens:
+        return "code"
+    if {"name", "label", "title"} & tokens:
+        return "name"
+    if semantic_type in {"text_candidate", "category_candidate"} or is_dimension:
+        return "text"
+    if semantic_type == "numeric_candidate":
+        if any(token in column_type for token in ("decimal", "numeric", "float", "double", "real")):
+            return "money"
+        if any(token in column_type for token in ("int", "integer", "bigint", "smallint", "tinyint")):
+            return "quantity"
+    return semantic_type
+
+
 def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
     """Apply column enrichment data to one table in-place."""
     for col in table_data.get("columns", []):
         col_name = col.get("name", "")
         if col_name not in col_map:
             continue
+        if _is_structural_semantic(col):
+            continue
         col_info = col_map[col_name]
+        fallback_semantic = str(col.get("semantic_type", "general")).lower()
+        semantic_type = _normalize_ai_semantic_type(col_info.get("semantic_type", fallback_semantic), fallback_semantic)
+        semantic_type = _finalize_candidate_semantic_type(col, col_info, semantic_type)
         col["business_description"] = sanitize_short_text(col_info.get("business_description", ""))
         col["business_terms"] = list(col_info.get("business_terms", []))[:2]
-        col["metric_type"] = sanitize_short_text(col_info.get("metric_type", "general"), fallback="general") or "general"
-        col["is_measure"] = bool(col_info.get("is_measure", False))
-        col["is_dimension"] = bool(col_info.get("is_dimension", False))
-        col["is_date"] = bool(col_info.get("is_date", False))
+        col["semantic_type"] = semantic_type
+        col["confidence"] = max(float(col.get("confidence", 0.0) or 0.0), min(max(float(col_info.get("confidence", 0.0) or 0.0), 0.0), 1.0))
+        col["reason"] = sanitize_short_text(col_info.get("reason", ""), fallback=str(col.get("reason", "")))
+        col["metric_type"] = semantic_type if semantic_type in {"money", "quantity", "percentage"} else "general"
+        col["is_measure"] = semantic_type in {"money", "quantity", "percentage"} and bool(col_info.get("is_measure", False))
+        col["is_dimension"] = semantic_type in {"status", "name", "text", "code", "reference"} or bool(col_info.get("is_dimension", False))
+        col["is_date"] = bool(col_info.get("is_date", False) or semantic_type == "date")
 
 
 def _chunk_columns(columns: list[dict], size: int = 3) -> list[list[dict]]:
@@ -273,6 +469,16 @@ def enrich_knowledge_base_with_ai(knowledge_base: dict, backend: str = "local") 
         print(f"  [AI] Enriching table: {table_name}")
         try:
             working_table = copy.deepcopy(table_data)
+            primary_keys = {str(value) for value in working_table.get("primary_keys", []) if value}
+            foreign_keys = {
+                str(fk.get("column", ""))
+                for fk in working_table.get("foreign_keys", [])
+                if fk.get("column")
+            }
+            for column in working_table.get("columns", []):
+                column_name = str(column.get("name", ""))
+                column["is_primary_key"] = column_name in primary_keys
+                column["is_foreign_key"] = column_name in foreign_keys
 
             summary_messages = [
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -286,10 +492,11 @@ def enrich_knowledge_base_with_ai(knowledge_base: dict, backend: str = "local") 
             table_enrichment = _parse_table_summary(summary_response)
             _apply_table_enrichment(table_name, working_table, table_enrichment)
 
-            for column_batch in _chunk_columns(working_table.get("columns", [])):
+            candidate_columns = _candidate_columns(working_table)
+            for column_batch in _chunk_columns(candidate_columns):
                 column_messages = [
                     {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": _column_batch_prompt(table_name, column_batch)},
+                    {"role": "user", "content": _column_batch_prompt(table_name, working_table, column_batch)},
                 ]
                 column_response = _call_ai_backend(
                     column_messages,

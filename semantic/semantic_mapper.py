@@ -46,6 +46,14 @@ _ALLOWED_SEMANTIC_TYPES = {
 # Backward compatibility alias for existing imports
 # Now returns empty dict since pattern matching is removed
 SEMANTIC_MAP: dict[str, str] = {}
+GENERIC_SEMANTIC_PATTERNS: dict[str, str] = {
+    "id": "id",
+    "date": "date",
+    "boolean": "boolean",
+    "numeric_candidate": "numeric_candidate",
+    "text_candidate": "text_candidate",
+    "category_candidate": "category_candidate",
+}
 
 
 def add_semantic_mapping(schema_data: dict) -> dict:
