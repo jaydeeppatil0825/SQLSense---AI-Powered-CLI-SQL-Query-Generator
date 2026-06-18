@@ -1,5 +1,5 @@
 {
     "database_type": "mysql",
-    "database_name": "dynamic_ops_lab",
-    "schema_fingerprint": "7b3200dd6b6c0a49c2677cd85acbc8f57d5b75a9c22b6435fbc38cc90b16871a"
+    "database_name": "pcsoft_erp_test",
+    "schema_fingerprint": "f2da00d63bc1b550656a09ce2978a8bcebe98568c204ba800912f5c16213e651"
 }
