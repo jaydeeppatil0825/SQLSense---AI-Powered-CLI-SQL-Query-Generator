@@ -1,9 +1,9 @@
 {
-  "built_at": "2026-06-16T13:16:49.313838+00:00",
-  "created_at": "2026-06-16T13:16:49.313838+00:00",
+  "built_at": "2026-06-18T11:20:08.351461+00:00",
+  "created_at": "2026-06-18T11:20:08.351461+00:00",
   "database_name": ":memory:",
   "database_type": "sqlite",
-  "document_count": 10,
+  "document_count": 7,
   "embedding": {
     "backend": "local",
     "configured_backend": "local",
@@ -11,8 +11,8 @@
     "dimension": 384,
     "model": "sentence-transformers/all-MiniLM-L6-v2"
   },
-  "glossary_hash": "616570d8610e431634506ce9af7172cd4a893c57b6081f0bc108ca7d7d85dde8",
-  "knowledge_base_hash": "bfbb3fa8fc20970fa2d28f28cf211575567be7d31e2961d9bbd0c5eb245b6e5e",
-  "schema_fingerprint": "78cdd84553a74b771f33e2ea632b43a143d6b5d5058368bc5b6cd8cb2e5862ec",
+  "glossary_hash": "7087b4cb9b0b69046e1c2558ca67e71980571a5555097298d03b852bebfca855",
+  "knowledge_base_hash": "f32346b8c5fb5bf3dd4cbab8441667bdcc6fe19ba551c564000ec01406f8fa8a",
+  "schema_fingerprint": "10a3b1de425f9167030fc9531cc90972446130bb1542e4c93102aa19d270632a",
   "schema_version": 1
 }
