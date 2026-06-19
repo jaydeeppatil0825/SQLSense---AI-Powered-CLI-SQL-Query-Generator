@@ -1,4 +1,4 @@
-"""Safe SQL query execution."""
+"""Safe SQL execution for the SQL Generation Pipeline."""
 
 from __future__ import annotations
 

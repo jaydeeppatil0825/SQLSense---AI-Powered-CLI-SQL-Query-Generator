@@ -1,10 +1,15 @@
 """
 core/question_service.py
 ========================
-Question service for SQL generation.
+SQL Generation Pipeline orchestrator.
 
-This service handles CLI question processing, SQL generation,
-and validation.
+This service remains the central orchestrator for question-to-SQL flow in
+the CLI. It consumes pipeline-produced context, chooses rule-based or AI
+generation, validates SQL, applies safe deterministic repair when allowed,
+and returns only safe SELECT output.
+
+It should not rebuild independent business meaning when pipeline evidence
+already exists.
 """
 
 from copy import deepcopy

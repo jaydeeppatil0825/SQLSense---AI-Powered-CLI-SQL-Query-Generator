@@ -10,6 +10,10 @@ This module is intentionally generic:
 
 It relies on the active knowledge base, active glossary, and the reduced schema
 selected by the query planner.
+
+This module belongs to the SQL Generation Pipeline and should only generate
+SQL from runtime-selected evidence. If evidence is weak or multi-table
+reasoning is required, it must return None so the AI path can take over.
 """
 
 from __future__ import annotations

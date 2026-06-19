@@ -1,20 +1,23 @@
 """
 core/database_service.py
 ========================
-Database service for database operations.
+KB Pipeline service for runtime database knowledge assets.
 
-This service handles database connection, knowledge base building,
-and business glossary loading for the CLI.
+This service belongs to the Database Knowledge Foundation pipeline.
+It handles runtime database connection, knowledge-base build/load,
+glossary build/load, relationship/vector refresh, and cached KB metadata
+for the CLI flow.
+
+It must not depend on user-question understanding or SQL generation logic.
 """
 
 import os
 from typing import Optional, Dict, Any
 from sqlalchemy.engine import Engine
 from db.connection import connect_engine, get_engine, list_accessible_databases, SUPPORTED_DB_TYPES
-from ai.sql_generator import check_ollama_status
-from core.ai_backend_service import get_ai_backend_service
+from core.ai_backend_service import check_ollama_status, get_ai_backend_service
 from semantic.knowledge_base_builder import build_knowledge_base
-from semantic.erp_metadata import enrich_knowledge_base_for_erp, summarize_knowledge_base
+from semantic.erp_metadata import enrich_knowledge_base_schema_facts, summarize_knowledge_base
 from semantic.business_glossary import load_business_glossary, generate_business_glossary, save_business_glossary
 from semantic.ai_semantic_enricher import (
     enrich_knowledge_base_with_ai,
@@ -417,7 +420,7 @@ class DatabaseService:
         
         # Save knowledge base
         try:
-            knowledge_base = enrich_knowledge_base_for_erp(knowledge_base)
+            knowledge_base = enrich_knowledge_base_schema_facts(knowledge_base)
             save_json(knowledge_base, KNOWLEDGE_BASE_PATH)
             schema_payload = {
                 table_name: {
@@ -483,7 +486,7 @@ class DatabaseService:
                     enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
                 
                 if enriched_kb is not knowledge_base:
-                    final_knowledge_base = enrich_knowledge_base_for_erp(enriched_kb)
+                    final_knowledge_base = enrich_knowledge_base_schema_facts(enriched_kb)
                     enriched_tables, fallback_tables = get_last_enrichment_report()
                     if fallback_tables:
                         self.last_ai_enrichment_status = "partial"

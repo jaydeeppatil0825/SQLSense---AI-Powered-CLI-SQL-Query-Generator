@@ -1,10 +1,14 @@
 """
 core/query_pipeline.py
 ======================
-Thin orchestration layer for question-to-SQL processing.
+Query Planning Pipeline entry point.
 
-The pipeline keeps the current planner/generator/validator behavior intact
-while exposing one structured entry point with stage-level debug output.
+This module belongs to the User Question Understanding pipeline. It
+normalizes the question, builds intent, retrieves dynamic KB evidence,
+previews the query plan, and passes that structured context into the SQL
+generation pipeline.
+
+It must not generate SQL directly.
 """
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ class QueryPipelineResult:
 
 
 class QueryPipeline:
-    """Stage-oriented wrapper around the existing question service flow."""
+    """Stage-oriented planning wrapper that passes evidence into SQL generation."""
 
     def __init__(self, question_service: Any):
         self.question_service = question_service

@@ -4,6 +4,9 @@ Legacy compatibility wrapper for the retired ERP-specific SQL generator.
 SQLSense now routes SQL generation through dynamic runtime schema evidence from
 the query pipeline. This module remains only to preserve import compatibility
 for older callers while ensuring no fixed ERP templates are active.
+
+Pipeline role:
+This file is intentionally inert inside the SQL Generation Pipeline.
 """
 
 from __future__ import annotations

@@ -8,6 +8,9 @@ The prompt is fully dynamic:
 - Business glossary is derived from the active KB
 - Relationships come only from the active schema context
 - No fixed demo or ERP-specific table guidance is injected
+
+This module belongs to the SQL Generation Pipeline and must reflect only
+runtime planning evidence plus trusted KB/glossary/relationship context.
 """
 
 from __future__ import annotations

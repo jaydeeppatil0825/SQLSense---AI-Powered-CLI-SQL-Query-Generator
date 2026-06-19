@@ -3,6 +3,10 @@ ai/sql_generator.py
 ====================
 Dispatches SQL generation requests to the configured AI backend and returns
 a clean, validated SQL string.
+
+This module belongs to the SQL Generation Pipeline. It must use only runtime
+schema/context evidence supplied by planning and must not invent tables,
+columns, joins, or formulas outside that evidence.
 """
 
 from __future__ import annotations
