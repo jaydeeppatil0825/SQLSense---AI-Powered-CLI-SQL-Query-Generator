@@ -167,6 +167,16 @@ Responsibilities:
 - result/error return to the CLI
 
 Current files:
+- `sql_pipeline/sql_generator.py`
+- `sql_pipeline/prompt_builder.py`
+- `sql_pipeline/simple_query_generator.py`
+- `sql_pipeline/erp_query_generator.py`
+- `sql_pipeline/sql_validator.py`
+- `sql_pipeline/query_executor.py`
+- `sql_pipeline/question_service.py`
+- `sql_pipeline/result_service.py`
+
+Compatibility wrappers kept at old paths:
 - `ai/sql_generator.py`
 - `ai/prompt_builder.py`
 - `ai/simple_query_generator.py`

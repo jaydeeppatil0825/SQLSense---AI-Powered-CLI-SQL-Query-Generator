@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 
-from ai.sql_generator import _call_ai_backend
+from sql_pipeline.sql_generator import _call_ai_backend
 from utils.logger import get_logger
 
 

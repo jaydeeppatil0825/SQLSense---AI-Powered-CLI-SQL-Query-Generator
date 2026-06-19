@@ -1,23 +1,7 @@
-"""
-Legacy compatibility wrapper for the retired ERP-specific SQL generator.
+"""Backward-compatible module alias for the retired ERP SQL generator."""
 
-SQLSense now routes SQL generation through dynamic runtime schema evidence from
-the query pipeline. This module remains only to preserve import compatibility
-for older callers while ensuring no fixed ERP templates are active.
+from importlib import import_module
+import sys
 
-Pipeline role:
-This file is intentionally inert inside the SQL Generation Pipeline.
-"""
-
-from __future__ import annotations
-
-
-def generate_erp_sql(question: str, knowledge_base: dict, query_plan: dict | None = None) -> str | None:
-    """
-    Legacy no-op entry point.
-
-    Returns None so the active dynamic SQL generation path can decide how to
-    proceed using runtime KB, glossary, retrieval, join paths, and validator
-    checks.
-    """
-    return None
+_impl = import_module("sql_pipeline.erp_query_generator")
+sys.modules[__name__] = _impl

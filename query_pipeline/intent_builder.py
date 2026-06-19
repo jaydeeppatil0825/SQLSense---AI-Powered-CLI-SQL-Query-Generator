@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 from core.ai_backend_service import call_ai_backend
 from utils.logger import get_logger
 from query_pipeline.question_normalizer import normalize_question
-from utils.sql_validator import extract_requested_limit
+from sql_pipeline.sql_validator import extract_requested_limit
 
 logger = get_logger()
 _ALLOWED_INTENT_TYPES = {
