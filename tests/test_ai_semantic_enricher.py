@@ -121,6 +121,7 @@ def test_candidate_prompt_contains_schema_and_profile_evidence(monkeypatch):
     assert "nulls=0" in candidate_prompt
     assert "nearby=['storage_id', 'checked_on']" in candidate_prompt or "nearby=['item_id', 'storage_id', 'checked_on']" in candidate_prompt
     assert "stock_positions.item_id -> items.item_id" in candidate_prompt
+    assert "Do not copy names, labels, cities, dates, amounts, or codes from rows." in captured_messages[0][1]["content"]
     assert enriched["stock_positions"]["columns"][3]["semantic_type"] == "quantity"
 
 
@@ -374,3 +375,120 @@ def test_enrich_timeout_fallback_log_is_sanitized(monkeypatch, caplog):
     assert enriched == knowledge_base
     assert "Local AI timed out" in caplog.text
     assert "HTTPSConnectionPool" not in caplog.text
+
+
+def test_ai_sample_value_echoes_are_replaced_with_neutral_metadata(monkeypatch):
+    knowledge_base = {
+        "items": {
+            "columns": [
+                {
+                    "name": "item_group",
+                    "type": "VARCHAR(100)",
+                    "semantic_type": "category_candidate",
+                    "sample_values": ["Furniture", "Appliances"],
+                }
+            ]
+        },
+        "accounts": {
+            "columns": [
+                {
+                    "name": "account_label",
+                    "type": "VARCHAR(100)",
+                    "semantic_type": "text_candidate",
+                    "sample_values": ["Nova Traders", "Prime Retail", "BlueLine Stores"],
+                }
+            ]
+        },
+        "stock_positions": {
+            "columns": [
+                {
+                    "name": "stock_value",
+                    "type": "DECIMAL(10,2)",
+                    "semantic_type": "numeric_candidate",
+                    "sample_values": [1200.0, 950.0],
+                },
+                {
+                    "name": "item_label",
+                    "type": "VARCHAR(100)",
+                    "semantic_type": "text_candidate",
+                    "sample_values": ["Office Chair", "Study Desk"],
+                },
+            ]
+        },
+    }
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        table_line = next(line for line in messages[1]["content"].splitlines() if line.startswith("Table: "))
+        table_name = table_line.split(": ", 1)[1]
+
+        if "q" in response_format.get("required", []):
+            if table_name == "items":
+                return json.dumps({"d": "Furniture", "p": "Furniture", "q": []})
+            if table_name == "accounts":
+                return json.dumps({"d": "Nova Traders", "p": "Nova Traders", "q": []})
+            return json.dumps({"d": "Stock", "p": "Stock", "q": ["What are my stocks worth?"]})
+
+        if table_name == "accounts":
+            return json.dumps(
+                {
+                    "c": {
+                        "account_label": {
+                            "d": "Nova Traders",
+                            "b": ["Prime Retail", "BlueLine Stores"],
+                            "s": "name",
+                            "cf": 0.86,
+                            "r": "text values identify the account label",
+                            "me": False,
+                            "di": True,
+                            "dt": False,
+                        }
+                    }
+                }
+            )
+
+        return json.dumps(
+            {
+                "c": {
+                    "stock_value": {
+                        "d": "Stock value",
+                        "b": ["inventory value"],
+                        "s": "money",
+                        "cf": 0.82,
+                        "r": "numeric values indicate stored value",
+                        "me": True,
+                        "di": False,
+                        "dt": False,
+                    },
+                    "item_label": {
+                        "d": "Office Chair",
+                        "b": ["Office Chair", "Study Desk"],
+                        "s": "name",
+                        "cf": 0.8,
+                        "r": "text values identify the item label",
+                        "me": False,
+                        "di": True,
+                        "dt": False,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
+
+    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
+
+    assert enriched["items"]["business_purpose"] == "Stores records for item."
+    assert enriched["accounts"]["business_purpose"] == "Stores records for account."
+    assert enriched["stock_positions"]["business_purpose"] == "Stores records for stock position."
+    assert enriched["stock_positions"]["possible_business_questions"] == []
+
+    account_label = enriched["accounts"]["columns"][0]
+    item_label = enriched["stock_positions"]["columns"][1]
+    assert account_label["business_description"] != "Nova Traders"
+    assert "Nova Traders" not in account_label["business_terms"]
+    assert "Prime Retail" not in account_label["business_terms"]
+    assert "BlueLine Stores" not in account_label["business_terms"]
+    assert "account label" in account_label["business_terms"]
+    assert "account name" in account_label["business_terms"]
+    assert item_label["business_description"] != "Office Chair"
+    assert "Office Chair" not in item_label["business_terms"]

@@ -97,6 +97,12 @@ _FINAL_SEMANTIC_TYPES = {
     "category_candidate",
 }
 _AI_RETURN_SEMANTIC_TYPES = _FINAL_SEMANTIC_TYPES - _CANDIDATE_TYPES
+_SAMPLE_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "is",
+    "my", "of", "on", "or", "our", "the", "to", "us", "we", "with",
+}
+_QUESTION_PRONOUNS = {"my", "our", "we", "us"}
+_PURPOSE_VERBS = {"store", "stores", "track", "tracks", "hold", "holds", "record", "records", "contain", "contains", "list", "lists"}
 
 
 def _describe_ai_enrichment_failure(exc: Exception, backend: str) -> str:
@@ -143,12 +149,214 @@ def _clean_ai_response(response: str) -> str:
     return response[start : end + 1].strip()
 
 
+def _normalize_free_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+
+def _humanize_identifier(text: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", _normalize_free_text(text)).strip("_")
+    return normalized.replace("_", " ").strip()
+
+
+def _tokenize_text(text: str) -> set[str]:
+    return {token for token in re.split(r"[^a-z0-9]+", _normalize_free_text(text)) if token}
+
+
+def _collect_table_sample_texts(table_data: dict) -> set[str]:
+    sample_texts: set[str] = set()
+    for column in table_data.get("columns", []):
+        for value in column.get("sample_values", []) or []:
+            cleaned = _normalize_free_text(value)
+            if cleaned:
+                sample_texts.add(cleaned)
+    return sample_texts
+
+
+def _looks_like_literal_value(text: str) -> bool:
+    cleaned = _normalize_free_text(text)
+    if not cleaned:
+        return True
+    if not any(char.isalpha() for char in cleaned):
+        return True
+    if re.fullmatch(r"[\d\s,.$:/\\-]+", cleaned):
+        return True
+    return False
+
+
+def _looks_like_sample_echo(text: str, sample_texts: set[str]) -> bool:
+    cleaned = _normalize_free_text(text)
+    if not cleaned or not sample_texts:
+        return False
+    if cleaned in sample_texts:
+        return True
+
+    text_tokens = _tokenize_text(cleaned) - _SAMPLE_STOPWORDS
+    if not text_tokens:
+        return False
+
+    for sample in sample_texts:
+        sample_tokens = _tokenize_text(sample) - _SAMPLE_STOPWORDS
+        if sample_tokens and text_tokens <= sample_tokens:
+            return True
+    return False
+
+
+def _fallback_table_description(table_name: str) -> str:
+    return _humanize_identifier(table_name).title()
+
+
+def _fallback_column_description(column_name: str, semantic_type: str) -> str:
+    label = _humanize_identifier(column_name)
+    if semantic_type == "name":
+        if label.endswith(" label"):
+            owner = label[: -len(" label")].strip()
+            if owner:
+                return f"Display label of {owner}"
+        if label.endswith(" name"):
+            owner = label[: -len(" name")].strip()
+            if owner:
+                return f"Name of {owner}"
+        return f"{label.title()} field"
+    if semantic_type == "status":
+        return f"{label.title()} status field"
+    if semantic_type == "code":
+        return f"{label.title()} code field"
+    if semantic_type == "money":
+        return f"{label.title()} amount field"
+    if semantic_type == "quantity":
+        return f"{label.title()} quantity field"
+    if semantic_type == "percentage":
+        return f"{label.title()} percentage field"
+    if semantic_type == "date":
+        return f"{label.title()} date field"
+    return f"{label.title()} field"
+
+
+def _fallback_business_terms(column_name: str, semantic_type: str) -> list[str]:
+    label = _humanize_identifier(column_name)
+    if not label:
+        return []
+
+    terms = [label]
+    if semantic_type == "name" or " label" in label or " name" in label:
+        if " label" in label:
+            terms.append(label.replace(" label", " name"))
+        elif " name" in label:
+            terms.append(label.replace(" name", " label"))
+    elif semantic_type == "code" and "code" not in label:
+        terms.append(f"{label} code")
+
+    deduped: list[str] = []
+    for term in terms:
+        if term and term not in deduped:
+            deduped.append(term)
+    return deduped[:2]
+
+
+def _sanitize_table_description(text: str, table_name: str, table_data: dict) -> str:
+    cleaned = sanitize_short_text(text, fallback=_fallback_table_description(table_name))
+    if _looks_like_literal_value(cleaned) or _looks_like_sample_echo(cleaned, _collect_table_sample_texts(table_data)):
+        return _fallback_table_description(table_name)
+    if len(cleaned.split()) < 2:
+        return _fallback_table_description(table_name)
+    return cleaned
+
+
+def _sanitize_table_purpose(text: str, table_name: str, table_data: dict) -> str:
+    fallback = build_rule_based_business_purpose(table_name)
+    cleaned = sanitize_business_purpose(text, table_name)
+    tokens = _tokenize_text(cleaned)
+    if (
+        _looks_like_literal_value(cleaned)
+        or _looks_like_sample_echo(cleaned, _collect_table_sample_texts(table_data))
+        or "?" in cleaned
+        or len(tokens) < 3
+        or tokens & _QUESTION_PRONOUNS
+        or not (tokens & _PURPOSE_VERBS)
+    ):
+        return fallback
+    return cleaned
+
+
+def _sanitize_business_questions(
+    questions: list[str],
+    table_name: str,
+    table_data: dict,
+    business_purpose: str,
+) -> list[str]:
+    fallback_purpose = build_rule_based_business_purpose(table_name)
+    if business_purpose == fallback_purpose:
+        return []
+
+    sample_texts = _collect_table_sample_texts(table_data)
+    context_tokens = _tokenize_text(table_name)
+    for column in table_data.get("columns", []):
+        context_tokens |= _tokenize_text(column.get("name", ""))
+
+    clean_questions: list[str] = []
+    for question in questions[:1]:
+        text = sanitize_short_text(question)
+        if not text or len(text) > 100 or not any(ch.isalpha() for ch in text):
+            continue
+        tokens = _tokenize_text(text)
+        if tokens & _QUESTION_PRONOUNS:
+            continue
+        if _looks_like_sample_echo(text, sample_texts):
+            continue
+        if not (tokens & context_tokens):
+            continue
+        clean_questions.append(text)
+    return clean_questions
+
+
+def _sanitize_column_description(text: str, column: dict, semantic_type: str) -> str:
+    fallback = _fallback_column_description(str(column.get("name", "")), semantic_type)
+    cleaned = sanitize_short_text(text, fallback=fallback)
+    sample_texts = {
+        _normalize_free_text(value)
+        for value in (column.get("sample_values", []) or [])
+        if _normalize_free_text(value)
+    }
+    if _looks_like_literal_value(cleaned) or _looks_like_sample_echo(cleaned, sample_texts):
+        return fallback
+    if len(cleaned.split()) < 2:
+        return fallback
+    return cleaned
+
+
+def _sanitize_business_terms(terms: list[str], column: dict, semantic_type: str) -> list[str]:
+    sample_texts = {
+        _normalize_free_text(value)
+        for value in (column.get("sample_values", []) or [])
+        if _normalize_free_text(value)
+    }
+    clean_terms: list[str] = []
+    for term in terms[:2]:
+        cleaned = sanitize_short_text(term)
+        if not cleaned or _looks_like_literal_value(cleaned):
+            continue
+        if _looks_like_sample_echo(cleaned, sample_texts):
+            continue
+        if len(cleaned.split()) > 4:
+            continue
+        if cleaned not in clean_terms:
+            clean_terms.append(cleaned)
+
+    if clean_terms:
+        return clean_terms
+    return _fallback_business_terms(str(column.get("name", "")), semantic_type)
+
+
 def _table_summary_prompt(table_name: str, table_data: dict) -> str:
     """Build a compact table-only prompt."""
     lines = [
         f"Table: {table_name}",
         "Return JSON only using keys d, p, q.",
-        "Keep every description under 6 words.",
+        "Describe schema meaning only, not literal sample values.",
+        "Do not copy names, labels, cities, dates, amounts, or codes from rows.",
+        "If unsure, keep descriptions neutral and generic.",
+        "Only add q when confidence is high; otherwise return an empty list.",
+        "Keep every description under 10 words.",
         "Keep each question under 8 words.",
     ]
     column_names = [col.get("name", "") for col in table_data.get("columns", [])]
@@ -301,11 +509,11 @@ def _parse_table_summary(response: str) -> dict:
     data = json.loads(cleaned)
     if {"d", "p", "q"} <= data.keys():
         return {
-            "business_description": str(data.get("d", "")).strip(),
-            "business_purpose": str(data.get("p", "")).strip(),
+            "business_description": str(data.get("d", data.get("table_description", ""))).strip(),
+            "business_purpose": str(data.get("p", data.get("table_purpose", ""))).strip(),
             "possible_business_questions": [
                 str(item).strip()
-                for item in data.get("q", [])
+                for item in data.get("q", data.get("possible_business_questions", []))
                 if str(item).strip()
             ][:1],
         }
@@ -321,10 +529,10 @@ def _parse_column_enrichment(response: str) -> dict:
             raise ValueError("Invalid enrichment structure: c must be an object")
         return {
             str(col_name): {
-                "business_description": str(col_info.get("d", "")).strip(),
+                "business_description": str(col_info.get("d", col_info.get("column_description", ""))).strip(),
                 "business_terms": [
                     str(item).strip()
-                    for item in col_info.get("b", [])
+                    for item in col_info.get("b", col_info.get("business_terms", []))
                     if str(item).strip()
                 ][:2],
                 "semantic_type": str(col_info.get("s", col_info.get("m", "general"))).strip() or "general",
@@ -346,24 +554,25 @@ def _parse_column_enrichment(response: str) -> dict:
 def _apply_table_enrichment(table_name: str, table_data: dict, enrichment: dict) -> None:
     """Apply enrichment data to one table in-place."""
     fallback_purpose = build_rule_based_business_purpose(table_name)
-    table_data["business_description"] = sanitize_short_text(
+    table_data["business_description"] = _sanitize_table_description(
         enrichment.get("business_description", ""),
-        fallback=table_data.get("business_description", ""),
+        table_name,
+        table_data,
     )
-    table_data["business_purpose"] = sanitize_business_purpose(
+    table_data["business_purpose"] = _sanitize_table_purpose(
         enrichment.get("business_purpose", ""),
         table_name,
+        table_data,
     )
     if table_data["business_purpose"] == fallback_purpose:
         logger.info(f"AI business purpose for '{table_name}' was invalid; using rule-based fallback.")
 
-    clean_questions = []
-    for question in enrichment.get("possible_business_questions", [])[:1]:
-        text = str(question or "").strip()
-        if not text or len(text) > 100 or not any(ch.isalpha() for ch in text):
-            continue
-        clean_questions.append(text)
-    table_data["possible_business_questions"] = clean_questions
+    table_data["possible_business_questions"] = _sanitize_business_questions(
+        enrichment.get("possible_business_questions", []),
+        table_name,
+        table_data,
+        table_data["business_purpose"],
+    )
 
 
 def _normalize_ai_semantic_type(value: str, fallback: str) -> str:
@@ -431,8 +640,8 @@ def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
         fallback_semantic = str(col.get("semantic_type", "general")).lower()
         semantic_type = _normalize_ai_semantic_type(col_info.get("semantic_type", fallback_semantic), fallback_semantic)
         semantic_type = _finalize_candidate_semantic_type(col, col_info, semantic_type)
-        col["business_description"] = sanitize_short_text(col_info.get("business_description", ""))
-        col["business_terms"] = list(col_info.get("business_terms", []))[:2]
+        col["business_description"] = _sanitize_column_description(col_info.get("business_description", ""), col, semantic_type)
+        col["business_terms"] = _sanitize_business_terms(list(col_info.get("business_terms", [])), col, semantic_type)
         col["semantic_type"] = semantic_type
         col["confidence"] = max(float(col.get("confidence", 0.0) or 0.0), min(max(float(col_info.get("confidence", 0.0) or 0.0), 0.0), 1.0))
         col["reason"] = sanitize_short_text(col_info.get("reason", ""), fallback=str(col.get("reason", "")))
