@@ -69,6 +69,8 @@ class QueryPipeline:
         preview_context = self._build_context_preview(
             normalized_question,
             knowledge_base,
+            intent=intent,
+            retrieved_context=retrieved_context,
             business_glossary=business_glossary,
             vector_retriever=vector_retriever,
         )
@@ -103,6 +105,8 @@ class QueryPipeline:
         question: str,
         knowledge_base: Dict[str, Any],
         *,
+        intent: Dict[str, Any],
+        retrieved_context: Dict[str, Any],
         business_glossary: Optional[Dict[str, Any]],
         vector_retriever: Optional[Any],
     ) -> Dict[str, Any]:
@@ -112,6 +116,8 @@ class QueryPipeline:
                 knowledge_base,
                 business_glossary,
                 vector_retriever=vector_retriever,
+                intent=intent,
+                retrieved_context=retrieved_context,
             )
         except Exception as exc:
             return {

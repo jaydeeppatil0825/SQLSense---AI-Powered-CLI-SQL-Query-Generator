@@ -583,12 +583,30 @@ def _find_measure_column(
 
 
 def _money_columns_for_table(query_context: dict[str, Any], table_name: str) -> list[dict[str, Any]]:
-    columns = []
+    columns_by_name: dict[str, dict[str, Any]] = {}
     for entry in query_context.get("selected_columns") or []:
         if str(entry.get("table") or "") != table_name:
             continue
         if str(entry.get("semantic_type") or "").lower() == "money":
-            columns.append(entry)
+            columns_by_name[str(entry.get("column") or "")] = dict(entry)
+
+    for kb_name in ("selected_knowledge_base", "knowledge_base"):
+        knowledge_base = query_context.get(kb_name) or {}
+        for column in knowledge_base.get(table_name, {}).get("columns", []):
+            column_name = str(column.get("name", "")).strip()
+            if not column_name or str(column.get("semantic_type", "")).lower() != "money":
+                continue
+            if column_name in columns_by_name:
+                continue
+            columns_by_name[column_name] = {
+                "table": table_name,
+                "column": column_name,
+                "semantic_type": "money",
+                "confidence": 0.6,
+                "reason": "available money column from runtime schema metadata",
+            }
+
+    columns = list(columns_by_name.values())
     columns.sort(key=lambda entry: (-float(entry.get("confidence") or 0.0), str(entry.get("column") or "")))
     return columns
 
@@ -603,7 +621,126 @@ def _has_same_table_state_context(query_context: dict[str, Any], table_name: str
             continue
         if str(entry.get("semantic_type") or "").lower() == "status":
             return True
+
+    question_terms = _question_terms(query_context)
+    for kb_name in ("selected_knowledge_base", "knowledge_base"):
+        knowledge_base = query_context.get(kb_name) or {}
+        for column in knowledge_base.get(table_name, {}).get("columns", []):
+            if str(column.get("semantic_type", "")).lower() != "status":
+                continue
+            status_terms = set(_identifier_tokens(str(column.get("name", ""))))
+            status_terms.update(_identifier_tokens(str(column.get("business_description", ""))))
+            for term in column.get("business_terms", []) or []:
+                status_terms.update(_identifier_tokens(str(term)))
+            for sample_value in column.get("sample_values", []) or []:
+                status_terms.update(_identifier_tokens(str(sample_value)))
+            if status_terms & question_terms:
+                return True
     return False
+
+
+def _column_metadata(query_context: dict[str, Any], table_name: str, column_name: str) -> dict[str, Any]:
+    for kb_name in ("selected_knowledge_base", "knowledge_base"):
+        knowledge_base = query_context.get(kb_name) or {}
+        for column in knowledge_base.get(table_name, {}).get("columns", []):
+            if str(column.get("name", "")) == str(column_name):
+                return column
+    return {}
+
+
+def _formula_evidence_entries(
+    query_context: dict[str, Any],
+    table_name: str,
+    column_name: str,
+) -> list[dict[str, Any]]:
+    evidence_entries: list[dict[str, Any]] = []
+
+    for key in ("formula_evidence",):
+        value = query_context.get(key)
+        if isinstance(value, list):
+            evidence_entries.extend(entry for entry in value if isinstance(entry, dict))
+
+    plan = query_context.get("plan") or {}
+    plan_evidence = plan.get("formula_evidence")
+    if isinstance(plan_evidence, list):
+        evidence_entries.extend(entry for entry in plan_evidence if isinstance(entry, dict))
+
+    retrieved_context = query_context.get("retrieved_context") or {}
+    retrieved_evidence = retrieved_context.get("formula_evidence")
+    if isinstance(retrieved_evidence, list):
+        evidence_entries.extend(entry for entry in retrieved_evidence if isinstance(entry, dict))
+
+    column_metadata = _column_metadata(query_context, table_name, column_name)
+    metadata_evidence = column_metadata.get("formula_evidence")
+    if isinstance(metadata_evidence, list):
+        evidence_entries.extend(entry for entry in metadata_evidence if isinstance(entry, dict))
+
+    metadata_components = column_metadata.get("formula_components")
+    if isinstance(metadata_components, dict):
+        evidence_entries.append(
+            {
+                "table": table_name,
+                "column": column_name,
+                "operation": column_metadata.get("formula_operation") or metadata_components.get("operation"),
+                "secondary_column": metadata_components.get("secondary_column"),
+                "alias": column_metadata.get("formula_alias"),
+                "source": "column_metadata",
+            }
+        )
+
+    applicable: list[dict[str, Any]] = []
+    for entry in evidence_entries:
+        entry_table = str(entry.get("table") or table_name).strip()
+        entry_column = str(entry.get("primary_column") or entry.get("column") or column_name).strip()
+        if entry_table != table_name or entry_column != column_name:
+            continue
+        applicable.append(entry)
+    return applicable
+
+
+def _formula_expression_from_evidence(
+    query_context: dict[str, Any],
+    measure_column: dict[str, Any],
+    money_columns: list[dict[str, Any]],
+) -> tuple[str | None, str | None]:
+    table_name = str(measure_column.get("table") or "")
+    column_name = str(measure_column.get("column") or "")
+    primary_sql = _qualified_column(table_name, column_name)
+    if not primary_sql:
+        return None, None
+
+    secondary_lookup = {
+        str(entry.get("column") or ""): entry
+        for entry in money_columns
+        if str(entry.get("column") or "")
+    }
+
+    for evidence in _formula_evidence_entries(query_context, table_name, column_name):
+        operation = str(
+            evidence.get("operation")
+            or evidence.get("formula_operation")
+            or evidence.get("expression_type")
+            or ""
+        ).strip().lower()
+        secondary_name = str(
+            evidence.get("secondary_column")
+            or evidence.get("secondary")
+            or evidence.get("other_column")
+            or ""
+        ).strip()
+        if operation not in {"difference", "subtract", "minus"} or secondary_name not in secondary_lookup:
+            continue
+
+        secondary_sql = _qualified_column(table_name, secondary_name)
+        if not secondary_sql:
+            continue
+
+        alias = str(evidence.get("alias") or evidence.get("formula_alias") or "").strip()
+        if not _is_safe_sql_identifier(alias):
+            alias = f"derived_{column_name}" if _is_safe_sql_identifier(column_name) else "derived_value"
+        return f"({primary_sql} - COALESCE({secondary_sql}, 0))", alias
+
+    return None, None
 
 
 def _measure_expression(
@@ -617,7 +754,7 @@ def _measure_expression(
         return None, "total_value"
 
     semantic_type = str(measure_column.get("semantic_type") or "").lower()
-    if semantic_type != "money" or not _has_same_table_state_context(query_context, table_name):
+    if semantic_type != "money":
         alias = f"total_{column_name}" if _is_safe_sql_identifier(column_name) else "total_value"
         return primary_sql, alias
 
@@ -626,18 +763,22 @@ def _measure_expression(
         for entry in _money_columns_for_table(query_context, table_name)
         if str(entry.get("column") or "") != column_name
     ]
+    formula_sql, formula_alias = _formula_expression_from_evidence(query_context, measure_column, money_columns)
+    if formula_sql and formula_alias:
+        return formula_sql, formula_alias
+
+    if not _has_same_table_state_context(query_context, table_name):
+        alias = f"total_{column_name}" if _is_safe_sql_identifier(column_name) else "total_value"
+        return primary_sql, alias
+
+    if money_columns:
+        return None, "unresolved_value"
+
     if len(money_columns) != 1:
         alias = f"total_{column_name}" if _is_safe_sql_identifier(column_name) else "total_value"
         return primary_sql, alias
-
-    secondary_name = str(money_columns[0].get("column") or "")
-    secondary_sql = _qualified_column(table_name, secondary_name)
-    if not secondary_sql:
-        alias = f"total_{column_name}" if _is_safe_sql_identifier(column_name) else "total_value"
-        return primary_sql, alias
-
-    alias = f"remaining_{column_name}" if _is_safe_sql_identifier(column_name) else "remaining_value"
-    return f"({primary_sql} - COALESCE({secondary_sql}, 0))", alias
+    alias = f"total_{column_name}" if _is_safe_sql_identifier(column_name) else "total_value"
+    return primary_sql, alias
 
 
 def _is_simple_repair_blocked(query_context: dict[str, Any]) -> bool:
@@ -682,6 +823,8 @@ def _build_joined_aggregate_repair_sql(query_context: dict[str, Any], knowledge_
     """Build a conservative grouped aggregate SQL from selected schema and FK paths."""
     plan = query_context.get("plan") or {}
     if _is_simple_repair_blocked(query_context):
+        return None
+    if plan.get("unresolved_metrics"):
         return None
     if not plan.get("dimension") and not plan.get("grouping"):
         return None

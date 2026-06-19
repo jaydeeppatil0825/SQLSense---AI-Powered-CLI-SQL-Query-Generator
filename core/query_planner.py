@@ -1191,15 +1191,330 @@ def _find_bridge_tables(
     return bridge_tables
 
 
+def _planner_intent_from_structured_intent(intent: dict[str, Any] | None) -> str:
+    intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
+    if intent_type == "count":
+        return "count"
+    if intent_type == "ranking":
+        return "top_n"
+    if intent_type == "comparison":
+        return "comparison"
+    return "list"
+
+
+def _structured_dimension(intent: dict[str, Any] | None) -> str | None:
+    requested_dimensions = list((intent or {}).get("requested_dimensions") or [])
+    if not requested_dimensions:
+        return None
+    return str(requested_dimensions[0]).strip() or None
+
+
+def _structured_sorting(intent: dict[str, Any] | None, planner_intent: str) -> dict[str, str] | None:
+    requested_sort = dict((intent or {}).get("requested_sort") or {})
+    sort_terms = str(requested_sort.get("terms") or "").strip()
+    direction = str(requested_sort.get("direction") or "").strip().lower() or "asc"
+    if sort_terms:
+        return {"direction": direction, "by": sort_terms}
+    if planner_intent == "top_n":
+        return {"direction": "desc", "by": "metric"}
+    return None
+
+
+def _structured_filter_entries(
+    filter_candidates: list[dict[str, Any]],
+    requested_filters: list[str],
+) -> list[dict[str, Any]]:
+    filters: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    fallback_term = str(requested_filters[0]).strip() if requested_filters else ""
+
+    for entry in filter_candidates:
+        table_name = str(entry.get("table", "")).strip()
+        column_name = str(entry.get("column", "")).strip()
+        if not table_name or not column_name:
+            continue
+        matched_terms = list(entry.get("matched_terms") or [])
+        term = str(matched_terms[0] if matched_terms else fallback_term).strip()
+        signature = (table_name, column_name, term)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        filters.append(
+            {
+                "type": "value",
+                "table": table_name,
+                "column": column_name,
+                "value": term,
+                "term": term,
+            }
+        )
+    return filters[:4]
+
+
+def _merge_candidate_columns(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for group in groups:
+        for entry in group:
+            table_name = str(entry.get("table", "")).strip()
+            column_name = str(entry.get("column", "")).strip()
+            if not table_name or not column_name:
+                continue
+            key = (table_name, column_name)
+            existing = merged.get(key)
+            if not existing:
+                merged[key] = dict(entry)
+                continue
+            existing["score"] = max(float(existing.get("score") or 0.0), float(entry.get("score") or 0.0))
+            existing["matched_terms"] = list(dict.fromkeys(list(existing.get("matched_terms") or []) + list(entry.get("matched_terms") or [])))
+            existing["is_measure"] = bool(existing.get("is_measure")) or bool(entry.get("is_measure"))
+            existing["is_dimension"] = bool(existing.get("is_dimension")) or bool(entry.get("is_dimension"))
+            existing["source"] = existing.get("source") if existing.get("source") == "vector" else entry.get("source", existing.get("source"))
+    results = list(merged.values())
+    results.sort(key=lambda item: (-float(item.get("score") or 0.0), str(item.get("table") or ""), str(item.get("column") or "")))
+    return results
+
+
+def _column_selection_from_retrieved_context(
+    table_name: str,
+    merged_columns: list[dict[str, Any]],
+    join_paths: list[dict],
+) -> list[dict[str, Any]]:
+    selected = []
+    for entry in merged_columns:
+        if str(entry.get("table") or "") != table_name:
+            continue
+        selected.append(
+            {
+                "column": str(entry.get("column") or ""),
+                "semantic_type": str(entry.get("semantic_type") or "general"),
+                "confidence": round(min(max(float(entry.get("score") or 0.0), 0.45), 0.99), 2),
+                "reason": "; ".join(
+                    filter(
+                        None,
+                        [
+                            f"retrieved from {entry.get('source')}" if entry.get("source") else "",
+                            ", ".join(entry.get("matched_terms") or []),
+                        ],
+                    )
+                ).strip("; "),
+            }
+        )
+    existing = {entry.get("column") for entry in selected}
+    for join_column in _selected_join_columns_for_table(table_name, {}, join_paths):
+        if join_column.get("column") in existing:
+            continue
+        selected.append(join_column)
+        existing.add(join_column.get("column"))
+    selected.sort(key=lambda item: (-float(item.get("confidence") or 0.0), str(item.get("column") or "")))
+    return selected[:8]
+
+
+def _table_entries_from_retrieved_context(
+    matched_tables: list[dict[str, Any]],
+    merged_columns: list[dict[str, Any]],
+    join_paths: list[dict],
+    selected_table_names: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    selected_table_names = list(selected_table_names or [])
+    table_lookup = {
+        str(entry.get("table", "")).strip(): dict(entry)
+        for entry in matched_tables
+        if str(entry.get("table", "")).strip()
+    }
+    entries = []
+    ordered_table_names = selected_table_names or list(table_lookup.keys())
+    for table_name in ordered_table_names:
+        entry = table_lookup.get(table_name, {"table": table_name, "score": 0.55, "matched_terms": [], "source": "retrieved_context"})
+        if not table_name:
+            continue
+        matched_terms = ", ".join(entry.get("matched_terms") or [])
+        reason_parts = [f"retrieved from {entry.get('source')}"] if entry.get("source") else []
+        if matched_terms:
+            reason_parts.append(matched_terms)
+        entries.append(
+            {
+                "table": table_name,
+                "confidence": round(min(max(float(entry.get("score") or 0.0), 0.4), 0.99), 2),
+                "reason": "; ".join(reason_parts) or "selected from retrieved context",
+                "selected_columns": _column_selection_from_retrieved_context(table_name, merged_columns, join_paths),
+            }
+        )
+    return entries
+
+
+def _tables_from_column_candidates(candidates: list[dict[str, Any]]) -> list[str]:
+    tables: list[str] = []
+    for entry in candidates:
+        table_name = str(entry.get("table", "")).strip()
+        if table_name and table_name not in tables:
+            tables.append(table_name)
+    return tables
+
+
+def _build_query_context_from_retrieved_context(
+    question: str,
+    enriched_kb: dict,
+    intent: dict[str, Any],
+    retrieved_context: dict[str, Any],
+) -> dict:
+    planner_intent = _planner_intent_from_structured_intent(intent)
+    dimension = _structured_dimension(intent)
+    sorting = _structured_sorting(intent, planner_intent)
+    limit = (intent or {}).get("limit")
+    requested_metrics = list((intent or {}).get("requested_metrics") or [])
+    requested_dimensions = list((intent or {}).get("requested_dimensions") or [])
+    requested_filters = list((intent or {}).get("requested_filters") or [])
+
+    matched_tables = [
+        dict(entry)
+        for entry in (retrieved_context.get("matched_tables") or [])
+        if str(entry.get("table", "")).strip() in enriched_kb
+    ]
+    matched_columns = [
+        dict(entry)
+        for entry in (retrieved_context.get("matched_columns") or [])
+        if str(entry.get("table", "")).strip() in enriched_kb
+    ]
+    measure_candidates = [
+        dict(entry)
+        for entry in (retrieved_context.get("measure_candidates") or [])
+        if str(entry.get("table", "")).strip() in enriched_kb
+    ]
+    dimension_candidates = [
+        dict(entry)
+        for entry in (retrieved_context.get("dimension_candidates") or [])
+        if str(entry.get("table", "")).strip() in enriched_kb
+    ]
+    filter_candidates = [
+        dict(entry)
+        for entry in (retrieved_context.get("filter_candidates") or [])
+        if str(entry.get("table", "")).strip() in enriched_kb
+    ]
+    join_paths = [
+        dict(path)
+        for path in (retrieved_context.get("possible_join_paths") or [])
+        if str(path.get("from_table", "")).strip() in enriched_kb and str(path.get("to_table", "")).strip() in enriched_kb
+    ]
+    matched_relationships = [
+        dict(entry)
+        for entry in (retrieved_context.get("matched_relationships") or [])
+        if str(entry.get("from_table", "")).strip() in enriched_kb and str(entry.get("to_table", "")).strip() in enriched_kb
+    ]
+
+    merged_columns = _merge_candidate_columns(matched_columns, measure_candidates, dimension_candidates, filter_candidates)
+
+    selected_table_names: list[str] = []
+    for table_name in _tables_from_column_candidates(dimension_candidates + measure_candidates + filter_candidates):
+        if table_name not in selected_table_names:
+            selected_table_names.append(table_name)
+    for entry in matched_tables:
+        table_name = str(entry.get("table", "")).strip()
+        if table_name and table_name not in selected_table_names:
+            selected_table_names.append(table_name)
+    for table_name in _tables_from_join_paths(join_paths):
+        if table_name in enriched_kb and table_name not in selected_table_names:
+            selected_table_names.append(table_name)
+
+    selected_tables = _table_entries_from_retrieved_context(
+        [entry for entry in matched_tables if entry.get("table") in selected_table_names],
+        merged_columns,
+        join_paths,
+        selected_table_names=selected_table_names,
+    )
+    selected_table_names, selected_tables = _promote_join_path_tables(
+        selected_table_names,
+        selected_tables,
+        enriched_kb,
+        {"intent": planner_intent, "dimension": dimension, "grouping": [dimension] if dimension else [], "filters": requested_filters},
+        join_paths,
+    )
+
+    selected_columns = [
+        {"table": entry["table"], **column_entry}
+        for entry in selected_tables
+        for column_entry in entry.get("selected_columns", [])
+    ]
+    filters = _structured_filter_entries(filter_candidates, requested_filters)
+    confidence = float(retrieved_context.get("confidence") or 0.0)
+    if not selected_table_names:
+        confidence = min(confidence, 0.35)
+    elif len(selected_table_names) == 1 and len(selected_columns) >= 1:
+        confidence = max(confidence, 0.72)
+
+    plan = {
+        "question": question,
+        "intent": planner_intent,
+        "metric": None,
+        "dimension": dimension,
+        "filters": filters,
+        "date_range": None,
+        "grouping": [value for value in requested_dimensions if str(value or "").strip()],
+        "sorting": sorting,
+        "limit": limit,
+        "question_terms": list(retrieved_context.get("query_terms") or _content_terms(question)),
+        "semantic_hints": set(),
+        "matched_glossary_terms": [
+            str(entry.get("term", "")).strip()
+            for entry in (retrieved_context.get("matched_glossary_terms") or [])
+            if str(entry.get("term", "")).strip()
+        ],
+        "requested_metrics": requested_metrics,
+        "requested_dimensions": requested_dimensions,
+        "requested_filters": requested_filters,
+        "unresolved_metrics": requested_metrics if requested_metrics and not measure_candidates else [],
+        "evidence_sources": list(retrieved_context.get("retrieval_sources") or []),
+    }
+
+    reduced_kb = {
+        table_name: deepcopy(enriched_kb[table_name])
+        for table_name in selected_table_names
+        if table_name in enriched_kb
+    }
+    warnings = []
+    if confidence < 0.5:
+        warnings.append("Retrieved context is weak; planner confidence is low.")
+    if requested_metrics and not measure_candidates:
+        warnings.append("Requested metric remains unresolved in dynamic context.")
+
+    return {
+        "plan": plan,
+        "selected_tables": selected_tables,
+        "selected_columns": selected_columns,
+        "selected_table_names": selected_table_names,
+        "selected_knowledge_base": reduced_kb,
+        "warnings": warnings,
+        "confidence": round(confidence, 2),
+        "knowledge_base": enriched_kb,
+        "vector_results": None,
+        "vector_used": False,
+        "join_paths": join_paths,
+        "fk_relationships": _build_fk_relationship_graph(enriched_kb),
+        "matched_relationships": matched_relationships,
+        "measure_candidates": measure_candidates,
+        "dimension_candidates": dimension_candidates,
+        "filters": filters,
+        "evidence_sources": list(retrieved_context.get("retrieval_sources") or []),
+    }
+
+
 def build_query_context(
     question: str,
     knowledge_base: dict,
     business_glossary: dict | None = None,
     use_vector_retrieval: bool = True,
     vector_retriever: VectorRetriever | None = None,
+    intent: dict[str, Any] | None = None,
+    retrieved_context: dict[str, Any] | None = None,
 ) -> dict:
     """Build a structured plan and reduced schema slice for SQL generation."""
     enriched_kb = _enriched_kb(knowledge_base)
+    if intent and retrieved_context is not None:
+        return _build_query_context_from_retrieved_context(
+            question,
+            enriched_kb,
+            intent,
+            retrieved_context,
+        )
     normalized_question = _normalize(question)
     intent = _detect_intent(normalized_question)
     dimension = _detect_dimension(normalized_question, intent)

@@ -1136,15 +1136,14 @@ def test_grouped_amount_repair_uses_metric_table_not_dimension_money_column(monk
 
     success, message, sql, error = service.process_question("show open billed amount by entity", knowledge_base, ai_backend="local")
 
-    assert success is True
-    assert error is None
-    assert "FROM entity_groups" in sql
-    assert "JOIN link_records" in sql
-    assert "JOIN measure_events" in sql
-    assert "SUM((measure_events.billed_value - COALESCE(measure_events.settled_value, 0)))" in sql
-    assert "entity_groups.allowed_value" not in sql
-    assert "GROUP BY entity_groups.display_label" in sql
-    assert service.get_last_query_context()["route_used"] == "deterministic-repair"
+    assert success is False
+    assert sql is None
+    assert "missing a table name after FROM" in message
+    assert "Relevant table candidates:" in error
+    assert "entity_groups" in error
+    assert "measure_events" in error
+    assert "link_records" in error
+    assert service.get_last_query_context()["route_used"] == "fallback-failed"
 
 
 def test_pending_billed_amount_by_account_uses_repair_before_retry(monkeypatch, caplog):
@@ -1198,7 +1197,85 @@ def test_pending_billed_amount_by_account_uses_repair_before_retry(monkeypatch, 
     )
     monkeypatch.setattr(
         "core.question_service.generate_sql_with_retry",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI retry should not be called when deterministic repair can build a full query")),
+        lambda *args, **kwargs: "SELECT a.account_label, SUM(bn.billed_value) AS pending_billed_amount FROM",
+    )
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
+
+    success, message, sql, error = service.process_question("show pending billed amount by account", knowledge_base, ai_backend="local")
+
+    assert success is False
+    assert sql is None
+    assert "SQL generation failed: SQL is missing a table name after FROM." == message
+    assert "Generated SQL: SELECT a.account_label, SUM(bn.billed_value) AS pending_billed_amount FROM" in error
+    assert "Relevant join candidates:" in error
+    assert "accounts.account_id = deals.account_id" in error or "deals.account_id = accounts.account_id" in error
+    assert "deals.deal_id = billing_notes.deal_id" in error or "billing_notes.deal_id = deals.deal_id" in error
+    assert service.get_last_query_context()["route_used"] == "fallback-failed"
+    assert "AI retry did not meet validation requirements" in caplog.text
+
+
+def test_pending_billed_amount_repair_uses_dynamic_formula_evidence_when_present(monkeypatch):
+    knowledge_base = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "deals": {
+            "columns": [
+                {"name": "deal_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "account_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            ],
+            "primary_keys": ["deal_id"],
+            "foreign_keys": [
+                {"column": "account_id", "referenced_table": "accounts", "referenced_column": "account_id"},
+            ],
+            "relationships": [],
+        },
+        "billing_notes": {
+            "columns": [
+                {"name": "billing_note_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "deal_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+                {"name": "settled_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+                {"name": "settlement_state", "type": "VARCHAR(30)", "nullable": True, "semantic_type": "status"},
+            ],
+            "primary_keys": ["billing_note_id"],
+            "foreign_keys": [
+                {"column": "deal_id", "referenced_table": "deals", "referenced_column": "deal_id"},
+            ],
+            "relationships": [],
+        },
+    }
+    service = QuestionService()
+    real_build_query_context = build_query_context
+
+    def build_context_with_formula(*args, **kwargs):
+        context = real_build_query_context(*args, **kwargs)
+        context["formula_evidence"] = [
+            {
+                "table": "billing_notes",
+                "column": "billed_value",
+                "operation": "difference",
+                "secondary_column": "settled_value",
+                "alias": "pending_billed_amount",
+                "source": "ai_semantic_metadata",
+            }
+        ]
+        return context
+
+    monkeypatch.setattr("core.question_service.build_query_context", build_context_with_formula)
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: "SELECT a.account_label, SUM(bn.billed_value) AS pending_billed_amount FROM",
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda *args, **kwargs: "SELECT a.account_label, SUM(bn.billed_value) AS pending_billed_amount FROM",
     )
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
 
@@ -1206,16 +1283,11 @@ def test_pending_billed_amount_by_account_uses_repair_before_retry(monkeypatch, 
 
     assert success is True
     assert error is None
-    assert sql is not None
-    assert sql.startswith("SELECT ")
     assert "FROM accounts" in sql
     assert "JOIN deals ON accounts.account_id = deals.account_id" in sql
     assert "JOIN billing_notes ON deals.deal_id = billing_notes.deal_id" in sql
-    assert "SUM((billing_notes.billed_value - COALESCE(billing_notes.settled_value, 0)))" in sql
-    assert "GROUP BY accounts.account_label" in sql
+    assert "SUM((billing_notes.billed_value - COALESCE(billing_notes.settled_value, 0))) AS pending_billed_amount" in sql
     assert service.get_last_query_context()["route_used"] == "deterministic-repair"
-    assert "missing a FROM clause" not in caplog.text
-    assert "missing a table name after FROM" not in caplog.text
 
 
 def test_complex_grouped_amount_empty_from_fails_cleanly_without_join_path(monkeypatch):
