@@ -1,5 +1,7 @@
 """Generic hybrid routing tests for rule-based vs AI SQL generation."""
 
+from pathlib import Path
+
 from core.query_planner import build_query_context
 from core.question_service import QuestionService
 
@@ -523,12 +525,51 @@ def test_ai_generation_receives_dynamic_pipeline_evidence(monkeypatch):
 
     assert success is True
     assert error is None
+    assert captured["selected_tables"] == pipeline_query_context["selected_tables"]
     assert captured["selected_columns"] == pipeline_query_context["selected_columns"]
     assert captured["measure_candidates"] == pipeline_context["retrieved_context"]["measure_candidates"]
     assert captured["dimension_candidates"] == pipeline_context["retrieved_context"]["dimension_candidates"]
+    assert captured["filter_candidates"] == []
     assert captured["join_paths"] == possible_join_paths
     assert captured["formula_evidence"] == []
     assert captured["evidence_sources"] == ["kb_identifier", "vector"]
+
+
+def test_kb_pipeline_does_not_import_sql_generation_modules():
+    source = Path("core/database_service.py").read_text(encoding="utf-8")
+
+    assert "from ai.sql_generator import" not in source
+    assert "import ai.sql_generator" not in source
+
+
+def test_legacy_erp_generator_remains_inert_and_unused():
+    from ai.erp_query_generator import generate_erp_sql
+
+    assert generate_erp_sql("show entries", {"generic_records": {"columns": []}}) is None
+
+    active_runtime_sources = [
+        Path("core/question_service.py").read_text(encoding="utf-8"),
+        Path("core/query_pipeline.py").read_text(encoding="utf-8"),
+        Path("ai/sql_generator.py").read_text(encoding="utf-8"),
+    ]
+    assert all("generate_erp_sql" not in source for source in active_runtime_sources)
+
+
+def test_active_runtime_modules_do_not_reintroduce_retired_mapping_symbols():
+    retired_symbols = [
+        "_TABLE_ALIASES",
+        "_BUSINESS_TERM_TABLE",
+        "_try_pcsoft_business_sql",
+    ]
+    runtime_sources = [
+        Path("ai/simple_query_generator.py").read_text(encoding="utf-8"),
+        Path("core/query_planner.py").read_text(encoding="utf-8"),
+        Path("semantic/business_glossary.py").read_text(encoding="utf-8"),
+        Path("utils/question_normalizer.py").read_text(encoding="utf-8"),
+    ]
+
+    for symbol in retired_symbols:
+        assert all(symbol not in source for source in runtime_sources)
 
 
 def test_grouped_ai_query_receives_selected_dimension_and_measure_candidates(monkeypatch):

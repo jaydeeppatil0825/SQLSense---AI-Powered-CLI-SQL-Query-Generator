@@ -1,4 +1,6 @@
 """Core flow tests for ask-question and execute-last-SQL behavior."""
+from pathlib import Path
+
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 
 from core.app_service import AppService
@@ -181,3 +183,15 @@ def test_invalid_generated_sql_never_becomes_last_executable_sql(monkeypatch, tm
     assert sql is None
     assert service.get_last_sql() is None
     assert "Could not generate a valid SQL query." in error
+
+
+def test_cli_menu_labels_remain_unchanged():
+    source = Path("main.py").read_text(encoding="utf-8")
+
+    assert 'print("  1) Connect Database")' in source
+    assert 'print("  2) Build Knowledge Base")' in source
+    assert 'print("  3) Ask a Question / Ask Business Question")' in source
+    assert 'print("  4) Execute Last SQL")' in source
+    assert 'print("  5) AI Backend Settings")' in source
+    assert 'print("  6) Search Business Glossary")' in source
+    assert 'print("  7) Exit")' in source
