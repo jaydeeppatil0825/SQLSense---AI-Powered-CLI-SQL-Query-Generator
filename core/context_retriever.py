@@ -14,6 +14,7 @@ import re
 from typing import Any, Dict, Optional
 
 from utils.logger import get_logger
+from semantic.relationship_graph import build_relationship_graph, find_all_possible_join_paths
 
 logger = get_logger()
 
@@ -465,68 +466,69 @@ def _match_relationships(
 
 
 def _possible_join_paths(knowledge_base: Dict[str, Any], matched_tables: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """Find possible join paths between matched tables using dynamic relationship graph."""
     selected_tables = [entry.get("table") for entry in matched_tables[:4] if entry.get("table")]
     if len(selected_tables) < 2:
         return []
 
-    graph = _build_graph(knowledge_base)
+    # Build relationship graph dynamically from knowledge base
+    graph = build_relationship_graph(knowledge_base)
+    
+    # Find join paths between all pairs of selected tables
     paths = []
     seen = set()
     for index, start_table in enumerate(selected_tables):
         for target_table in selected_tables[index + 1:]:
-            path = _find_shortest_path(graph, start_table, target_table)
-            if not path:
-                continue
-            signature = (start_table, target_table, tuple((edge["from_table"], edge["to_table"]) for edge in path))
-            if signature in seen:
-                continue
-            seen.add(signature)
-            paths.append(
-                {
+            # Find all possible paths between the two tables
+            table_paths = find_all_possible_join_paths(
+                graph, start_table, target_table, max_paths=3, max_hops=4
+            )
+            
+            for path_result in table_paths:
+                if not path_result["resolved"]:
+                    continue
+                
+                # Convert to expected format
+                signature = (start_table, target_table, tuple(path_result["path"]))
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                
+                # Build edge list in the expected format
+                edges = []
+                for i, (from_col, to_col) in enumerate(path_result["join_columns"]):
+                    from_table = path_result["path"][i]
+                    to_table = path_result["path"][i + 1]
+                    edges.append({
+                        "from_table": from_table,
+                        "from_column": from_col,
+                        "to_table": to_table,
+                        "to_column": to_col,
+                        "join_condition": f"{from_table}.{from_col} = {to_table}.{to_col}",
+                        "source": path_result["edge_sources"][i],
+                        "confidence": path_result["confidences"][i],
+                    })
+                
+                paths.append({
                     "from_table": start_table,
                     "to_table": target_table,
-                    "path": path,
-                    "length": len(path),
-                }
-            )
-    paths.sort(key=lambda item: (item["length"], item["from_table"], item["to_table"]))
+                    "path": edges,
+                    "length": path_result["path_length"],
+                    "total_confidence": path_result["total_confidence"],
+                    "edge_sources": path_result["edge_sources"],
+                })
+    
+    # Sort by: length (shorter first), total_confidence (higher first), FK preference
+    def path_sort_key(item: Dict[str, Any]) -> tuple:
+        fk_count = sum(1 for source in item.get("edge_sources", []) if source == "foreign_key")
+        return (
+            item["length"],
+            -item.get("total_confidence", 0.0),
+            -fk_count,
+        )
+    
+    paths.sort(key=path_sort_key)
     return paths[:8]
-
-
-def _build_graph(knowledge_base: Dict[str, Any]) -> Dict[str, list[Dict[str, Any]]]:
-    graph: Dict[str, list[Dict[str, Any]]] = {table_name: [] for table_name in knowledge_base}
-    for edge in _relationship_edges(knowledge_base):
-        graph.setdefault(edge["from_table"], []).append(edge)
-        reverse = {
-            "from_table": edge["to_table"],
-            "from_column": edge["to_column"],
-            "to_table": edge["from_table"],
-            "to_column": edge["from_column"],
-            "join_condition": edge["join_condition"],
-            "source": edge.get("source"),
-        }
-        graph.setdefault(edge["to_table"], []).append(reverse)
-    return graph
-
-
-def _find_shortest_path(graph: Dict[str, list[Dict[str, Any]]], start_table: str, target_table: str) -> Optional[list[Dict[str, Any]]]:
-    if start_table == target_table:
-        return []
-
-    queue = deque([(start_table, [])])
-    visited = {start_table}
-    while queue:
-        current_table, path = queue.popleft()
-        for edge in graph.get(current_table, []):
-            next_table = edge.get("to_table")
-            if not next_table or next_table in visited:
-                continue
-            next_path = path + [edge]
-            if next_table == target_table:
-                return next_path
-            visited.add(next_table)
-            queue.append((next_table, next_path))
-    return None
 
 
 def _candidate_columns(

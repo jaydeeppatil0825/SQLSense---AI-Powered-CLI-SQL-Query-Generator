@@ -1,0 +1,18 @@
+{
+  "built_at": "2026-06-19T08:36:55.742726+00:00",
+  "created_at": "2026-06-19T08:36:55.742726+00:00",
+  "database_name": "sqlsense_small_test",
+  "database_type": "mysql",
+  "document_count": 4,
+  "embedding": {
+    "backend": "fallback",
+    "configured_backend": "local",
+    "configured_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "dimension": 384,
+    "model": "deterministic-hash"
+  },
+  "glossary_hash": "4eb9f5fb24b11879ba1f47ce7f4ac822e1ef077293bb9e6d1cb8458ba1a7a28e",
+  "knowledge_base_hash": "f9e195c4018b7963ab85b8167a30cc6e5c52976507cf56dcecc47615475b26d2",
+  "schema_fingerprint": "8af9f25296bae406efe57ab3b5f92c1c82bdfb2172c23aafabb3f6f847e8c3e0",
+  "schema_version": 1
+}
