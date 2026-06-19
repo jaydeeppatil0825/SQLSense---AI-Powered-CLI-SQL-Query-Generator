@@ -489,6 +489,144 @@ def test_ai_sample_value_echoes_are_replaced_with_neutral_metadata(monkeypatch):
     assert "Prime Retail" not in account_label["business_terms"]
     assert "BlueLine Stores" not in account_label["business_terms"]
     assert "account label" in account_label["business_terms"]
-    assert "account name" in account_label["business_terms"]
     assert item_label["business_description"] != "Office Chair"
     assert "Office Chair" not in item_label["business_terms"]
+
+
+def test_ai_identifier_like_metadata_is_rewritten_into_useful_terms(monkeypatch):
+    knowledge_base = {
+        "deals": {
+            "table_name": "deals",
+            "primary_keys": ["deal_id"],
+            "foreign_keys": [
+                {"column": "account_id", "referenced_table": "accounts", "referenced_column": "account_id"},
+            ],
+            "columns": [
+                {"name": "deal_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "account_id", "type": "INTEGER", "semantic_type": "id"},
+                {
+                    "name": "deal_value",
+                    "type": "DECIMAL(10,2)",
+                    "semantic_type": "numeric_candidate",
+                    "reason": "Candidate evidence: numeric-like type or numeric-style column meaning.",
+                },
+            ],
+        },
+        "accounts": {
+            "table_name": "accounts",
+            "columns": [
+                {
+                    "name": "account_label",
+                    "type": "VARCHAR(100)",
+                    "semantic_type": "text_candidate",
+                    "sample_values": ["Nova Traders", "Prime Retail"],
+                    "reason": "Candidate evidence: text-like type or label-style column meaning.",
+                }
+            ],
+        },
+        "stock_positions": {
+            "table_name": "stock_positions",
+            "primary_keys": ["stock_id"],
+            "foreign_keys": [
+                {"column": "item_id", "referenced_table": "items", "referenced_column": "item_id"},
+                {"column": "storage_id", "referenced_table": "storage_points", "referenced_column": "storage_id"},
+            ],
+            "columns": [
+                {"name": "stock_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "item_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "storage_id", "type": "INTEGER", "semantic_type": "id"},
+                {
+                    "name": "units_available",
+                    "type": "INTEGER",
+                    "semantic_type": "numeric_candidate",
+                    "reason": "Candidate evidence: numeric-like type or numeric-style column meaning.",
+                },
+                {"name": "checked_on", "type": "DATE", "semantic_type": "date"},
+            ],
+        },
+    }
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        table_line = next(line for line in messages[1]["content"].splitlines() if line.startswith("Table: "))
+        table_name = table_line.split(": ", 1)[1]
+
+        if "q" in response_format.get("required", []):
+            if table_name == "stock_positions":
+                return json.dumps({"d": "Storage ID", "p": "Storage ID", "q": []})
+            if table_name == "accounts":
+                return json.dumps({"d": "Nova Traders", "p": "Nova Traders", "q": []})
+            return json.dumps({"d": "Deal details", "p": "Deal details", "q": []})
+
+        if table_name == "deals":
+            return json.dumps(
+                {
+                    "c": {
+                        "deal_value": {
+                            "d": "deal_date",
+                            "b": ["deal_date", "item_id"],
+                            "s": "money",
+                            "cf": 0.9,
+                            "r": "deal_date",
+                            "me": True,
+                            "di": False,
+                            "dt": False,
+                        }
+                    }
+                }
+            )
+        if table_name == "accounts":
+            return json.dumps(
+                {
+                    "c": {
+                        "account_label": {
+                            "d": "Nova Traders",
+                            "b": ["Prime Retail", "BlueLine Stores"],
+                            "s": "name",
+                            "cf": 0.87,
+                            "r": "account_label",
+                            "me": False,
+                            "di": True,
+                            "dt": False,
+                        }
+                    }
+                }
+            )
+        return json.dumps(
+            {
+                "c": {
+                    "units_available": {
+                        "d": "Storage ID",
+                        "b": ["storage_id", "checked_on"],
+                        "s": "quantity",
+                        "cf": 0.91,
+                        "r": "checked_on",
+                        "me": True,
+                        "di": False,
+                        "dt": False,
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
+
+    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
+
+    deal_value = enriched["deals"]["columns"][2]
+    account_label = enriched["accounts"]["columns"][0]
+    units_available = enriched["stock_positions"]["columns"][3]
+
+    assert enriched["stock_positions"]["business_purpose"] == "Stores stock position records linked to item and storage point."
+    assert deal_value["business_description"] == "Description for deal value field."
+    assert deal_value["business_terms"] == ["deal value"]
+    assert deal_value["reason"] == "Candidate evidence: numeric-like type or numeric-style column meaning."
+    assert deal_value["is_measure"] is True
+
+    assert account_label["business_description"] == "Description for account label field."
+    assert account_label["business_terms"] == ["account label"]
+    assert account_label["is_dimension"] is True
+
+    assert units_available["business_description"] == "Description for units available field."
+    assert units_available["business_terms"] == ["units available"]
+    assert units_available["reason"] == "Candidate evidence: numeric-like type or numeric-style column meaning."
+    assert units_available["is_measure"] is True

@@ -103,6 +103,7 @@ _SAMPLE_STOPWORDS = {
 }
 _QUESTION_PRONOUNS = {"my", "our", "we", "us"}
 _PURPOSE_VERBS = {"store", "stores", "track", "tracks", "hold", "holds", "record", "records", "contain", "contains", "list", "lists"}
+_TECHNICAL_WORDS = {"id", "date", "time", "timestamp"}
 
 
 def _describe_ai_enrichment_failure(exc: Exception, backend: str) -> str:
@@ -162,6 +163,39 @@ def _tokenize_text(text: str) -> set[str]:
     return {token for token in re.split(r"[^a-z0-9]+", _normalize_free_text(text)) if token}
 
 
+def _identifier_tokens(text: str) -> list[str]:
+    return [token for token in re.split(r"[^a-z0-9]+", _normalize_free_text(text)) if token]
+
+
+def _singularize_word(word: str) -> str:
+    if word.endswith("ies") and len(word) > 3:
+        return word[:-3] + "y"
+    if word.endswith("ses") and len(word) > 3:
+        return word[:-2]
+    if word.endswith("s") and not word.endswith("ss") and len(word) > 1:
+        return word[:-1]
+    return word
+
+
+def _singularize_phrase(text: str) -> str:
+    tokens = _identifier_tokens(text)
+    if not tokens:
+        return ""
+    tokens[-1] = _singularize_word(tokens[-1])
+    return " ".join(tokens)
+
+
+def _format_phrase_list(values: list[str]) -> str:
+    cleaned = [value for value in values if value]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
+
+
 def _collect_table_sample_texts(table_data: dict) -> set[str]:
     sample_texts: set[str] = set()
     for column in table_data.get("columns", []):
@@ -179,6 +213,22 @@ def _looks_like_literal_value(text: str) -> bool:
     if not any(char.isalpha() for char in cleaned):
         return True
     if re.fullmatch(r"[\d\s,.$:/\\-]+", cleaned):
+        return True
+    return False
+
+
+def _looks_like_technical_phrase(text: str) -> bool:
+    cleaned = _normalize_free_text(text)
+    if not cleaned:
+        return True
+    if "_" in cleaned:
+        return True
+    tokens = _identifier_tokens(cleaned)
+    if not tokens:
+        return True
+    if tokens[-1] in _TECHNICAL_WORDS:
+        return True
+    if len(tokens) == 2 and tokens[1] in {"on", "at"}:
         return True
     return False
 
@@ -202,73 +252,118 @@ def _looks_like_sample_echo(text: str, sample_texts: set[str]) -> bool:
 
 
 def _fallback_table_description(table_name: str) -> str:
-    return _humanize_identifier(table_name).title()
+    return (_singularize_phrase(table_name) or _humanize_identifier(table_name) or "record").title()
 
 
-def _fallback_column_description(column_name: str, semantic_type: str) -> str:
-    label = _humanize_identifier(column_name)
-    if semantic_type == "name":
-        if label.endswith(" label"):
-            owner = label[: -len(" label")].strip()
-            if owner:
-                return f"Display label of {owner}"
-        if label.endswith(" name"):
-            owner = label[: -len(" name")].strip()
-            if owner:
-                return f"Name of {owner}"
-        return f"{label.title()} field"
-    if semantic_type == "status":
-        return f"{label.title()} status field"
-    if semantic_type == "code":
-        return f"{label.title()} code field"
-    if semantic_type == "money":
-        return f"{label.title()} amount field"
-    if semantic_type == "quantity":
-        return f"{label.title()} quantity field"
-    if semantic_type == "percentage":
-        return f"{label.title()} percentage field"
-    if semantic_type == "date":
-        return f"{label.title()} date field"
-    return f"{label.title()} field"
+def _collect_related_entities(table_data: dict) -> tuple[list[str], list[str]]:
+    outgoing: list[str] = []
+    incoming: list[str] = []
+
+    def _add_unique(target: list[str], value: str) -> None:
+        if value and value not in target:
+            target.append(value)
+
+    for foreign_key in table_data.get("foreign_keys", []):
+        related = _singularize_phrase(foreign_key.get("referenced_table", ""))
+        _add_unique(outgoing, related)
+
+    for relationship in table_data.get("relationships", []):
+        from_table = str(relationship.get("from_table", "")).strip()
+        to_table = str(relationship.get("to_table", "")).strip()
+        direction = str(relationship.get("direction", "")).strip().lower()
+        if direction == "incoming":
+            _add_unique(incoming, _singularize_phrase(from_table))
+        else:
+            table_name = str(table_data.get("table_name", "")).strip()
+            if table_name and from_table == table_name:
+                _add_unique(outgoing, _singularize_phrase(to_table))
+            elif to_table:
+                _add_unique(incoming, _singularize_phrase(from_table))
+
+    return outgoing[:3], incoming[:3]
 
 
-def _fallback_business_terms(column_name: str, semantic_type: str) -> list[str]:
-    label = _humanize_identifier(column_name)
-    if not label:
+def _fallback_table_purpose(table_name: str, table_data: dict) -> str:
+    label = _singularize_phrase(table_name) or _humanize_identifier(table_name) or "record"
+    outgoing_entities, incoming_entities = _collect_related_entities(table_data)
+
+    if outgoing_entities:
+        relation_phrase = _format_phrase_list(outgoing_entities)
+        return f"Stores {label} records linked to {relation_phrase}."
+    if incoming_entities:
+        relation_phrase = _format_phrase_list(incoming_entities)
+        return f"Stores {label} records used in {relation_phrase}."
+    return build_rule_based_business_purpose(table_name)
+
+
+def _column_entity_phrase(column_name: str, table_data: dict) -> str:
+    tokens = _identifier_tokens(column_name)
+    filtered = [token for token in tokens if token not in _TECHNICAL_WORDS]
+    if filtered:
+        filtered[-1] = _singularize_word(filtered[-1])
+        return " ".join(filtered)
+
+    outgoing_entities, _incoming_entities = _collect_related_entities(table_data)
+    if outgoing_entities:
+        return _format_phrase_list(outgoing_entities)
+
+    table_name = str(table_data.get("table_name", "")).strip()
+    return _singularize_phrase(table_name) or _humanize_identifier(table_name)
+
+
+def _column_context_tokens(column: dict, semantic_type: str) -> set[str]:
+    table_data = column.get("_table_context", {})
+    context_tokens = _tokenize_text(column.get("name", "")) | _tokenize_text(table_data.get("table_name", ""))
+    outgoing_entities, incoming_entities = _collect_related_entities(table_data)
+    for entity in [*outgoing_entities, *incoming_entities]:
+        context_tokens |= _tokenize_text(entity)
+    return context_tokens
+
+
+def _fallback_column_description(column_name: str, semantic_type: str, table_data: dict) -> str:
+    label = _humanize_identifier(column_name) or _column_entity_phrase(column_name, table_data) or "field"
+    return f"Description for {label} field."
+
+
+def _readable_column_phrase(column_name: str) -> str:
+    return _humanize_identifier(column_name)
+
+
+def _fallback_business_terms(column_name: str, semantic_type: str, table_data: dict) -> list[str]:
+    primary = _readable_column_phrase(column_name)
+    if not primary:
         return []
 
-    terms = [label]
-    if semantic_type == "name" or " label" in label or " name" in label:
-        if " label" in label:
-            terms.append(label.replace(" label", " name"))
-        elif " name" in label:
-            terms.append(label.replace(" name", " label"))
-    elif semantic_type == "code" and "code" not in label:
-        terms.append(f"{label} code")
+    terms = [primary]
 
     deduped: list[str] = []
     for term in terms:
-        if term and term not in deduped:
+        normalized = _normalize_free_text(term)
+        if term and normalized and not _looks_like_technical_phrase(term) and term not in deduped:
             deduped.append(term)
     return deduped[:2]
 
 
 def _sanitize_table_description(text: str, table_name: str, table_data: dict) -> str:
     cleaned = sanitize_short_text(text, fallback=_fallback_table_description(table_name))
+    fallback = _fallback_table_description(table_name)
     if _looks_like_literal_value(cleaned) or _looks_like_sample_echo(cleaned, _collect_table_sample_texts(table_data)):
-        return _fallback_table_description(table_name)
+        return fallback
+    if _looks_like_technical_phrase(cleaned):
+        return fallback
     if len(cleaned.split()) < 2:
-        return _fallback_table_description(table_name)
+        return fallback
     return cleaned
 
 
 def _sanitize_table_purpose(text: str, table_name: str, table_data: dict) -> str:
-    fallback = build_rule_based_business_purpose(table_name)
+    fallback = _fallback_table_purpose(table_name, table_data)
     cleaned = sanitize_business_purpose(text, table_name)
     tokens = _tokenize_text(cleaned)
     if (
         _looks_like_literal_value(cleaned)
         or _looks_like_sample_echo(cleaned, _collect_table_sample_texts(table_data))
+        or _looks_like_technical_phrase(cleaned)
         or "?" in cleaned
         or len(tokens) < 3
         or tokens & _QUESTION_PRONOUNS
@@ -310,7 +405,8 @@ def _sanitize_business_questions(
 
 
 def _sanitize_column_description(text: str, column: dict, semantic_type: str) -> str:
-    fallback = _fallback_column_description(str(column.get("name", "")), semantic_type)
+    table_data = column.get("_table_context", {})
+    fallback = _fallback_column_description(str(column.get("name", "")), semantic_type, table_data)
     cleaned = sanitize_short_text(text, fallback=fallback)
     sample_texts = {
         _normalize_free_text(value)
@@ -319,12 +415,16 @@ def _sanitize_column_description(text: str, column: dict, semantic_type: str) ->
     }
     if _looks_like_literal_value(cleaned) or _looks_like_sample_echo(cleaned, sample_texts):
         return fallback
+    if _looks_like_technical_phrase(cleaned):
+        return fallback
     if len(cleaned.split()) < 2:
         return fallback
     return cleaned
 
 
 def _sanitize_business_terms(terms: list[str], column: dict, semantic_type: str) -> list[str]:
+    table_data = column.get("_table_context", {})
+    context_tokens = _column_context_tokens(column, semantic_type)
     sample_texts = {
         _normalize_free_text(value)
         for value in (column.get("sample_values", []) or [])
@@ -337,6 +437,10 @@ def _sanitize_business_terms(terms: list[str], column: dict, semantic_type: str)
             continue
         if _looks_like_sample_echo(cleaned, sample_texts):
             continue
+        if _looks_like_technical_phrase(cleaned):
+            continue
+        if not (_tokenize_text(cleaned) & context_tokens):
+            continue
         if len(cleaned.split()) > 4:
             continue
         if cleaned not in clean_terms:
@@ -344,7 +448,23 @@ def _sanitize_business_terms(terms: list[str], column: dict, semantic_type: str)
 
     if clean_terms:
         return clean_terms
-    return _fallback_business_terms(str(column.get("name", "")), semantic_type)
+    return _fallback_business_terms(str(column.get("name", "")), semantic_type, table_data)
+
+
+def _sanitize_reason(text: str, fallback: str, column: dict) -> str:
+    cleaned = sanitize_short_text(text, fallback=fallback)
+    sample_texts = {
+        _normalize_free_text(value)
+        for value in (column.get("sample_values", []) or [])
+        if _normalize_free_text(value)
+    }
+    if _looks_like_literal_value(cleaned) or _looks_like_sample_echo(cleaned, sample_texts):
+        return fallback
+    if _looks_like_technical_phrase(cleaned):
+        return fallback
+    if len(cleaned.split()) < 3:
+        return fallback
+    return cleaned
 
 
 def _table_summary_prompt(table_name: str, table_data: dict) -> str:
@@ -463,6 +583,8 @@ def _column_batch_prompt(table_name: str, table_data: dict, columns: list[dict])
         "Return JSON only using key c.",
         "Decide final semantic meaning only for the listed candidate columns.",
         "Never change structural facts like id/date/boolean.",
+        "Column descriptions must explain the role of the column, not repeat sample values or raw identifiers.",
+        "Business terms must be readable user-search phrases, not *_id, *_date, nearby column names, or literal sample values.",
         "Keep every description under 8 words.",
         "Use at most 2 short business terms.",
         "Allowed semantic_type values: money, quantity, percentage, status, name, text, code, reference, date, general.",
@@ -636,6 +758,7 @@ def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
             continue
         if _is_structural_semantic(col):
             continue
+        col["_table_context"] = table_data
         col_info = col_map[col_name]
         fallback_semantic = str(col.get("semantic_type", "general")).lower()
         semantic_type = _normalize_ai_semantic_type(col_info.get("semantic_type", fallback_semantic), fallback_semantic)
@@ -644,11 +767,12 @@ def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
         col["business_terms"] = _sanitize_business_terms(list(col_info.get("business_terms", [])), col, semantic_type)
         col["semantic_type"] = semantic_type
         col["confidence"] = max(float(col.get("confidence", 0.0) or 0.0), min(max(float(col_info.get("confidence", 0.0) or 0.0), 0.0), 1.0))
-        col["reason"] = sanitize_short_text(col_info.get("reason", ""), fallback=str(col.get("reason", "")))
+        col["reason"] = _sanitize_reason(col_info.get("reason", ""), str(col.get("reason", "")), col)
         col["metric_type"] = semantic_type if semantic_type in {"money", "quantity", "percentage"} else "general"
         col["is_measure"] = semantic_type in {"money", "quantity", "percentage"} and bool(col_info.get("is_measure", False))
         col["is_dimension"] = semantic_type in {"status", "name", "text", "code", "reference"} or bool(col_info.get("is_dimension", False))
         col["is_date"] = bool(col_info.get("is_date", False) or semantic_type == "date")
+        col.pop("_table_context", None)
 
 
 def _chunk_columns(columns: list[dict], size: int = 3) -> list[list[dict]]:

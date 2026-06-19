@@ -1,5 +1,5 @@
 {
     "database_type": "mysql",
     "database_name": "sqlsense_small_test",
-    "schema_fingerprint": "b91ba6f2f0d9650bdf5352c36efbebc5ab6bb87a14a113cafe098f841152f96e"
+    "schema_fingerprint": "dedd6792d2882c8c882647d2be2b1de3d06d05382085601c4115f9c04523f246"
 }
