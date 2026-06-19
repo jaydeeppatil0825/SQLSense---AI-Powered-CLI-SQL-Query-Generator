@@ -110,6 +110,17 @@ Responsibilities:
 - produce unresolved/low-confidence planning output when needed
 
 Current files:
+- `query_pipeline/question_normalizer.py`
+- `query_pipeline/intent_builder.py`
+- `query_pipeline/context_retriever.py`
+- `query_pipeline/query_planner.py`
+- `query_pipeline/query_pipeline.py`
+- `query_pipeline/conversation/action_detector.py`
+- `query_pipeline/conversation/followup_detector.py`
+- `query_pipeline/conversation/question_rewriter.py`
+- `query_pipeline/conversation/conversation_memory.py`
+
+Compatibility wrappers kept at old paths:
 - `utils/question_normalizer.py`
 - `core/intent_builder.py`
 - `core/context_retriever.py`
