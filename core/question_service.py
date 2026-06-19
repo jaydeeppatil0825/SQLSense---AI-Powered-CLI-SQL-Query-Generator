@@ -7,6 +7,7 @@ This service handles CLI question processing, SQL generation,
 and validation.
 """
 
+from copy import deepcopy
 from typing import Optional, Tuple, Dict, Any
 import inspect
 import re
@@ -226,6 +227,7 @@ def _has_unresolved_simple_terms(query_context: dict[str, Any]) -> bool:
 def _should_try_rule_based_first(query_context: dict[str, Any]) -> tuple[bool, str]:
     plan = query_context.get("plan") or {}
     selected_tables = list(query_context.get("selected_tables") or [])
+    vector_results = query_context.get("vector_results") or {}
     overall_confidence = float(query_context.get("confidence") or 0.0)
     top_confidence = float(selected_tables[0].get("confidence") or 0.0) if selected_tables else 0.0
     intent = str(plan.get("intent") or "list")
@@ -234,7 +236,7 @@ def _should_try_rule_based_first(query_context: dict[str, Any]) -> tuple[bool, s
     logger.debug(f"[DEBUG ROUTING] Normalized question: {query_context.get('plan', {}).get('question', 'N/A')}")
     logger.debug(f"[DEBUG ROUTING] Selected tables: {[t.get('table') for t in selected_tables]}")
     logger.debug(f"[DEBUG ROUTING] Selected columns: {[(c.get('table'), c.get('column')) for c in query_context.get('selected_columns', [])[:5]]}")
-    logger.debug(f"[DEBUG ROUTING] Vector table candidates: {query_context.get('vector_results', {}).get('tables', [])[:3]}")
+    logger.debug(f"[DEBUG ROUTING] Vector table candidates: {vector_results.get('tables', [])[:3]}")
     logger.debug(f"[DEBUG ROUTING] Overall confidence: {overall_confidence}")
     logger.debug(f"[DEBUG ROUTING] Top confidence: {top_confidence}")
     logger.debug(f"[DEBUG ROUTING] Intent: {intent}")
@@ -301,6 +303,59 @@ def _clarification_message(query_context: dict[str, Any]) -> str:
 def _set_route(query_context: dict[str, Any], route_used: str, route_reason: str) -> None:
     query_context["route_used"] = route_used
     query_context["route_reason"] = route_reason
+
+
+def _pipeline_context_matches_question(
+    pipeline_context: Optional[dict[str, Any]],
+    rewritten_question: str,
+) -> bool:
+    if not isinstance(pipeline_context, dict):
+        return False
+    if str(pipeline_context.get("normalized_question") or "").strip() != str(rewritten_question or "").strip():
+        return False
+
+    query_context = pipeline_context.get("query_context")
+    if not isinstance(query_context, dict):
+        return False
+
+    return bool(
+        query_context.get("selected_table_names")
+        or query_context.get("selected_tables")
+        or query_context.get("join_paths")
+    )
+
+
+def _merge_pipeline_metadata(
+    query_context: dict[str, Any],
+    pipeline_context: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    if not isinstance(query_context, dict):
+        query_context = {}
+    if not isinstance(pipeline_context, dict):
+        return query_context
+
+    query_context["pipeline_context"] = pipeline_context
+
+    if isinstance(pipeline_context.get("intent"), dict):
+        query_context.setdefault("intent", pipeline_context["intent"])
+    if isinstance(pipeline_context.get("retrieved_context"), dict):
+        query_context.setdefault("retrieved_context", pipeline_context["retrieved_context"])
+    if isinstance(pipeline_context.get("formula_evidence"), list):
+        query_context.setdefault("formula_evidence", list(pipeline_context["formula_evidence"]))
+    if isinstance(pipeline_context.get("evidence_sources"), list):
+        query_context.setdefault("evidence_sources", list(pipeline_context["evidence_sources"]))
+
+    pipeline_plan = pipeline_context.get("plan")
+    if isinstance(pipeline_plan, dict):
+        current_plan = query_context.get("plan")
+        if isinstance(current_plan, dict):
+            merged_plan = dict(pipeline_plan)
+            merged_plan.update(current_plan)
+            query_context["plan"] = merged_plan
+        else:
+            query_context["plan"] = dict(pipeline_plan)
+
+    return query_context
 
 
 def _validate_business_sql_fit(sql: str, query_context: dict[str, Any]) -> tuple[bool, str]:
@@ -655,6 +710,24 @@ def _formula_evidence_entries(
 ) -> list[dict[str, Any]]:
     evidence_entries: list[dict[str, Any]] = []
 
+    pipeline_context = query_context.get("pipeline_context")
+    if isinstance(pipeline_context, dict):
+        pipeline_formula_evidence = pipeline_context.get("formula_evidence")
+        if isinstance(pipeline_formula_evidence, list):
+            evidence_entries.extend(entry for entry in pipeline_formula_evidence if isinstance(entry, dict))
+
+        pipeline_plan = pipeline_context.get("plan")
+        if isinstance(pipeline_plan, dict):
+            pipeline_plan_evidence = pipeline_plan.get("formula_evidence")
+            if isinstance(pipeline_plan_evidence, list):
+                evidence_entries.extend(entry for entry in pipeline_plan_evidence if isinstance(entry, dict))
+
+        pipeline_retrieved_context = pipeline_context.get("retrieved_context")
+        if isinstance(pipeline_retrieved_context, dict):
+            pipeline_retrieved_evidence = pipeline_retrieved_context.get("formula_evidence")
+            if isinstance(pipeline_retrieved_evidence, list):
+                evidence_entries.extend(entry for entry in pipeline_retrieved_evidence if isinstance(entry, dict))
+
     for key in ("formula_evidence",):
         value = query_context.get(key)
         if isinstance(value, list):
@@ -910,6 +983,7 @@ class QuestionService:
         business_glossary: Optional[Dict[str, Any]] = None,
         vector_retriever: Optional[VectorRetriever] = None,
         ai_backend: str = "local",
+        pipeline_context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         """
         Process a natural language question and generate SQL.
@@ -962,12 +1036,17 @@ class QuestionService:
                 logger.warning(f"Follow-up rewrite failed: {e}, using original question")
                 rewritten_question = question
 
-        query_context = build_query_context(
-            rewritten_question,
-            knowledge_base,
-            business_glossary,
-            vector_retriever=vector_retriever,
-        )
+        if _pipeline_context_matches_question(pipeline_context, rewritten_question):
+            query_context = deepcopy(pipeline_context.get("query_context") or {})
+            logger.debug("Reusing query context from QueryPipeline for this question")
+        else:
+            query_context = build_query_context(
+                rewritten_question,
+                knowledge_base,
+                business_glossary,
+                vector_retriever=vector_retriever,
+            )
+        query_context = _merge_pipeline_metadata(query_context, pipeline_context)
         self.last_query_context = query_context
         if _needs_simple_table_clarification(query_context):
             _set_route(

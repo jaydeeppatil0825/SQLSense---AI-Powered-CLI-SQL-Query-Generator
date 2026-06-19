@@ -88,9 +88,17 @@ def test_process_question_loads_active_glossary_without_glossary_menu(monkeypatc
         service.database_service.refresh_vector_index()
         return True, "Business glossary loaded successfully", active_glossary
 
-    def fake_process_question(question, knowledge_base, business_glossary=None, vector_retriever=None, ai_backend="local"):
+    def fake_process_question(
+        question,
+        knowledge_base,
+        business_glossary=None,
+        vector_retriever=None,
+        ai_backend="local",
+        pipeline_context=None,
+    ):
         captured["business_glossary"] = business_glossary
         captured["vector_retriever"] = vector_retriever
+        captured["pipeline_context"] = pipeline_context
         return True, "ok", "SELECT * FROM orders LIMIT 50;", None
 
     service.database_service.business_glossary = None
@@ -103,6 +111,7 @@ def test_process_question_loads_active_glossary_without_glossary_menu(monkeypatc
     assert sql == "SELECT * FROM orders LIMIT 50;"
     assert captured["business_glossary"] == active_glossary
     assert captured["vector_retriever"] is not None
+    assert captured["pipeline_context"] is not None
 
 
 def test_process_question_uses_persisted_vector_index_after_reload(monkeypatch, tmp_path):
@@ -130,9 +139,17 @@ def test_process_question_uses_persisted_vector_index_after_reload(monkeypatch, 
 
     captured = {}
 
-    def fake_process_question(question, knowledge_base, business_glossary=None, vector_retriever=None, ai_backend="local"):
+    def fake_process_question(
+        question,
+        knowledge_base,
+        business_glossary=None,
+        vector_retriever=None,
+        ai_backend="local",
+        pipeline_context=None,
+    ):
         captured["vector_retriever"] = vector_retriever
         captured["vector_status"] = second_service.database_service.get_vector_status()
+        captured["pipeline_context"] = pipeline_context
         return True, "ok", "SELECT * FROM orders LIMIT 50;", None
 
     monkeypatch.setattr(second_service.question_service, "process_question", fake_process_question)
@@ -141,5 +158,6 @@ def test_process_question_uses_persisted_vector_index_after_reload(monkeypatch, 
 
     assert success is True
     assert captured["vector_retriever"] is not None
+    assert captured["pipeline_context"] is not None
     assert captured["vector_status"]["persistence"]["loaded_from_disk"] is True
     assert captured["vector_status"]["persistence"]["source"] == "disk"

@@ -265,6 +265,44 @@ def test_simple_table_listing_uses_rule_based(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "rule-based"
 
 
+def test_pipeline_context_bypasses_duplicate_context_build(monkeypatch):
+    service = QuestionService()
+    pipeline_query_context = _context(["alpha_records"], intent="list")
+    pipeline_context = {
+        "question": "show records",
+        "normalized_question": "show records",
+        "intent": {"intent_type": "list"},
+        "retrieved_context": {"retrieval_sources": ["kb_identifier"]},
+        "query_context": pipeline_query_context,
+        "plan": dict(pipeline_query_context["plan"]),
+        "formula_evidence": [],
+        "evidence_sources": ["kb_identifier"],
+    }
+
+    monkeypatch.setattr(
+        "core.question_service.build_query_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("build_query_context should not run when matching pipeline context is provided")),
+    )
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: "SELECT * FROM alpha_records LIMIT 50;")
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple list questions")),
+    )
+
+    success, message, sql, error = service.process_question(
+        "show records",
+        GENERIC_KB,
+        ai_backend="local",
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is True
+    assert sql == "SELECT * FROM alpha_records LIMIT 50;"
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["pipeline_context"] == pipeline_context
+    assert service.get_last_query_context()["retrieved_context"] == pipeline_context["retrieved_context"]
+
+
 def test_legacy_simple_generator_signature_still_uses_rule_based(monkeypatch):
     service = QuestionService()
     monkeypatch.setattr("core.question_service.build_query_context", lambda *args, **kwargs: _context(["alpha_records"], intent="list"))

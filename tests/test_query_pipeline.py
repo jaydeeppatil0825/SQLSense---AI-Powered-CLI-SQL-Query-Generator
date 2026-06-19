@@ -74,8 +74,10 @@ def test_query_pipeline_returns_structured_debug_fields(monkeypatch):
     monkeypatch.setattr("core.query_pipeline.build_intent", lambda *args, **kwargs: built_intent)
     monkeypatch.setattr("core.query_pipeline.retrieve_context", lambda *args, **kwargs: retrieved_context)
     monkeypatch.setattr("core.query_pipeline.build_query_context", lambda *args, **kwargs: preview_context)
+    captured = {}
 
     def fake_process_question(**kwargs):
+        captured["pipeline_context"] = kwargs.get("pipeline_context")
         question_service.last_query_context = preview_context
         return True, "SQL generated successfully (rule-based)", "SELECT account_id, account_label FROM accounts LIMIT 50;", None
 
@@ -97,6 +99,11 @@ def test_query_pipeline_returns_structured_debug_fields(monkeypatch):
     assert result.generated_sql == "SELECT account_id, account_label FROM accounts LIMIT 50;"
     assert result.validation_result == {"is_valid": True, "reason": "SQL is valid"}
     assert result.route == "rule-based"
+    assert captured["pipeline_context"]["intent"] == built_intent
+    assert captured["pipeline_context"]["retrieved_context"] == retrieved_context
+    assert captured["pipeline_context"]["plan"]["intent"] == "list"
+    assert captured["pipeline_context"]["formula_evidence"] == []
+    assert captured["pipeline_context"]["evidence_sources"] == ["kb_identifier"]
 
 
 def test_query_pipeline_reports_validation_failure_when_sql_generation_fails(monkeypatch):
