@@ -34,6 +34,18 @@ def test_query_pipeline_returns_structured_debug_fields(monkeypatch):
         "confidence": 0.71,
         "source": "fallback",
     }
+    retrieved_context = {
+        "matched_tables": [{"table": "accounts", "score": 1.0, "source": "kb_identifier"}],
+        "matched_columns": [{"table": "accounts", "column": "account_label", "score": 0.9, "source": "kb_identifier"}],
+        "matched_glossary_terms": [],
+        "matched_relationships": [],
+        "possible_join_paths": [],
+        "measure_candidates": [],
+        "dimension_candidates": [{"table": "accounts", "column": "account_label", "score": 0.9, "source": "kb_identifier"}],
+        "filter_candidates": [],
+        "retrieval_sources": ["kb_identifier"],
+        "confidence": 0.95,
+    }
 
     preview_context = {
         "plan": {
@@ -60,6 +72,7 @@ def test_query_pipeline_returns_structured_debug_fields(monkeypatch):
     }
 
     monkeypatch.setattr("core.query_pipeline.build_intent", lambda *args, **kwargs: built_intent)
+    monkeypatch.setattr("core.query_pipeline.retrieve_context", lambda *args, **kwargs: retrieved_context)
     monkeypatch.setattr("core.query_pipeline.build_query_context", lambda *args, **kwargs: preview_context)
 
     def fake_process_question(**kwargs):
@@ -79,7 +92,7 @@ def test_query_pipeline_returns_structured_debug_fields(monkeypatch):
     assert result.success is True
     assert result.normalized_question == "show all accounts"
     assert result.intent == built_intent
-    assert result.retrieved_context["selected_table_names"] == ["accounts"]
+    assert result.retrieved_context == retrieved_context
     assert result.plan["intent"] == "list"
     assert result.generated_sql == "SELECT account_id, account_label FROM accounts LIMIT 50;"
     assert result.validation_result == {"is_valid": True, "reason": "SQL is valid"}
@@ -105,6 +118,18 @@ def test_query_pipeline_reports_validation_failure_when_sql_generation_fails(mon
         "confidence": 0.55,
         "source": "fallback",
     }
+    retrieved_context = {
+        "matched_tables": [{"table": "accounts", "score": 0.52, "source": "kb_identifier"}],
+        "matched_columns": [],
+        "matched_glossary_terms": [],
+        "matched_relationships": [],
+        "possible_join_paths": [],
+        "measure_candidates": [],
+        "dimension_candidates": [],
+        "filter_candidates": [],
+        "retrieval_sources": ["kb_identifier"],
+        "confidence": 0.52,
+    }
 
     failed_context = {
         "plan": {
@@ -121,6 +146,7 @@ def test_query_pipeline_reports_validation_failure_when_sql_generation_fails(mon
     }
 
     monkeypatch.setattr("core.query_pipeline.build_intent", lambda *args, **kwargs: built_intent)
+    monkeypatch.setattr("core.query_pipeline.retrieve_context", lambda *args, **kwargs: retrieved_context)
     monkeypatch.setattr("core.query_pipeline.build_query_context", lambda *args, **kwargs: failed_context)
 
     def fake_process_question(**kwargs):

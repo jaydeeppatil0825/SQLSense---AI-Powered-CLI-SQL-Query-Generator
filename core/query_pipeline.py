@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional
 
+from core.context_retriever import retrieve_context
 from core.intent_builder import build_intent
 from core.query_planner import build_query_context
 from utils.question_normalizer import normalize_question
@@ -58,6 +59,13 @@ class QueryPipeline:
     ) -> QueryPipelineResult:
         normalized_question, _ = normalize_question(question)
         intent = build_intent(normalized_question, ai_backend=ai_backend)
+        retrieved_context = retrieve_context(
+            normalized_question,
+            intent,
+            knowledge_base,
+            business_glossary=business_glossary,
+            vector_retriever=vector_retriever,
+        )
         preview_context = self._build_context_preview(
             normalized_question,
             knowledge_base,
@@ -83,7 +91,7 @@ class QueryPipeline:
             error=error,
             normalized_question=normalized_question,
             intent=intent,
-            retrieved_context=self._summarize_context(final_context or preview_context),
+            retrieved_context=retrieved_context,
             plan=dict((final_context or preview_context or {}).get("plan") or {}),
             generated_sql=sql,
             validation_result=validation_result,
@@ -115,28 +123,6 @@ class QueryPipeline:
                 "vector_results": {},
                 "pipeline_preview_error": str(exc),
             }
-
-    def _summarize_context(self, query_context: Dict[str, Any]) -> Dict[str, Any]:
-        vector_results = dict(query_context.get("vector_results") or {})
-        return {
-            "selected_table_names": list(query_context.get("selected_table_names") or []),
-            "selected_columns": [
-                {
-                    "table": entry.get("table"),
-                    "column": entry.get("column"),
-                    "confidence": entry.get("confidence"),
-                }
-                for entry in (query_context.get("selected_columns") or [])[:10]
-            ],
-            "join_path_count": len(query_context.get("join_paths") or []),
-            "vector_result_counts": {
-                "tables": len(vector_results.get("tables") or []),
-                "columns": len(vector_results.get("columns") or []),
-                "relationships": len(vector_results.get("relationships") or []),
-                "glossary_terms": len(vector_results.get("glossary_terms") or []),
-            },
-            "preview_error": query_context.get("pipeline_preview_error"),
-        }
 
     def _build_validation_result(
         self,
