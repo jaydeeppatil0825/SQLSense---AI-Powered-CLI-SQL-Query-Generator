@@ -1,4 +1,5 @@
 """Core flow tests for ask-question and execute-last-SQL behavior."""
+import importlib
 from pathlib import Path
 
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine
@@ -195,3 +196,20 @@ def test_cli_menu_labels_remain_unchanged():
     assert 'print("  5) AI Backend Settings")' in source
     assert 'print("  6) Search Business Glossary")' in source
     assert 'print("  7) Exit")' in source
+
+
+def test_pipeline_architecture_reflects_current_folder_structure():
+    source = Path("PIPELINE_ARCHITECTURE.md").read_text(encoding="utf-8")
+
+    assert "kb_pipeline/" in source
+    assert "query_pipeline/" in source
+    assert "sql_pipeline/" in source
+
+
+def test_main_imports_working_services_through_compatibility_paths():
+    main_module = importlib.import_module("main")
+    app_service_module = importlib.import_module("core.app_service")
+    db_connection_module = importlib.import_module("db.connection")
+
+    assert main_module.AppService is app_service_module.AppService
+    assert main_module.SUPPORTED_DB_TYPES == db_connection_module.SUPPORTED_DB_TYPES

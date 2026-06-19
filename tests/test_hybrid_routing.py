@@ -1,5 +1,6 @@
 """Generic hybrid routing tests for rule-based vs AI SQL generation."""
 
+import importlib
 from pathlib import Path
 
 from core.query_planner import build_query_context
@@ -536,7 +537,7 @@ def test_ai_generation_receives_dynamic_pipeline_evidence(monkeypatch):
 
 
 def test_kb_pipeline_does_not_import_sql_generation_modules():
-    source = Path("core/database_service.py").read_text(encoding="utf-8")
+    source = Path("kb_pipeline/database_service.py").read_text(encoding="utf-8")
 
     assert "from ai.sql_generator import" not in source
     assert "import ai.sql_generator" not in source
@@ -548,9 +549,9 @@ def test_legacy_erp_generator_remains_inert_and_unused():
     assert generate_erp_sql("show entries", {"generic_records": {"columns": []}}) is None
 
     active_runtime_sources = [
-        Path("core/question_service.py").read_text(encoding="utf-8"),
-        Path("core/query_pipeline.py").read_text(encoding="utf-8"),
-        Path("ai/sql_generator.py").read_text(encoding="utf-8"),
+        Path("sql_pipeline/question_service.py").read_text(encoding="utf-8"),
+        Path("query_pipeline/query_pipeline.py").read_text(encoding="utf-8"),
+        Path("sql_pipeline/sql_generator.py").read_text(encoding="utf-8"),
     ]
     assert all("generate_erp_sql" not in source for source in active_runtime_sources)
 
@@ -562,14 +563,48 @@ def test_active_runtime_modules_do_not_reintroduce_retired_mapping_symbols():
         "_try_pcsoft_business_sql",
     ]
     runtime_sources = [
-        Path("ai/simple_query_generator.py").read_text(encoding="utf-8"),
-        Path("core/query_planner.py").read_text(encoding="utf-8"),
-        Path("semantic/business_glossary.py").read_text(encoding="utf-8"),
-        Path("utils/question_normalizer.py").read_text(encoding="utf-8"),
+        Path("sql_pipeline/simple_query_generator.py").read_text(encoding="utf-8"),
+        Path("query_pipeline/query_planner.py").read_text(encoding="utf-8"),
+        Path("kb_pipeline/business_glossary.py").read_text(encoding="utf-8"),
+        Path("query_pipeline/question_normalizer.py").read_text(encoding="utf-8"),
     ]
 
     for symbol in retired_symbols:
         assert all(symbol not in source for source in runtime_sources)
+
+
+def test_old_wrapper_paths_resolve_to_same_live_implementations():
+    core_database_service = importlib.import_module("core.database_service")
+    kb_database_service = importlib.import_module("kb_pipeline.database_service")
+    db_connection = importlib.import_module("db.connection")
+    kb_connection = importlib.import_module("kb_pipeline.connection")
+    semantic_business_glossary = importlib.import_module("semantic.business_glossary")
+    kb_business_glossary = importlib.import_module("kb_pipeline.business_glossary")
+    semantic_relationship_graph = importlib.import_module("semantic.relationship_graph")
+    kb_relationship_graph = importlib.import_module("kb_pipeline.relationship_graph")
+    vector_store_module = importlib.import_module("vector_store")
+    kb_embedding_service = importlib.import_module("kb_pipeline.vector.embedding_service")
+    core_query_pipeline = importlib.import_module("core.query_pipeline")
+    query_pipeline_module = importlib.import_module("query_pipeline.query_pipeline")
+    ai_sql_generator = importlib.import_module("ai.sql_generator")
+    sql_generator_module = importlib.import_module("sql_pipeline.sql_generator")
+    utils_sql_validator = importlib.import_module("utils.sql_validator")
+    sql_validator_module = importlib.import_module("sql_pipeline.sql_validator")
+    conversation_memory = importlib.import_module("conversation.conversation_memory")
+    query_conversation_memory = importlib.import_module("query_pipeline.conversation.conversation_memory")
+    core_question_service = importlib.import_module("core.question_service")
+    sql_question_service = importlib.import_module("sql_pipeline.question_service")
+
+    assert core_database_service.DatabaseService is kb_database_service.DatabaseService
+    assert db_connection.connect_engine is kb_connection.connect_engine
+    assert semantic_business_glossary.generate_business_glossary is kb_business_glossary.generate_business_glossary
+    assert semantic_relationship_graph.build_relationship_graph is kb_relationship_graph.build_relationship_graph
+    assert vector_store_module.EmbeddingService is kb_embedding_service.EmbeddingService
+    assert core_query_pipeline is query_pipeline_module
+    assert ai_sql_generator is sql_generator_module
+    assert utils_sql_validator is sql_validator_module
+    assert conversation_memory is query_conversation_memory
+    assert core_question_service is sql_question_service
 
 
 def test_grouped_ai_query_receives_selected_dimension_and_measure_candidates(monkeypatch):

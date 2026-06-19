@@ -1,3 +1,4 @@
+import importlib
 from pathlib import Path
 
 from core.query_pipeline import QueryPipeline
@@ -186,3 +187,25 @@ def test_query_pipeline_reports_validation_failure_when_sql_generation_fails(mon
 
 def test_pipeline_architecture_document_exists():
     assert Path("PIPELINE_ARCHITECTURE.md").exists()
+
+
+def test_primary_pipeline_modules_import_from_new_paths():
+    kb_database_service = importlib.import_module("kb_pipeline.database_service")
+    kb_relationship_graph = importlib.import_module("kb_pipeline.relationship_graph")
+    kb_embedding_service = importlib.import_module("kb_pipeline.vector.embedding_service")
+    query_pipeline_module = importlib.import_module("query_pipeline.query_pipeline")
+    query_planner_module = importlib.import_module("query_pipeline.query_planner")
+    conversation_memory_module = importlib.import_module("query_pipeline.conversation.conversation_memory")
+    sql_question_service = importlib.import_module("sql_pipeline.question_service")
+    sql_generator_module = importlib.import_module("sql_pipeline.sql_generator")
+    sql_validator_module = importlib.import_module("sql_pipeline.sql_validator")
+
+    assert hasattr(kb_database_service, "DatabaseService")
+    assert hasattr(kb_relationship_graph, "build_relationship_graph")
+    assert hasattr(kb_embedding_service, "EmbeddingService")
+    assert hasattr(query_pipeline_module, "QueryPipeline")
+    assert hasattr(query_planner_module, "build_query_context")
+    assert hasattr(conversation_memory_module, "ConversationMemory")
+    assert hasattr(sql_question_service, "QuestionService")
+    assert hasattr(sql_generator_module, "generate_sql")
+    assert hasattr(sql_validator_module, "validate_sql")
