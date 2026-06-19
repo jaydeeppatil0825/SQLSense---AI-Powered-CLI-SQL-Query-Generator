@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.engine import Engine
 
 from core.database_service import DatabaseService
+from core.query_pipeline import QueryPipeline
 from core.question_service import QuestionService
 from core.result_service import ResultService
 from core.chart_service import ChartService
@@ -26,6 +27,8 @@ class AppService:
     def __init__(self):
         self.database_service = DatabaseService()
         self.question_service = QuestionService()
+        self.query_pipeline = QueryPipeline(self.question_service)
+        self.last_pipeline_result = None
         self.result_service = ResultService()
         self.chart_service = ChartService()
         self.insight_service = InsightService()
@@ -132,13 +135,15 @@ class AppService:
         vector_retriever = self.database_service.get_vector_retriever()
         backend = ai_backend or self.ai_backend_service.get_active_backend()
         
-        success, message, sql, error = self.question_service.process_question(
+        pipeline_result = self.query_pipeline.run(
             question=question,
             knowledge_base=knowledge_base,
             business_glossary=business_glossary,
             vector_retriever=vector_retriever,
             ai_backend=backend,
         )
+        self.last_pipeline_result = pipeline_result
+        success, message, sql, error = pipeline_result.to_process_tuple()
         
         # ── Bug fix: store generated SQL so Execute Last SQL (option 4) can find it
         # result_service.last_sql is what get_last_sql() reads — it must be set here,
@@ -167,6 +172,10 @@ class AppService:
     def get_last_query_context(self) -> Optional[Dict[str, Any]]:
         """Get the latest query-planning context for CLI display."""
         return self.question_service.get_last_query_context()
+
+    def get_last_pipeline_result(self):
+        """Get the latest structured query-pipeline result."""
+        return self.last_pipeline_result
     
     # SQL execution
     def execute_sql(

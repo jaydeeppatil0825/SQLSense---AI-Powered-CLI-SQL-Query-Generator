@@ -8,10 +8,8 @@ from copy import deepcopy
 from datetime import date
 from typing import Any
 import re
-from sqlalchemy.sql.expression import cast
-from typing_extensions import no_type_check_decorator
 
-from semantic.erp_metadata import enrich_knowledge_base_for_erp
+from semantic.erp_metadata import enrich_knowledge_base_schema_facts
 from vector_store import VectorIndexBuilder, VectorRetriever, EmbeddingService
 from utils.logger import get_logger
 
@@ -40,10 +38,6 @@ _QUESTION_STOP_WORDS = {
     "table",
     
 }
-
-_MONEY_HINTS = {"amount", "total", "price", "cost", "balance", "value", "revenue"}
-_QUANTITY_HINTS = {"quantity", "qty", "unit", "units", "count", "volume", "number"}
-_PERCENTAGE_HINTS = {"percent", "percentage", "ratio", "rate"}
 
 
 def _normalize(text: str) -> str:
@@ -131,7 +125,7 @@ def _detect_intent(question: str) -> str:
     if re.search(r"\b(highest|largest|lowest|smallest|most|least)\b", normalized):
         return "top_n"
     if re.search(r"\btop\s+\d+\b", normalized):
-        if " by " in normalized or (set(_content_terms(normalized)) & (_MONEY_HINTS | _QUANTITY_HINTS | _PERCENTAGE_HINTS)):
+        if " by " in normalized:
             return "top_n"
         return "list"
     if re.search(r"\b(list|show|display|fetch|get)\b", normalized):
@@ -211,11 +205,7 @@ def _normalized_sample_values(column: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def _column_can_hold_status(column: dict[str, Any]) -> bool:
-    semantic_type = str(column.get("semantic_type", "")).lower()
-    if semantic_type == "status":
-        return True
-    column_name = _normalize_identifier(column.get("name", ""))
-    return any(token in column_name for token in ("status", "state", "stage"))
+    return str(column.get("semantic_type", "")).lower() == "status"
 
 
 def _column_supports_sample_filter(column: dict[str, Any]) -> bool:
@@ -224,14 +214,7 @@ def _column_supports_sample_filter(column: dict[str, Any]) -> bool:
         return True
 
     column_type = _normalize(str(column.get("type", "")))
-    if any(token in column_type for token in ("char", "text", "enum")):
-        return True
-
-    column_name = _normalize_identifier(column.get("name", ""))
-    return any(
-        token in column_name
-        for token in ("name", "label", "city", "town", "region", "state", "status", "type", "category", "segment")
-    )
+    return any(token in column_type for token in ("char", "text", "enum"))
 
 
 
@@ -293,21 +276,26 @@ def _column_supports_generic_text_filter(column: dict[str, Any]) -> bool:
     return any(token in column_type for token in ("char", "text", "enum"))
 
 
+def _column_metadata_tokens(column: dict[str, Any]) -> set[str]:
+    tokens = set(_tokenize(str(column.get("name", ""))))
+    tokens.update(_tokenize(str(column.get("business_description", ""))))
+    for term in column.get("business_terms", []) or []:
+        tokens.update(_tokenize(str(term)))
+    return tokens
+
+
 def _generic_filter_column_score(column: dict[str, Any], filter_value: str) -> float:
     score = 0.0
     semantic_type = str(column.get("semantic_type", "")).lower()
     if semantic_type in {"name", "text", "code", "reference"}:
         score += 1.0
 
-    column_name = _normalize_identifier(column.get("name", ""))
-    if any(token in column_name for token in ("town", "city", "location", "site", "address")):
-        score += 2.0
-    elif any(token in column_name for token in ("region", "state", "province", "zone")):
-        score += 1.2
-    elif any(token in column_name for token in ("name", "label", "code", "segment", "category", "type")):
-        score += 0.6
-
     normalized_filter = _normalize(filter_value)
+    filter_terms = set(_tokenize(filter_value))
+    metadata_overlap = len(filter_terms & _column_metadata_tokens(column))
+    if metadata_overlap:
+        score += metadata_overlap * 0.45
+
     for normalized_value, _ in _normalized_sample_values(column):
         if normalized_filter == normalized_value:
             score += 4.0
@@ -358,29 +346,17 @@ def _default_limit_for_intent(intent: str) -> int | None:
     return None
 
 
-def _semantic_hints(question: str, intent: str) -> set[str]:
-    terms = set(_content_terms(question))
+def _semantic_hints(intent: str, date_range: dict[str, Any] | None, sorting: dict[str, str] | None) -> set[str]:
     hints = set()
 
-    if terms & _MONEY_HINTS or intent in {"total", "average"}:
-        hints.add("money")
-    if terms & _QUANTITY_HINTS:
-        hints.add("quantity")
-    if terms & _PERCENTAGE_HINTS:
-        hints.add("percentage")
-    if any(token in terms for token in {"date", "month", "year", "recent", "latest", "today"}):
+    if intent == "trend" or date_range or str((sorting or {}).get("by", "")).lower() == "date":
         hints.add("date")
-    if any(token in terms for token in {"status", "state", "stage"}):
-        hints.add("status")
 
     return hints
 
 
 def _primary_metric_hint(semantic_hints: set[str]) -> str | None:
-    for candidate in ("money", "quantity", "percentage", "status", "date"):
-        if candidate in semantic_hints:
-            return candidate
-    return next(iter(sorted(semantic_hints))) if semantic_hints else None
+    return "date" if "date" in semantic_hints else None
 
 
 def _should_preserve_simple_list_metric(plan: dict[str, Any]) -> bool:
@@ -388,7 +364,7 @@ def _should_preserve_simple_list_metric(plan: dict[str, Any]) -> bool:
         return True
     if plan.get("dimension") or plan.get("grouping"):
         return True
-    return bool(set(plan.get("semantic_hints") or set()) & {"money", "quantity", "percentage"})
+    return False
 
 
 def _is_simple_primary_table_question(plan: dict[str, Any]) -> bool:
@@ -405,7 +381,7 @@ def _is_simple_primary_table_question(plan: dict[str, Any]) -> bool:
         and not plan.get("grouping")
         and not plan.get("filters")
         and not plan.get("date_range")
-        and not (set(plan.get("semantic_hints") or set()) & {"money", "quantity", "percentage", "date", "status"})
+        and not (set(plan.get("semantic_hints") or set()) & {"date", "status"})
     )
 
 
@@ -422,23 +398,6 @@ def _table_name_matches_question(question: str, table_name: str) -> bool:
         table_terms.add(_singularize_token(token))
 
     return bool(table_terms & question_terms)
-
-
-def _infer_generic_semantic_type(column_name: str) -> str | None:
-    tokens = set(_tokenize(column_name))
-    if not tokens:
-        return None
-    if tokens & _MONEY_HINTS:
-        return "money"
-    if tokens & _QUANTITY_HINTS:
-        return "quantity"
-    if tokens & _PERCENTAGE_HINTS:
-        return "percentage"
-    if {"date", "time", "month", "year"} & tokens:
-        return "date"
-    if {"status", "state", "stage"} & tokens:
-        return "status"
-    return None
 
 
 def _retrieve_with_vector(
@@ -560,17 +519,13 @@ def _has_strong_glossary_table_match(
 def _enriched_kb(knowledge_base: dict) -> dict:
     if not knowledge_base:
         return {}
-
-    if all("module" in table_data for table_data in knowledge_base.values()):
-        return deepcopy(knowledge_base)
-    return enrich_knowledge_base_for_erp(knowledge_base)
+    return enrich_knowledge_base_schema_facts(deepcopy(knowledge_base))
 
 
 def _question_text_for_table(table_name: str, table_data: dict) -> str:
     pieces = [
         table_name,
         _humanize(table_name),
-        str(table_data.get("module", "")),
         str(table_data.get("business_purpose", "")),
         str(table_data.get("business_description", "")),
     ]
@@ -904,7 +859,6 @@ def _build_selected_table_entries(
                 "table": table_name,
                 "confidence": round(min(max(score / 4.0, 0.55), 0.99), 2),
                 "reason": "; ".join(dict.fromkeys(reasons)) or "selected from semantic and vector context",
-                "module": knowledge_base.get(table_name, {}).get("module", "general"),
                 "selected_columns": selected_columns,
             }
         )
@@ -924,8 +878,6 @@ def _infer_metric_from_selected_columns(
     for table_entry in selected_tables:
         for column_entry in table_entry.get("selected_columns", []):
             semantic_type = str(column_entry.get("semantic_type", "")).lower()
-            if semantic_type in {"", "general", "unknown", "numeric_candidate", "text_candidate", "category_candidate"}:
-                semantic_type = str(_infer_generic_semantic_type(str(column_entry.get("column", ""))) or "")
             if semantic_type not in {"money", "quantity", "percentage", "date", "status"}:
                 continue
             ranked_semantics.append((float(column_entry.get("confidence") or 0.0), semantic_type))
@@ -958,8 +910,6 @@ def _infer_metric_from_glossary_matches(
                     semantic_type = str(column.get("semantic_type", "")).lower()
                     break
 
-            if semantic_type in {"", "general", "unknown", "numeric_candidate", "text_candidate", "category_candidate"}:
-                semantic_type = str(_infer_generic_semantic_type(column_name) or "")
             if semantic_type not in {"money", "quantity", "percentage"}:
                 continue
 
@@ -1158,7 +1108,6 @@ def _promote_join_path_tables(
                 "table": table_name,
                 "confidence": 0.76,
                 "reason": "promoted because it is required by a computed FK join path",
-                "module": table_data.get("module", "general"),
                 "selected_columns": _selected_join_columns_for_table(table_name, table_data, join_paths),
             }
             promoted_entries.append(entry)
@@ -1257,7 +1206,7 @@ def build_query_context(
     date_range = _detect_date_range(normalized_question)
     limit = _extract_limit(normalized_question) or _default_limit_for_intent(intent)
     sorting = _detect_sorting(normalized_question)
-    semantic_hints = _semantic_hints(normalized_question, intent)
+    semantic_hints = _semantic_hints(intent, date_range, sorting)
     glossary_matches = _glossary_matches(question, business_glossary)
     
     logger.debug(f"[DEBUG] Question: {question}")
@@ -1417,7 +1366,6 @@ def build_query_context(
                 "table": table_name,
                 "confidence": 0.55,
                 "reason": "fell back to full schema because no table scored above the selection threshold",
-                "module": table_data.get("module", "general"),
                 "selected_columns": [],
             }
             for table_name, table_data in enriched_kb.items()
