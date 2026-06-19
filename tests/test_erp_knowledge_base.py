@@ -1,7 +1,7 @@
-from semantic.erp_metadata import enrich_knowledge_base_for_erp, summarize_knowledge_base
+from semantic.erp_metadata import enrich_knowledge_base_schema_facts, summarize_knowledge_base
 
 
-def test_enrichment_adds_generic_modules_semantics_and_relationship_confidence():
+def test_enrichment_adds_schema_facts_without_module_labels():
     knowledge_base = {
         "invoice_headers": {
             "columns": [
@@ -26,15 +26,16 @@ def test_enrichment_adds_generic_modules_semantics_and_relationship_confidence()
         },
     }
 
-    enriched = enrich_knowledge_base_for_erp(knowledge_base)
+    enriched = enrich_knowledge_base_schema_facts(knowledge_base)
 
-    assert enriched["invoice_headers"]["module"] == "transaction"
-    assert enriched["client_directory"]["module"] == "reference"
+    assert "module" not in enriched["invoice_headers"]
+    assert "module" not in enriched["client_directory"]
     assert enriched["invoice_headers"]["columns"][3]["semantic_type"] == "numeric_candidate"
     assert enriched["invoice_headers"]["columns"][4]["semantic_type"] == "category_candidate"
     assert enriched["invoice_headers"]["columns"][3]["confidence"] >= 0.65
     assert enriched["invoice_headers"]["columns"][3]["reason"]
     assert enriched["invoice_headers"]["table_name"] == "invoice_headers"
+    assert enriched["invoice_headers"]["business_purpose"] == "Stores records for invoice header."
 
     relationships = enriched["invoice_headers"]["relationships"]
     assert relationships
@@ -44,9 +45,10 @@ def test_enrichment_adds_generic_modules_semantics_and_relationship_confidence()
     assert relationships[0]["reason"]
 
 
-def test_reference_and_transaction_tables_are_not_forced_into_demo_modules():
+def test_existing_module_field_is_removed_from_generated_schema_context():
     knowledge_base = {
         "supplier_directory": {
+            "module": "reference",
             "columns": [
                 {"name": "supplier_id", "type": "INTEGER"},
                 {"name": "supplier_name", "type": "VARCHAR(100)"},
@@ -55,6 +57,7 @@ def test_reference_and_transaction_tables_are_not_forced_into_demo_modules():
             "foreign_keys": [],
         },
         "payment_entries": {
+            "module": "transaction",
             "columns": [
                 {"name": "payment_id", "type": "INTEGER"},
                 {"name": "supplier_id", "type": "INTEGER"},
@@ -65,13 +68,13 @@ def test_reference_and_transaction_tables_are_not_forced_into_demo_modules():
         },
     }
 
-    enriched = enrich_knowledge_base_for_erp(knowledge_base)
+    enriched = enrich_knowledge_base_schema_facts(knowledge_base)
 
-    assert enriched["supplier_directory"]["module"] == "reference"
-    assert enriched["payment_entries"]["module"] == "transaction"
+    assert "module" not in enriched["supplier_directory"]
+    assert "module" not in enriched["payment_entries"]
 
 
-def test_invalid_business_purpose_falls_back_to_rule_based_text():
+def test_invalid_business_purpose_falls_back_to_neutral_text():
     knowledge_base = {
         "supplier_directory": {
             "columns": [
@@ -93,12 +96,12 @@ def test_invalid_business_purpose_falls_back_to_rule_based_text():
         },
     }
 
-    enriched = enrich_knowledge_base_for_erp(knowledge_base)
+    enriched = enrich_knowledge_base_schema_facts(knowledge_base)
 
     assert enriched["supplier_directory"]["business_purpose"] != ".99"
     assert enriched["invoice_headers"]["business_purpose"] != "What's In Stock?"
-    assert "Stores" in enriched["supplier_directory"]["business_purpose"]
-    assert "Stores" in enriched["invoice_headers"]["business_purpose"]
+    assert enriched["supplier_directory"]["business_purpose"] == "Stores records for supplier directory."
+    assert enriched["invoice_headers"]["business_purpose"] == "Stores records for invoice header."
 
 
 def test_relationships_are_attached_to_both_related_tables():
@@ -121,7 +124,7 @@ def test_relationships_are_attached_to_both_related_tables():
         },
     }
 
-    enriched = enrich_knowledge_base_for_erp(knowledge_base)
+    enriched = enrich_knowledge_base_schema_facts(knowledge_base)
 
     purchase_relationships = enriched["purchase_records"]["relationships"]
     supplier_relationships = enriched["supplier_directory"]["relationships"]
@@ -129,6 +132,7 @@ def test_relationships_are_attached_to_both_related_tables():
     assert any(
         relationship["from_table"] == "purchase_records"
         and relationship["to_table"] == "supplier_directory"
+        and relationship["source"] == "inferred_by_naming"
         for relationship in purchase_relationships
     )
     assert any(
@@ -139,7 +143,7 @@ def test_relationships_are_attached_to_both_related_tables():
     assert any(relationship["direction"] == "incoming" for relationship in supplier_relationships)
 
 
-def test_build_summary_reports_low_confidence_and_missing_relationships():
+def test_build_summary_reports_schema_context_low_confidence_and_missing_relationships():
     knowledge_base = {
         "stock_positions": {
             "columns": [
@@ -162,9 +166,10 @@ def test_build_summary_reports_low_confidence_and_missing_relationships():
         },
     }
 
-    enriched = enrich_knowledge_base_for_erp(knowledge_base)
+    enriched = enrich_knowledge_base_schema_facts(knowledge_base)
     summary = summarize_knowledge_base(enriched)
 
-    assert "snapshot" in summary["modules_detected"] or "reference" in summary["modules_detected"]
+    assert summary["schema_contexts"] == {"schema_only": 3}
+    assert summary["modules_detected"] == {"schema_only": 3}
     assert summary["relationship_count"] >= 1
     assert "categories" in summary["tables_with_missing_relationships"]

@@ -345,7 +345,7 @@ def _parse_column_enrichment(response: str) -> dict:
 
 def _apply_table_enrichment(table_name: str, table_data: dict, enrichment: dict) -> None:
     """Apply enrichment data to one table in-place."""
-    module_name = table_data.get("module", "master data")
+    fallback_purpose = build_rule_based_business_purpose(table_name)
     table_data["business_description"] = sanitize_short_text(
         enrichment.get("business_description", ""),
         fallback=table_data.get("business_description", ""),
@@ -353,9 +353,8 @@ def _apply_table_enrichment(table_name: str, table_data: dict, enrichment: dict)
     table_data["business_purpose"] = sanitize_business_purpose(
         enrichment.get("business_purpose", ""),
         table_name,
-        module_name,
     )
-    if table_data["business_purpose"] == build_rule_based_business_purpose(table_name, module_name):
+    if table_data["business_purpose"] == fallback_purpose:
         logger.info(f"AI business purpose for '{table_name}' was invalid; using rule-based fallback.")
 
     clean_questions = []

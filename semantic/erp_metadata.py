@@ -1,7 +1,7 @@
 """
-Generic semantic metadata helpers and relationship enrichment.
+Generic semantic metadata helpers and schema-fact enrichment.
 
-This module keeps the historical import surface used across the project while
+This module keeps a stable import surface used across the project while
 staying schema-driven and database-agnostic.
 """
 
@@ -48,13 +48,12 @@ def sanitize_short_text(text: str, fallback: str = "") -> str:
     return cleaned[:120]
 
 
-def build_rule_based_business_purpose(table_name: str, module_name: str) -> str:
+def build_rule_based_business_purpose(table_name: str, module_name: str = "") -> str:
     label = _singularize_phrase(table_name)
-    module_label = _humanize(module_name) or "general"
-    return f"Stores {module_label} records for {label}."
+    return f"Stores records for {label}."
 
 
-def sanitize_business_purpose(text: str, table_name: str, module_name: str) -> str:
+def sanitize_business_purpose(text: str, table_name: str, module_name: str = "") -> str:
     cleaned = sanitize_short_text(text)
     if not cleaned:
         return build_rule_based_business_purpose(table_name, module_name)
@@ -137,26 +136,6 @@ def classify_semantic_type(
         return "numeric_candidate"
 
     return "general"
-
-
-def _infer_module_name(table_name: str) -> str:
-    normalized_name = _normalize_identifier(table_name)
-    if any(keyword in normalized_name for keyword in ["customer", "client", "account"]):
-        return "reference"
-    if any(keyword in normalized_name for keyword in ["vendor", "supplier", "provider"]):
-        return "reference"
-    if any(keyword in normalized_name for keyword in ["item", "product", "material"]):
-        return "reference"
-    if any(keyword in normalized_name for keyword in ["invoice", "order", "transaction"]):
-        return "transaction"
-    if any(keyword in normalized_name for keyword in ["payment", "receipt", "settlement"]):
-        return "transaction"
-    if any(keyword in normalized_name for keyword in ["inventory", "stock", "warehouse"]):
-        return "inventory"
-    if any(keyword in normalized_name for keyword in ["employee", "staff", "personnel"]):
-        return "reference"
-    return "reference"
-
 
 def _column_confidence(column_name: str, semantic_type: str) -> float:
     normalized_name = _normalize_identifier(column_name)
@@ -277,26 +256,24 @@ def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
                     "to_column": target_column,
                     "direction": "many-to-one",
                     "confidence": 0.82,
-                    "reason": "Inferred from identifier naming patterns.",
-                    "source": "inference",
+                    "reason": "Inferred from a neutral *_id naming pattern.",
+                    "source": "inferred_by_naming",
                 }
             )
 
     return relationships
 
 
-def enrich_knowledge_base_for_erp(knowledge_base: dict[str, Any]) -> dict[str, Any]:
+def enrich_knowledge_base_schema_facts(knowledge_base: dict[str, Any]) -> dict[str, Any]:
     enriched = deepcopy(knowledge_base or {})
     detected_relationships = detect_relationships(enriched)
 
     for table_name, table_data in enriched.items():
-        module_name = str(table_data.get("module") or _infer_module_name(table_name))
         table_data["table_name"] = table_name
-        table_data["module"] = module_name
+        table_data.pop("module", None)
         table_data["business_purpose"] = sanitize_business_purpose(
             table_data.get("business_purpose", ""),
             table_name,
-            module_name,
         )
         table_data["business_description"] = sanitize_short_text(
             table_data.get("business_description", ""),
@@ -347,10 +324,19 @@ def enrich_knowledge_base_for_erp(knowledge_base: dict[str, Any]) -> dict[str, A
     return enriched
 
 
+def enrich_knowledge_base_for_erp(knowledge_base: dict[str, Any]) -> dict[str, Any]:
+    """
+    Backward-compatible alias for older imports.
+
+    Runtime behavior is schema-fact-only and no longer injects ERP modules.
+    """
+    return enrich_knowledge_base_schema_facts(knowledge_base)
+
+
 def summarize_knowledge_base(knowledge_base: dict[str, Any]) -> dict[str, Any]:
-    enriched = enrich_knowledge_base_for_erp(knowledge_base)
-    module_counts = Counter(
-        str(table_data.get("module", "reference"))
+    enriched = enrich_knowledge_base_schema_facts(knowledge_base)
+    context_counts = Counter(
+        str(table_data.get("schema_context", "schema_only"))
         for table_data in enriched.values()
     )
     relationship_signatures = {
@@ -395,7 +381,8 @@ def summarize_knowledge_base(knowledge_base: dict[str, Any]) -> dict[str, Any]:
     )
     return {
         "table_count": len(enriched),
-        "modules_detected": dict(sorted(module_counts.items())),
+        "schema_contexts": dict(sorted(context_counts.items())),
+        "modules_detected": dict(sorted(context_counts.items())),
         "relationship_count": len(relationship_signatures),
         "low_confidence_relationships": low_confidence_relationships,
         "tables_with_missing_relationships": tables_with_missing_relationships,

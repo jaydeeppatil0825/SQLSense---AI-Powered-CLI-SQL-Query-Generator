@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from db.data_profiler import profile_database_data
 from db.schema_reader import read_database_schema
-from semantic.erp_metadata import enrich_knowledge_base_for_erp
+from semantic.erp_metadata import enrich_knowledge_base_schema_facts
 from semantic.semantic_mapper import add_semantic_mapping
 
 
@@ -51,7 +51,7 @@ def build_knowledge_base(engine) -> dict:
     knowledge_base = add_semantic_mapping(profiled_data)
     print("  [OK] Semantic mapping completed successfully.")
 
-    knowledge_base = enrich_knowledge_base_for_erp(knowledge_base)
-    print("  [OK] ERP metadata and relationships detected successfully.")
+    knowledge_base = enrich_knowledge_base_schema_facts(knowledge_base)
+    print("  [OK] Schema fact enrichment and relationships completed successfully.")
 
     return knowledge_base
