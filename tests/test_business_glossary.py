@@ -1,19 +1,17 @@
-"""
-Tests for dynamic business glossary generation and search.
-"""
+"""Tests for dynamic business glossary generation and search."""
 
 import tempfile
 from pathlib import Path
 
 from semantic.business_glossary import (
     generate_business_glossary,
-    save_business_glossary,
     load_business_glossary,
+    save_business_glossary,
     search_business_glossary,
 )
 
 
-def test_generate_business_glossary_from_kb():
+def test_generate_business_glossary_from_schema_facts_only():
     knowledge_base = {
         "invoice_headers": {
             "business_description": "Invoice header records",
@@ -24,6 +22,8 @@ def test_generate_business_glossary_from_kb():
             ],
         },
         "client_directory": {
+            "foreign_keys": [],
+            "relationships": [],
             "columns": [
                 {"name": "client_name", "type": "VARCHAR(100)", "semantic_type": "name"},
                 {"name": "client_code", "type": "VARCHAR(20)", "semantic_type": "code"},
@@ -38,39 +38,69 @@ def test_generate_business_glossary_from_kb():
     assert "total due" in glossary
     assert glossary["total due"]["mapped_columns"][0]["table"] == "invoice_headers"
     assert glossary["total due"]["mapped_columns"][0]["column"] == "total_due"
-    # No generic fallback terms like "money" should be in glossary
-    assert "money" not in glossary
+    assert glossary["total due"]["sources"] == ["schema_identifier"]
+    assert "tax" not in glossary
+    assert "gst" not in glossary
+    assert "vat" not in glossary
+    assert "outstanding" not in glossary
 
 
-def test_generate_business_glossary_from_ai_enriched_kb():
+def test_generate_business_glossary_from_ai_metadata_only_when_present():
     knowledge_base = {
         "invoice_headers": {
+            "relationships": [],
             "columns": [
                 {
                     "name": "total_due",
                     "type": "DECIMAL(10,2)",
                     "semantic_type": "money",
-                    "business_terms": ["payables", "amount due"],
+                    "business_terms": ["payables open", "amount due current"],
                     "business_description": "Open amount due",
                 }
-            ]
+            ],
         }
     }
 
     glossary = generate_business_glossary(knowledge_base, use_ai_enrichment=True)
 
-    assert "payables" in glossary
-    assert "amount due" in glossary
-    assert glossary["payables"]["mapped_columns"][0]["table"] == "invoice_headers"
+    assert "payables open" in glossary
+    assert "amount due current" in glossary
+    assert glossary["payables open"]["mapped_columns"][0]["table"] == "invoice_headers"
+    assert "ai_semantic_metadata" in glossary["payables open"]["sources"]
+
+
+def test_generate_business_glossary_uses_relationship_context_without_inventing_aliases():
+    knowledge_base = {
+        "stock_positions": {
+            "foreign_keys": [
+                {"column": "item_id", "referenced_table": "items", "referenced_column": "item_id"},
+                {"column": "storage_id", "referenced_table": "storage_points", "referenced_column": "storage_id"},
+            ],
+            "relationships": [],
+            "columns": [
+                {"name": "item_id", "type": "INTEGER", "semantic_type": "id", "is_foreign_key": True},
+                {"name": "storage_id", "type": "INTEGER", "semantic_type": "id", "is_foreign_key": True},
+            ],
+        }
+    }
+
+    glossary = generate_business_glossary(knowledge_base, use_ai_enrichment=False)
+
+    assert "stock positions" in glossary
+    assert "relationship_context" in glossary["stock positions"]["sources"]
+    assert "items" in glossary["item id"]["business_terms"]
+    assert "storage point" in glossary["storage id"]["business_terms"]
+    assert "pending stock positions" not in glossary
 
 
 def test_save_and_load_business_glossary():
     glossary = {
-        "money": {
-            "description": "Monetary values",
+        "invoice headers": {
+            "description": "Schema table: invoice headers.",
             "mapped_columns": [{"table": "invoice_headers", "column": "total_due", "confidence": "high"}],
-            "example_questions": ["Show total amount"],
-            "business_terms": ["amount"],
+            "example_questions": [],
+            "business_terms": ["invoice headers"],
+            "sources": ["schema_identifier"],
         }
     }
 
@@ -83,30 +113,31 @@ def test_save_and_load_business_glossary():
 
 def test_search_business_glossary():
     glossary = {
-        "payables": {
+        "payables open": {
             "description": "Open payable amount",
             "mapped_columns": [{"table": "invoice_headers", "column": "total_due", "confidence": "high"}],
-            "example_questions": ["Show current payables"],
-            "business_terms": ["amount due"],
+            "example_questions": [],
+            "business_terms": ["amount due current"],
+            "sources": ["schema_identifier", "ai_semantic_metadata"],
         },
         "client name": {
             "description": "Client label",
             "mapped_columns": [{"table": "client_directory", "column": "client_name", "confidence": "high"}],
-            "example_questions": ["Show client names"],
-            "business_terms": ["name"],
+            "example_questions": [],
+            "business_terms": ["client name"],
+            "sources": ["schema_identifier"],
         },
     }
 
-    assert "payables" in search_business_glossary("payables", glossary)
-    assert "payables" in search_business_glossary("amount due", glossary)
-    assert "payables" in search_business_glossary("total_due", glossary)
-    assert "payables" in search_business_glossary("invoice_headers", glossary)
+    assert "payables open" in search_business_glossary("payables open", glossary)
+    assert "payables open" in search_business_glossary("amount due current", glossary)
+    assert "payables open" in search_business_glossary("total_due", glossary)
+    assert "payables open" in search_business_glossary("invoice_headers", glossary)
     assert search_business_glossary("nonexistent", glossary) == {}
 
 
 def test_load_business_glossary_missing_file_uses_empty_fallback():
     glossary = load_business_glossary("nonexistent_path.json")
-    # No generic fallback - should return empty dict
     assert glossary == {}
 
 
@@ -116,7 +147,6 @@ def test_load_business_glossary_invalid_json_falls_back(tmp_path):
 
     glossary = load_business_glossary(str(invalid_path))
 
-    # No generic fallback - should return empty dict
     assert glossary == {}
 
 
@@ -127,7 +157,6 @@ def test_load_business_glossary_unreadable_falls_back(monkeypatch):
     monkeypatch.setattr("utils.file_utils.load_json", fake_load_json)
     glossary = load_business_glossary("semantic/business_glossary.json")
 
-    # No generic fallback - should return empty dict
     assert glossary == {}
 
 
