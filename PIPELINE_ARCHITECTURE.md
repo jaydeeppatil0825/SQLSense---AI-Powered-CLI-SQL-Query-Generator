@@ -52,6 +52,22 @@ Responsibilities:
 - KB/glossary/vector metadata persistence
 
 Current files:
+- `kb_pipeline/connection.py`
+- `kb_pipeline/schema_reader.py`
+- `kb_pipeline/data_profiler.py`
+- `kb_pipeline/database_service.py`
+- `kb_pipeline/knowledge_base_builder.py`
+- `kb_pipeline/ai_semantic_enricher.py`
+- `kb_pipeline/semantic_mapper.py`
+- `kb_pipeline/business_glossary.py`
+- `kb_pipeline/relationship_graph.py`
+- `semantic/erp_metadata.py`
+- `kb_pipeline/vector/embedding_service.py`
+- `kb_pipeline/vector/index_builder.py`
+- `kb_pipeline/vector/retriever.py`
+- `kb_pipeline/vector/persistence.py`
+
+Compatibility wrappers kept at old paths:
 - `db/connection.py`
 - `db/schema_reader.py`
 - `db/data_profiler.py`
@@ -61,7 +77,6 @@ Current files:
 - `semantic/semantic_mapper.py`
 - `semantic/business_glossary.py`
 - `semantic/relationship_graph.py`
-- `semantic/erp_metadata.py`
 - `vector_store/embedding_service.py`
 - `vector_store/index_builder.py`
 - `vector_store/retriever.py`
