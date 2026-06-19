@@ -161,3 +161,23 @@ def test_process_question_uses_persisted_vector_index_after_reload(monkeypatch, 
     assert captured["pipeline_context"] is not None
     assert captured["vector_status"]["persistence"]["loaded_from_disk"] is True
     assert captured["vector_status"]["persistence"]["source"] == "disk"
+
+
+def test_invalid_generated_sql_never_becomes_last_executable_sql(monkeypatch, tmp_path):
+    service = _service_with_orders(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda user_question, knowledge_base, backend=None, query_plan=None, selected_tables=None: "SELECT final_amount FROM LIMIT 50",
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda user_question, knowledge_base, backend, first_attempt_sql, validation_reason, query_plan=None, selected_tables=None: "SELECT final_amount FROM LIMIT 50",
+    )
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
+
+    success, message, sql, error = service.process_question("show total sales", ai_backend="local")
+
+    assert success is False
+    assert sql is None
+    assert service.get_last_sql() is None
+    assert "Could not generate a valid SQL query." in error

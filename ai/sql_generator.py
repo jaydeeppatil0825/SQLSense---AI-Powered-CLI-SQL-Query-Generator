@@ -137,8 +137,14 @@ def generate_sql(
     backend: str | None = None,
     query_plan: dict | None = None,
     selected_tables: list[dict] | None = None,
+    selected_columns: list[dict] | None = None,
+    measure_candidates: list[dict] | None = None,
+    dimension_candidates: list[dict] | None = None,
+    filter_candidates: list[dict] | None = None,
     business_glossary: dict | None = None,
     join_paths: list[dict] | None = None,
+    formula_evidence: list[dict] | None = None,
+    evidence_sources: list[str] | None = None,
 ) -> str:
     """Generate a SQL SELECT statement from the provided runtime context."""
     messages = build_sql_prompt(
@@ -146,8 +152,14 @@ def generate_sql(
         knowledge_base,
         query_plan=query_plan,
         selected_tables=selected_tables,
+        selected_columns=selected_columns,
+        measure_candidates=measure_candidates,
+        dimension_candidates=dimension_candidates,
+        filter_candidates=filter_candidates,
         business_glossary=business_glossary,
         join_paths=join_paths,
+        formula_evidence=formula_evidence,
+        evidence_sources=evidence_sources,
     )
     raw_response = _call_ai_backend(messages, backend or "local")
     return _clean_sql_response(raw_response)
@@ -161,9 +173,15 @@ def generate_sql_with_retry(
     validation_reason: str,
     query_plan: dict | None = None,
     selected_tables: list[dict] | None = None,
+    selected_columns: list[dict] | None = None,
+    measure_candidates: list[dict] | None = None,
+    dimension_candidates: list[dict] | None = None,
+    filter_candidates: list[dict] | None = None,
     business_glossary: dict | None = None,
     validation_context: dict | None = None,
     join_paths: list[dict] | None = None,
+    formula_evidence: list[dict] | None = None,
+    evidence_sources: list[str] | None = None,
 ) -> str:
     """Retry AI SQL generation once after a failed first attempt."""
     base_messages = build_sql_prompt(
@@ -171,8 +189,14 @@ def generate_sql_with_retry(
         knowledge_base,
         query_plan=query_plan,
         selected_tables=selected_tables,
+        selected_columns=selected_columns,
+        measure_candidates=measure_candidates,
+        dimension_candidates=dimension_candidates,
+        filter_candidates=filter_candidates,
         business_glossary=business_glossary,
         join_paths=join_paths,
+        formula_evidence=formula_evidence,
+        evidence_sources=evidence_sources,
     )
 
     correction_system = (
@@ -186,6 +210,11 @@ def generate_sql_with_retry(
     selected_column_entries = validation_context.get("selected_columns", []) if validation_context else []
     join_conditions = validation_context.get("join_conditions", []) if validation_context else []
     join_skeletons = validation_context.get("join_skeletons", []) if validation_context else []
+    measure_entries = validation_context.get("measure_candidates", []) if validation_context else []
+    dimension_entries = validation_context.get("dimension_candidates", []) if validation_context else []
+    filter_entries = validation_context.get("filter_candidates", []) if validation_context else []
+    formula_entries = validation_context.get("formula_evidence", formula_evidence or []) if validation_context else (formula_evidence or [])
+    source_entries = validation_context.get("evidence_sources", evidence_sources or []) if validation_context else (evidence_sources or [])
 
     correction_user = (
         f"Original question: {user_question}\n\n"
@@ -194,12 +223,18 @@ def generate_sql_with_retry(
         f"Runtime schema and retrieval context:\n{validation_context or {}}\n\n"
         "Required tables: " + ", ".join([t.get("table", "") for t in (selected_tables or [])]) + "\n"
         "Required columns: " + ", ".join([f"{c.get('table', '')}.{c.get('column', '')}" for c in selected_column_entries]) + "\n"
+        "Measure candidates: " + ", ".join([f"{c.get('table', '')}.{c.get('column', '')}" for c in measure_entries]) + "\n"
+        "Dimension candidates: " + ", ".join([f"{c.get('table', '')}.{c.get('column', '')}" for c in dimension_entries]) + "\n"
+        "Filter candidates: " + ", ".join([f"{c.get('table', '')}.{c.get('column', '')}" for c in filter_entries if c.get('table') and c.get('column')]) + "\n"
         "Relationship/join paths: " + str(join_paths or []) + "\n"
         "Join predicates to use: " + ", ".join(join_conditions) + "\n"
         "FROM/JOIN candidates to use: " + " | ".join(join_skeletons) + "\n\n"
+        "Formula evidence: " + str(formula_entries) + "\n"
+        "Evidence sources: " + ", ".join(str(entry) for entry in source_entries) + "\n\n"
         "Correct the SQL so it follows the plan, selected tables, selected relationships, glossary context, and safety rules. "
         "Use only allowed tables and columns from the schema context. "
         "If the query needs multiple tables, your SQL must use one of the provided FROM/JOIN candidates as the starting structure. "
+        "If no formula evidence is provided, do not invent a derived expression. "
         "Qualify columns with table aliases when more than one table is used. "
         "The first non-whitespace characters must be SELECT. "
         "The SQL must include a valid FROM table name before any WHERE, GROUP BY, ORDER BY, or LIMIT clause. "

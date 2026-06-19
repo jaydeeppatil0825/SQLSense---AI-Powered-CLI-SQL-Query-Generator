@@ -448,6 +448,220 @@ def test_complex_join_query_goes_to_ai(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "ai"
 
 
+def test_ai_generation_receives_dynamic_pipeline_evidence(monkeypatch):
+    service = QuestionService()
+    pipeline_query_context = _context(
+        ["alpha_records", "beta_events"],
+        intent="comparison",
+        metric="money",
+        dimension="owner",
+        grouping=["owner"],
+    )
+    possible_join_paths = [
+        {
+            "from_table": "alpha_records",
+            "to_table": "beta_events",
+            "path": [
+                {
+                    "from_table": "alpha_records",
+                    "from_column": "owner_id",
+                    "to_table": "beta_events",
+                    "to_column": "owner_id",
+                    "join_condition": "alpha_records.owner_id = beta_events.owner_id",
+                }
+            ],
+            "length": 1,
+        }
+    ]
+    pipeline_context = {
+        "question": "show totals by owner",
+        "normalized_question": "show totals by owner",
+        "intent": {"intent_type": "comparison"},
+        "retrieved_context": {
+            "possible_join_paths": possible_join_paths,
+            "measure_candidates": [{"table": "beta_events", "column": "event_total", "semantic_type": "money"}],
+            "dimension_candidates": [{"table": "alpha_records", "column": "record_name", "semantic_type": "name"}],
+            "filter_candidates": [],
+            "formula_evidence": [],
+            "retrieval_sources": ["kb_identifier", "vector"],
+        },
+        "query_context": {
+            **pipeline_query_context,
+            "measure_candidates": [{"table": "beta_events", "column": "event_total", "semantic_type": "money"}],
+            "dimension_candidates": [{"table": "alpha_records", "column": "record_name", "semantic_type": "name"}],
+            "filter_candidates": [],
+            "join_paths": possible_join_paths,
+        },
+        "plan": dict(pipeline_query_context["plan"]),
+        "formula_evidence": [],
+        "evidence_sources": ["kb_identifier", "vector"],
+    }
+    captured = {}
+
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "core.question_service.build_query_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pipeline context should be reused for this question")),
+    )
+
+    def fake_generate_sql(*args, **kwargs):
+        captured.update(kwargs)
+        return (
+            "SELECT alpha_records.record_name, SUM(beta_events.event_total) AS total_event_total "
+            "FROM alpha_records JOIN beta_events ON alpha_records.owner_id = beta_events.owner_id "
+            "GROUP BY alpha_records.record_name;"
+        )
+
+    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
+
+    success, message, sql, error = service.process_question(
+        "show totals by owner",
+        GENERIC_KB,
+        ai_backend="local",
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is True
+    assert error is None
+    assert captured["selected_columns"] == pipeline_query_context["selected_columns"]
+    assert captured["measure_candidates"] == pipeline_context["retrieved_context"]["measure_candidates"]
+    assert captured["dimension_candidates"] == pipeline_context["retrieved_context"]["dimension_candidates"]
+    assert captured["join_paths"] == possible_join_paths
+    assert captured["formula_evidence"] == []
+    assert captured["evidence_sources"] == ["kb_identifier", "vector"]
+
+
+def test_grouped_ai_query_receives_selected_dimension_and_measure_candidates(monkeypatch):
+    service = QuestionService()
+    pipeline_query_context = _context(
+        ["alpha_records", "beta_events"],
+        intent="comparison",
+        metric="money",
+        dimension="owner",
+        grouping=["owner"],
+    )
+    possible_join_paths = [
+        {
+            "from_table": "alpha_records",
+            "to_table": "beta_events",
+            "path": [
+                {
+                    "from_table": "alpha_records",
+                    "from_column": "owner_id",
+                    "to_table": "beta_events",
+                    "to_column": "owner_id",
+                    "join_condition": "alpha_records.owner_id = beta_events.owner_id",
+                }
+            ],
+            "length": 1,
+        }
+    ]
+    pipeline_context = {
+        "question": "show totals by owner",
+        "normalized_question": "show totals by owner",
+        "intent": {"intent_type": "comparison"},
+        "retrieved_context": {
+            "possible_join_paths": possible_join_paths,
+            "measure_candidates": [{"table": "beta_events", "column": "event_total", "semantic_type": "money"}],
+            "dimension_candidates": [{"table": "alpha_records", "column": "record_name", "semantic_type": "name"}],
+            "filter_candidates": [],
+            "formula_evidence": [],
+            "retrieval_sources": ["kb_identifier"],
+        },
+        "query_context": {
+            **pipeline_query_context,
+            "measure_candidates": [{"table": "beta_events", "column": "event_total", "semantic_type": "money"}],
+            "dimension_candidates": [{"table": "alpha_records", "column": "record_name", "semantic_type": "name"}],
+            "filter_candidates": [],
+            "join_paths": possible_join_paths,
+        },
+        "plan": dict(pipeline_query_context["plan"]),
+        "formula_evidence": [],
+        "evidence_sources": ["kb_identifier"],
+    }
+    captured = {}
+
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
+
+    def fake_generate_sql(*args, **kwargs):
+        captured.update(kwargs)
+        return (
+            "SELECT alpha_records.record_name, SUM(beta_events.event_total) AS total_event_total "
+            "FROM alpha_records JOIN beta_events ON alpha_records.owner_id = beta_events.owner_id "
+            "GROUP BY alpha_records.record_name;"
+        )
+
+    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
+
+    success, message, sql, error = service.process_question(
+        "show totals by owner",
+        GENERIC_KB,
+        ai_backend="local",
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is True
+    assert error is None
+    assert captured["measure_candidates"] == [{"table": "beta_events", "column": "event_total", "semantic_type": "money"}]
+    assert captured["dimension_candidates"] == [{"table": "alpha_records", "column": "record_name", "semantic_type": "name"}]
+    assert captured["join_paths"] == possible_join_paths
+    assert "GROUP BY alpha_records.record_name" in sql
+
+
+def test_missing_formula_evidence_returns_unresolved_for_grouped_aggregate(monkeypatch):
+    knowledge_base = {
+        "group_entities": {
+            "columns": [
+                {"name": "entity_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "entity_label", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["entity_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "link_rows": {
+            "columns": [
+                {"name": "entity_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "measure_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            ],
+            "primary_keys": [],
+            "foreign_keys": [
+                {"column": "entity_id", "referenced_table": "group_entities", "referenced_column": "entity_id"},
+                {"column": "measure_id", "referenced_table": "measure_rows", "referenced_column": "measure_id"},
+            ],
+            "relationships": [],
+        },
+        "measure_rows": {
+            "columns": [
+                {"name": "measure_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "gross_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+                {"name": "settled_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+                {"name": "state_flag", "type": "VARCHAR(30)", "nullable": True, "semantic_type": "status", "sample_values": ["open", "closed"]},
+            ],
+            "primary_keys": ["measure_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    service = QuestionService()
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: "SELECT entity_label, SUM(gross_value) AS unresolved_total FROM",
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda *args, **kwargs: "SELECT entity_label, SUM(gross_value) AS unresolved_total FROM",
+    )
+    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
+
+    success, message, sql, error = service.process_question("show open total by entity", knowledge_base, ai_backend="local")
+
+    assert success is False
+    assert sql is None
+    assert "missing a table name after FROM" in message
+    assert service.get_last_query_context()["route_used"] == "fallback-failed"
+
+
 def test_generated_rule_based_sql_is_validated_before_return(monkeypatch):
     service = QuestionService()
     monkeypatch.setattr("core.question_service.build_query_context", lambda *args, **kwargs: _context(["alpha_records"], intent="list"))

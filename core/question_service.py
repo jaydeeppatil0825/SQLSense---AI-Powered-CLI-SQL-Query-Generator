@@ -318,11 +318,25 @@ def _pipeline_context_matches_question(
     if not isinstance(query_context, dict):
         return False
 
-    return bool(
+    has_structured_context = bool(
         query_context.get("selected_table_names")
         or query_context.get("selected_tables")
         or query_context.get("join_paths")
     )
+    if not has_structured_context:
+        return False
+
+    unresolved_metrics = list((pipeline_context.get("plan") or {}).get("unresolved_metrics") or [])
+    if unresolved_metrics:
+        has_measure_evidence = bool(
+            query_context.get("measure_candidates")
+            or (pipeline_context.get("retrieved_context") or {}).get("measure_candidates")
+            or pipeline_context.get("formula_evidence")
+        )
+        if not has_measure_evidence:
+            return False
+
+    return True
 
 
 def _merge_pipeline_metadata(
@@ -403,7 +417,8 @@ def _validate_business_sql_fit(sql: str, query_context: dict[str, Any]) -> tuple
 def _build_validation_retry_context(query_context: dict[str, Any]) -> dict[str, Any]:
     """Build compact dynamic schema/vector context for AI correction prompts."""
     vector_results = query_context.get("vector_results") or {}
-    join_paths = list(query_context.get("join_paths") or [])
+    retrieved_context = query_context.get("retrieved_context") or {}
+    join_paths = list(retrieved_context.get("possible_join_paths") or query_context.get("join_paths") or [])
     join_conditions = [
         edge.get("join_condition")
         or (
@@ -486,7 +501,85 @@ def _build_validation_retry_context(query_context: dict[str, Any]) -> dict[str, 
         "join_paths": join_paths,
         "join_conditions": join_conditions,
         "join_skeletons": join_skeletons,
+        "measure_candidates": list(query_context.get("measure_candidates") or retrieved_context.get("measure_candidates") or [])[:10],
+        "dimension_candidates": list(query_context.get("dimension_candidates") or retrieved_context.get("dimension_candidates") or [])[:10],
+        "filter_candidates": list(query_context.get("filter_candidates") or query_context.get("filters") or retrieved_context.get("filter_candidates") or [])[:10],
+        "formula_evidence": list(query_context.get("formula_evidence") or retrieved_context.get("formula_evidence") or [])[:10],
+        "evidence_sources": list(query_context.get("evidence_sources") or retrieved_context.get("retrieval_sources") or [])[:10],
     }
+
+
+def _possible_join_paths(query_context: dict[str, Any]) -> list[dict[str, Any]]:
+    retrieved_context = query_context.get("retrieved_context") or {}
+    return list(retrieved_context.get("possible_join_paths") or query_context.get("join_paths") or [])
+
+
+def _formula_evidence_payload(query_context: dict[str, Any]) -> list[dict[str, Any]]:
+    evidence_entries: list[dict[str, Any]] = []
+    pipeline_context = query_context.get("pipeline_context")
+    if isinstance(pipeline_context, dict):
+        for value in (
+            pipeline_context.get("formula_evidence"),
+            (pipeline_context.get("plan") or {}).get("formula_evidence"),
+            (pipeline_context.get("retrieved_context") or {}).get("formula_evidence"),
+        ):
+            if isinstance(value, list):
+                evidence_entries.extend(entry for entry in value if isinstance(entry, dict))
+
+    for value in (
+        query_context.get("formula_evidence"),
+        (query_context.get("plan") or {}).get("formula_evidence"),
+        (query_context.get("retrieved_context") or {}).get("formula_evidence"),
+    ):
+        if isinstance(value, list):
+            evidence_entries.extend(entry for entry in value if isinstance(entry, dict))
+
+    deduped: list[dict[str, Any]] = []
+    seen = set()
+    for entry in evidence_entries:
+        key = (
+            str(entry.get("table") or ""),
+            str(entry.get("primary_column") or entry.get("column") or ""),
+            str(entry.get("operation") or entry.get("formula_operation") or ""),
+            str(entry.get("secondary_column") or entry.get("secondary") or ""),
+            str(entry.get("alias") or entry.get("formula_alias") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
+
+
+def _evidence_sources_payload(query_context: dict[str, Any]) -> list[str]:
+    sources: list[str] = []
+    pipeline_context = query_context.get("pipeline_context")
+    if isinstance(pipeline_context, dict):
+        for value in (
+            pipeline_context.get("evidence_sources"),
+            (pipeline_context.get("plan") or {}).get("evidence_sources"),
+            (pipeline_context.get("retrieved_context") or {}).get("retrieval_sources"),
+        ):
+            if isinstance(value, list):
+                sources.extend(str(entry).strip() for entry in value if str(entry).strip())
+
+    for value in (
+        query_context.get("evidence_sources"),
+        (query_context.get("plan") or {}).get("evidence_sources"),
+        (query_context.get("retrieved_context") or {}).get("retrieval_sources"),
+    ):
+        if isinstance(value, list):
+            sources.extend(str(entry).strip() for entry in value if str(entry).strip())
+
+    deduped: list[str] = []
+    seen = set()
+    for entry in sources:
+        key = entry.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
 
 
 def _format_generation_failure(
@@ -1229,15 +1322,33 @@ class QuestionService:
                     "backend": ai_backend,
                     "query_plan": query_plan,
                     "selected_tables": query_context.get("selected_tables"),
+                    "selected_columns": query_context.get("selected_columns"),
+                    "measure_candidates": query_context.get("measure_candidates"),
+                    "dimension_candidates": query_context.get("dimension_candidates"),
+                    "filter_candidates": query_context.get("filter_candidates") or query_context.get("filters"),
                     "business_glossary": business_glossary,
-                    "join_paths": query_context.get("join_paths"),
+                    "join_paths": _possible_join_paths(query_context),
+                    "formula_evidence": _formula_evidence_payload(query_context),
+                    "evidence_sources": _evidence_sources_payload(query_context),
                 }
                 raw_sql = _call_with_optional_kwargs(
                     generate_sql,
                     rewritten_question,
                     scoped_knowledge_base,
                     optional_kwargs=base_generate_kwargs,
-                    removable_kwargs=("backend", "query_plan", "selected_tables", "business_glossary", "join_paths"),
+                    removable_kwargs=(
+                        "backend",
+                        "query_plan",
+                        "selected_tables",
+                        "selected_columns",
+                        "measure_candidates",
+                        "dimension_candidates",
+                        "filter_candidates",
+                        "business_glossary",
+                        "join_paths",
+                        "formula_evidence",
+                        "evidence_sources",
+                    ),
                 )
                 logger.info(f"SQL generated by AI: {raw_sql[:100]}...")
                 candidate_sql = _apply_explicit_limit_if_safe(raw_sql.strip())
@@ -1258,9 +1369,15 @@ class QuestionService:
                 retry_generate_kwargs = {
                     "query_plan": query_plan,
                     "selected_tables": query_context.get("selected_tables"),
+                    "selected_columns": query_context.get("selected_columns"),
+                    "measure_candidates": query_context.get("measure_candidates"),
+                    "dimension_candidates": query_context.get("dimension_candidates"),
+                    "filter_candidates": query_context.get("filter_candidates") or query_context.get("filters"),
                     "business_glossary": business_glossary,
                     "validation_context": retry_context,
-                    "join_paths": query_context.get("join_paths"),
+                    "join_paths": _possible_join_paths(query_context),
+                    "formula_evidence": _formula_evidence_payload(query_context),
+                    "evidence_sources": _evidence_sources_payload(query_context),
                 }
                 retry_raw = _call_with_optional_kwargs(
                     generate_sql_with_retry,
@@ -1276,9 +1393,15 @@ class QuestionService:
                         "backend",
                         "query_plan",
                         "selected_tables",
+                        "selected_columns",
+                        "measure_candidates",
+                        "dimension_candidates",
+                        "filter_candidates",
                         "business_glossary",
                         "validation_context",
                         "join_paths",
+                        "formula_evidence",
+                        "evidence_sources",
                     ),
                 )
                 retry_sql = _apply_explicit_limit_if_safe(retry_raw.strip())
