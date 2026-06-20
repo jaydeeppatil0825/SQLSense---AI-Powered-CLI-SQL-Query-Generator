@@ -17,17 +17,17 @@ from typing import Optional, Tuple, Dict, Any
 import inspect
 import re
 
-from core.query_planner import build_query_context
+from query_pipeline.query_planner import build_query_context
 from sql_pipeline.simple_query_generator import generate_simple_sql
 from sql_pipeline.sql_generator import generate_sql, generate_sql_with_retry
-from utils.question_normalizer import normalize_question, is_too_ambiguous
+from query_pipeline.question_normalizer import normalize_question, is_too_ambiguous
 from sql_pipeline.sql_validator import validate_sql, validate_sql_structure, add_limit_if_missing, extract_requested_limit
-from conversation.followup_detector import detect_follow_up
-from conversation.question_rewriter import rewrite_follow_up_question
-from conversation.action_detector import detect_conversation_action
-from conversation.conversation_memory import ConversationMemory
+from query_pipeline.conversation.followup_detector import detect_follow_up
+from query_pipeline.conversation.question_rewriter import rewrite_follow_up_question
+from query_pipeline.conversation.action_detector import detect_conversation_action
+from query_pipeline.conversation.conversation_memory import ConversationMemory
 from utils.logger import get_logger
-from vector_store import VectorRetriever
+from kb_pipeline.vector.retriever import VectorRetriever
 
 logger = get_logger()
 

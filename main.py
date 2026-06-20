@@ -34,7 +34,7 @@ from dotenv import load_dotenv
 from core.app_service import AppService
 
 # Keep these for CLI-specific utilities
-from db.connection import SUPPORTED_DB_TYPES
+from kb_pipeline.connection import SUPPORTED_DB_TYPES
 from utils.logger import get_logger
 
 # Initialize logger

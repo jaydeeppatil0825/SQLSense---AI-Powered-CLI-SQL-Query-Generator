@@ -19,7 +19,7 @@ import os
 import re
 from typing import Any
 
-from semantic.business_glossary import load_business_glossary
+from kb_pipeline.business_glossary import load_business_glossary
 
 
 _QUERY_RULES = """

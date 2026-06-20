@@ -9,10 +9,10 @@ This service coordinates the lower-level services behind the CLI.
 from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.engine import Engine
 
-from core.database_service import DatabaseService
-from core.query_pipeline import QueryPipeline
-from core.question_service import QuestionService
-from core.result_service import ResultService
+from kb_pipeline.database_service import DatabaseService
+from query_pipeline.query_pipeline import QueryPipeline
+from sql_pipeline.question_service import QuestionService
+from sql_pipeline.result_service import ResultService
 from core.chart_service import ChartService
 from core.insight_service import InsightService
 from core.ai_backend_service import get_ai_backend_service

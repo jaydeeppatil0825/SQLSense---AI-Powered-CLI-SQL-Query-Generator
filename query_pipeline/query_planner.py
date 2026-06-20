@@ -10,7 +10,7 @@ from typing import Any
 import re
 
 from semantic.erp_metadata import enrich_knowledge_base_schema_facts
-from vector_store import VectorIndexBuilder, VectorRetriever, EmbeddingService
+from kb_pipeline.vector import VectorIndexBuilder, VectorRetriever, EmbeddingService
 from utils.logger import get_logger
 
 logger = get_logger()

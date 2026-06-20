@@ -14,7 +14,7 @@ import re
 from typing import Any, Dict, Optional
 
 from utils.logger import get_logger
-from semantic.relationship_graph import build_relationship_graph, find_all_possible_join_paths
+from kb_pipeline.relationship_graph import build_relationship_graph, find_all_possible_join_paths
 
 logger = get_logger()
 
