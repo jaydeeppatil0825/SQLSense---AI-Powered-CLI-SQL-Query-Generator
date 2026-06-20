@@ -213,3 +213,26 @@ def test_main_imports_working_services_through_compatibility_paths():
 
     assert main_module.AppService is app_service_module.AppService
     assert main_module.SUPPORTED_DB_TYPES == db_connection_module.SUPPORTED_DB_TYPES
+
+
+def test_ai_backend_status_refresh_updates_displayed_status(monkeypatch, capsys):
+    main_module = importlib.import_module("main")
+    state = main_module.SessionState()
+    state.app_service.set_local_backend("llama3", "http://localhost:11434")
+
+    responses = iter(
+        [
+            (False, "Ollama is not running."),
+            (True, "Ollama is running. Configured model 'llama3' matched available model 'llama3:latest'."),
+        ]
+    )
+    monkeypatch.setattr(state.app_service, "test_backend_connection", lambda: next(responses))
+    answers = iter(["4", "5"])
+    monkeypatch.setattr(main_module, "_input", lambda prompt: next(answers))
+
+    main_module.handle_ai_backend_settings(state)
+
+    output = capsys.readouterr().out
+    assert "Backend status: not connected" in output
+    assert "Backend status: connected" in output
+    assert "llama3:latest" in output

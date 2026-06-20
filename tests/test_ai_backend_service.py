@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
-from core.ai_backend_service import AIBackendService
+from core.ai_backend_service import AIBackendService, check_ollama_status
 
 
 def test_backend_uses_nvidia_when_env_requests_it(monkeypatch):
@@ -37,7 +37,37 @@ def test_local_backend_connection_status_running(monkeypatch):
 
     assert ok is True
     assert "Ollama is running" in message
+    assert "Configured model 'llama3' is available" in message
     mock_get.assert_called_once_with("http://localhost:11434/api/tags", timeout=5)
+
+
+def test_local_backend_tags_200_with_llama3_latest_satisfies_configured_llama3(monkeypatch):
+    monkeypatch.setenv("AI_BACKEND", "local")
+    monkeypatch.setenv("LOCAL_MODEL", "llama3")
+    service = AIBackendService()
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"models": [{"name": "llama3:latest"}]}
+
+    with patch("core.ai_backend_service.requests.get", return_value=response):
+        ok, message = service.test_backend_connection()
+
+    assert ok is True
+    assert "matched available model 'llama3:latest'" in message
+
+
+def test_local_backend_tags_200_reports_missing_configured_model_cleanly(monkeypatch):
+    monkeypatch.setenv("AI_BACKEND", "local")
+    monkeypatch.setenv("LOCAL_MODEL", "llama3")
+    service = AIBackendService()
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"models": [{"name": "mistral:latest"}]}
+
+    with patch("core.ai_backend_service.requests.get", return_value=response):
+        ok, message = service.test_backend_connection()
+
+    assert ok is True
+    assert "configured model 'llama3' was not found" in message.lower()
+    assert "mistral:latest" in message
 
 
 def test_local_backend_connection_status_not_running(monkeypatch):
@@ -49,6 +79,20 @@ def test_local_backend_connection_status_not_running(monkeypatch):
 
     assert ok is False
     assert message == "Ollama is not running."
+
+
+def test_check_ollama_status_uses_api_tags_200(monkeypatch):
+    monkeypatch.setenv("LOCAL_API_URL", "http://localhost:11434")
+    monkeypatch.setenv("LOCAL_MODEL", "llama3")
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"models": [{"name": "llama3:latest"}]}
+
+    with patch("core.ai_backend_service.requests.get", return_value=response) as mock_get:
+        ok, message = check_ollama_status()
+
+    assert ok is True
+    assert "matched available model 'llama3:latest'" in message
+    mock_get.assert_called_once_with("http://localhost:11434/api/tags", timeout=5)
 
 
 def test_nvidia_backend_connection_uses_ok_probe(monkeypatch):

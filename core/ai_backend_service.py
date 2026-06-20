@@ -65,6 +65,92 @@ def _sync_backend_env(backend: str) -> None:
     os.environ["LLM_BACKEND"] = backend
 
 
+def _normalize_model_name(value: str | None) -> str:
+    model = str(value or "").strip().lower()
+    if not model:
+        return ""
+    return model.split(":", 1)[0]
+
+
+def _extract_model_names(payload: object) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return []
+
+    names: list[str] = []
+    for entry in models:
+        if isinstance(entry, dict):
+            name = str(entry.get("name", "")).strip()
+        else:
+            name = str(entry or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _find_matching_model(configured_model: str, available_models: list[str]) -> str | None:
+    configured_full = str(configured_model or "").strip().lower()
+    configured_normalized = _normalize_model_name(configured_model)
+    for available_model in available_models:
+        available_full = str(available_model or "").strip().lower()
+        available_normalized = _normalize_model_name(available_model)
+        if configured_full and available_full == configured_full:
+            return available_model
+        if configured_normalized and available_normalized == configured_normalized:
+            return available_model
+    return None
+
+
+def _check_local_backend_status(
+    api_url: str,
+    configured_model: str,
+    *,
+    timeout: int = 5,
+) -> tuple[bool, str]:
+    if requests is None:
+        return False, "The 'requests' package is required for the local backend."
+
+    base_url = str(api_url or _DEFAULT_LOCAL_URL).strip().rstrip("/")
+    try:
+        response = requests.get(f"{base_url}/api/tags", timeout=timeout)
+    except requests.exceptions.Timeout:
+        return False, "Ollama status check timed out."
+    except (requests.exceptions.ConnectionError, ConnectionError):
+        return False, "Ollama is not running."
+    except Exception as exc:
+        logger.debug(f"Ollama status check failed: {exc}")
+        return False, f"Ollama status check failed: {exc}"
+
+    if response.status_code != 200:
+        return False, f"Ollama status check failed with HTTP {response.status_code}."
+
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+
+    available_models = _extract_model_names(payload)
+    if not available_models:
+        return True, "Ollama is running."
+
+    matched_model = _find_matching_model(configured_model, available_models)
+    if matched_model:
+        if str(matched_model).strip().lower() == str(configured_model or "").strip().lower():
+            return True, f"Ollama is running. Configured model '{configured_model}' is available."
+        return True, (
+            f"Ollama is running. Configured model '{configured_model}' matched available model "
+            f"'{matched_model}'."
+        )
+
+    preview = ", ".join(available_models[:5])
+    return True, (
+        f"Ollama is running, but configured model '{configured_model}' was not found. "
+        f"Available models: {preview}"
+    )
+
+
 class AIBackendService:
     """Service for AI backend management and shared chat completions."""
 
@@ -146,6 +232,7 @@ class AIBackendService:
 
     def get_backend_config(self) -> dict:
         """Get current backend configuration."""
+        self.refresh_from_env()
         config = {"active_backend": self.active_backend}
         if self.active_backend == "nvidia":
             config.update(
@@ -312,17 +399,14 @@ class AIBackendService:
                 return False, str(exc)
 
         try:
-            response = requests.get(f"{self.local_api_url}/api/tags", timeout=5)
-            if response.status_code == 200:
-                models = response.json().get("models", [])
-                model_names = [m.get("name", "unknown") for m in models[:5]]
-                if model_names:
-                    return True, f"Ollama is running. Available models: {', '.join(model_names)}"
-                return True, "Ollama is running."
-            return False, "Ollama is not running."
+            return _check_local_backend_status(
+                self.local_api_url,
+                self.local_model,
+                timeout=5,
+            )
         except Exception as exc:
             logger.debug(f"Ollama connection test failed: {exc}")
-            return False, "Ollama is not running."
+            return False, f"Ollama status check failed: {exc}"
 
     def is_local_backend(self) -> bool:
         """Check if using local backend."""
@@ -368,14 +452,6 @@ def call_ai_backend(
 
 def check_ollama_status(api_url: str | None = None, timeout: int = 5) -> tuple[bool, str]:
     """Return whether the local Ollama server is reachable."""
-    if requests is None:
-        return False, "The 'requests' package is required to check Ollama."
-
     base_url = (api_url or os.getenv("LOCAL_API_URL") or _DEFAULT_LOCAL_URL).strip().rstrip("/")
-    try:
-        response = requests.get(f"{base_url}/api/tags", timeout=timeout)
-        if response.status_code != 200:
-            return False, "Ollama is not running."
-        return True, "Ollama is running."
-    except Exception:
-        return False, "Ollama is not running."
+    configured_model = (os.getenv("LOCAL_MODEL") or _DEFAULT_LOCAL_MODEL).strip() or _DEFAULT_LOCAL_MODEL
+    return _check_local_backend_status(base_url, configured_model, timeout=timeout)
