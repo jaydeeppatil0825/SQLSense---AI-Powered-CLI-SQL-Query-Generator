@@ -3,6 +3,7 @@ from pathlib import Path
 
 from core.query_pipeline import QueryPipeline
 from core.question_service import QuestionService
+from query_pipeline.query_planner import build_query_context
 
 
 KNOWLEDGE_BASE = {
@@ -209,3 +210,49 @@ def test_primary_pipeline_modules_import_from_new_paths():
     assert hasattr(sql_question_service, "QuestionService")
     assert hasattr(sql_generator_module, "generate_sql")
     assert hasattr(sql_validator_module, "validate_sql")
+
+
+def test_query_planner_does_not_build_vector_index_when_retriever_is_missing():
+    knowledge_base = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "semantic_type": "name"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+
+    context = build_query_context(
+        "show all accounts",
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=True,
+        vector_retriever=None,
+    )
+
+    assert context["vector_used"] is False
+    assert context["vector_results"]["used_vector"] is False
+    assert context["vector_results"]["error"] == "vector retriever unavailable"
+
+
+def test_sql_generation_modules_do_not_build_vector_index_directly():
+    sql_runtime_files = [
+        Path("sql_pipeline/sql_generator.py"),
+        Path("sql_pipeline/simple_query_generator.py"),
+        Path("sql_pipeline/prompt_builder.py"),
+        Path("sql_pipeline/query_executor.py"),
+    ]
+    forbidden_tokens = [
+        "VectorIndexBuilder",
+        "VectorIndexPersistence",
+        "EmbeddingService(",
+    ]
+
+    for path in sql_runtime_files:
+        text = path.read_text(encoding="utf-8")
+        assert "kb_pipeline.vector" not in text, f"{path} should not import KB vector internals directly"
+        for token in forbidden_tokens:
+            assert token not in text, f"{path} should not construct vector infrastructure via {token}"

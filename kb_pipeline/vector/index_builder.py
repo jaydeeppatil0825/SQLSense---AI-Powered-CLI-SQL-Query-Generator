@@ -1,7 +1,5 @@
 """
-vector_store/index_builder.py
-=============================
-Build and maintain vector index from knowledge base and glossary.
+Build and maintain vector index documents from dynamic KB evidence.
 """
 
 from typing import Dict, List, Any
@@ -17,7 +15,11 @@ class VectorIndexBuilder:
     def __init__(self, embedding_service: EmbeddingService = None):
         self.embedding_service = embedding_service or EmbeddingService()
     
-    def build_from_knowledge_base(self, knowledge_base: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def build_from_knowledge_base(
+        self,
+        knowledge_base: Dict[str, Any],
+        source_context: Dict[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
         """
         Build vector documents from knowledge base.
         
@@ -28,20 +30,21 @@ class VectorIndexBuilder:
             List of document dicts with text, metadata, and embedding
         """
         documents = []
+        source_context = source_context or {}
         
         for table_name, table_data in knowledge_base.items():
             # Add table document
-            table_doc = self._create_table_document(table_name, table_data)
+            table_doc = self._create_table_document(table_name, table_data, source_context=source_context)
             documents.append(table_doc)
             
             # Add column documents
             for column in table_data.get("columns", []):
-                col_doc = self._create_column_document(table_name, column)
+                col_doc = self._create_column_document(table_name, column, source_context=source_context)
                 documents.append(col_doc)
             
             # Add relationship documents
             for relationship in table_data.get("relationships", []):
-                rel_doc = self._create_relationship_document(table_name, relationship)
+                rel_doc = self._create_relationship_document(table_name, relationship, source_context=source_context)
                 documents.append(rel_doc)
 
         self._attach_embeddings(documents)
@@ -49,7 +52,11 @@ class VectorIndexBuilder:
         logger.info(f"Built {len(documents)} vector documents from knowledge base")
         return documents
     
-    def build_from_glossary(self, glossary: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def build_from_glossary(
+        self,
+        glossary: Dict[str, Any],
+        source_context: Dict[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
         """
         Build vector documents from business glossary.
         
@@ -60,9 +67,10 @@ class VectorIndexBuilder:
             List of document dicts with text, metadata, and embedding
         """
         documents = []
+        source_context = source_context or {}
         
         for term, term_data in glossary.items():
-            glossary_doc = self._create_glossary_document(term, term_data)
+            glossary_doc = self._create_glossary_document(term, term_data, source_context=source_context)
             documents.append(glossary_doc)
 
         self._attach_embeddings(documents)
@@ -81,16 +89,45 @@ class VectorIndexBuilder:
             document["embedding"] = embedding
             document["tokenized_text"] = self.embedding_service.tokenize(document.get("text", ""))
     
-    def _create_table_document(self, table_name: str, table_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _shared_metadata(
+        self,
+        *,
+        source_type: str,
+        evidence_source: str,
+        source_context: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        source_context = source_context or {}
+        db_engine = str(source_context.get("db_engine", source_context.get("database_type", "")) or "")
+        db_name = str(source_context.get("db_name", source_context.get("database_name", "")) or "")
+        schema_hash = str(source_context.get("schema_hash", source_context.get("schema_fingerprint", "")) or "")
+        return {
+            "type": source_type,
+            "source_type": source_type,
+            "evidence_source": evidence_source,
+            "db_engine": db_engine,
+            "db_host": str(source_context.get("db_host", "") or ""),
+            "db_port": str(source_context.get("db_port", "") or ""),
+            "db_name": db_name,
+            "schema_hash": schema_hash,
+            "database_type": db_engine,
+            "database_name": db_name,
+            "schema_fingerprint": schema_hash,
+        }
+
+    def _create_table_document(
+        self,
+        table_name: str,
+        table_data: Dict[str, Any],
+        *,
+        source_context: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """Create a vector document for a table."""
-        module = table_data.get("module", "unknown")
         purpose = table_data.get("business_purpose", "")
         description = table_data.get("business_description", "")
         
         # Build searchable text
         text_parts = [
             f"Table: {table_name}",
-            f"Module: {module}",
             f"Purpose: {purpose}",
             f"Description: {description}",
         ]
@@ -103,9 +140,12 @@ class VectorIndexBuilder:
         text = " ".join(text_parts)
         
         metadata = {
-            "type": "table",
+            **self._shared_metadata(
+                source_type="table",
+                evidence_source="knowledge_base_table",
+                source_context=source_context,
+            ),
             "table_name": table_name,
-            "module": module,
             "semantic_type": "table",
             "description": description,
             "business_purpose": purpose,
@@ -119,13 +159,23 @@ class VectorIndexBuilder:
         }
         return document
     
-    def _create_column_document(self, table_name: str, column: Dict[str, Any]) -> Dict[str, Any]:
+    def _create_column_document(
+        self,
+        table_name: str,
+        column: Dict[str, Any],
+        *,
+        source_context: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """Create a vector document for a column."""
         column_name = column.get("name", "")
         column_type = column.get("type", "")
         semantic_type = column.get("semantic_type", "general")
         description = column.get("business_description", "")
         business_terms = column.get("business_terms", [])
+        unique_count = column.get("unique_count")
+        null_count = column.get("null_count")
+        min_value = column.get("min")
+        max_value = column.get("max")
         
         # Build searchable text
         text_parts = [
@@ -145,11 +195,21 @@ class VectorIndexBuilder:
         sample_values = column.get("sample_values", [])
         if sample_values:
             text_parts.append(f"Sample values: {', '.join(str(v) for v in sample_values[:5])}")
+        if unique_count not in (None, ""):
+            text_parts.append(f"Unique count: {unique_count}")
+        if null_count not in (None, ""):
+            text_parts.append(f"Null count: {null_count}")
+        if min_value not in (None, "") or max_value not in (None, ""):
+            text_parts.append(f"Range: {min_value} to {max_value}")
         
         text = " ".join(text_parts)
         
         metadata = {
-            "type": "column",
+            **self._shared_metadata(
+                source_type="column",
+                evidence_source="knowledge_base_column",
+                source_context=source_context,
+            ),
             "table_name": table_name,
             "column_name": column_name,
             "semantic_type": semantic_type,
@@ -158,6 +218,13 @@ class VectorIndexBuilder:
             "business_terms": business_terms,
             "sample_values": sample_values[:5],
             "nullable": column.get("nullable"),
+            "unique_count": unique_count,
+            "null_count": null_count,
+            "min": min_value,
+            "max": max_value,
+            "is_measure": bool(column.get("is_measure")),
+            "is_dimension": bool(column.get("is_dimension")),
+            "is_date": bool(column.get("is_date")),
         }
         
         document = {
@@ -166,7 +233,13 @@ class VectorIndexBuilder:
         }
         return document
     
-    def _create_relationship_document(self, table_name: str, relationship: Dict[str, Any]) -> Dict[str, Any]:
+    def _create_relationship_document(
+        self,
+        table_name: str,
+        relationship: Dict[str, Any],
+        *,
+        source_context: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """Create a vector document for a relationship."""
         direction = relationship.get("direction", "unknown")
         from_table = relationship.get("from_table", "")
@@ -189,7 +262,11 @@ class VectorIndexBuilder:
         text = " ".join(text_parts)
         
         metadata = {
-            "type": "relationship",
+            **self._shared_metadata(
+                source_type="relationship",
+                evidence_source=str(relationship.get("source", "relationship_context") or "relationship_context"),
+                source_context=source_context,
+            ),
             "from_table": from_table,
             "to_table": to_table,
             "from_column": from_column,
@@ -197,6 +274,8 @@ class VectorIndexBuilder:
             "direction": direction,
             "confidence": confidence,
             "description": reason,
+            "join_condition": relationship.get("join_condition"),
+            "table_name": table_name,
         }
         
         document = {
@@ -205,7 +284,13 @@ class VectorIndexBuilder:
         }
         return document
     
-    def _create_glossary_document(self, term: str, term_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _create_glossary_document(
+        self,
+        term: str,
+        term_data: Dict[str, Any],
+        *,
+        source_context: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """Create a vector document for a glossary term."""
         description = term_data.get("description", "")
         mapped_columns = term_data.get("mapped_columns", [])
@@ -234,7 +319,11 @@ class VectorIndexBuilder:
         table_names = list(set(m.get("table", "") for m in mapped_columns))
         
         metadata = {
-            "type": "glossary",
+            **self._shared_metadata(
+                source_type="glossary",
+                evidence_source=str(term_data.get("source", "business_glossary") or "business_glossary"),
+                source_context=source_context,
+            ),
             "term": term,
             "description": description,
             "table_names": table_names,

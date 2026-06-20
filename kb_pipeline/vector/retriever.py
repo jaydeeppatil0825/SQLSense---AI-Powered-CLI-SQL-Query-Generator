@@ -48,6 +48,14 @@ class VectorRetriever:
         self.documents.extend(documents)
         self._index_built = True
         logger.info(f"Added {len(documents)} documents to vector index (total: {len(self.documents)})")
+
+    def _result_entry(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = dict(result.get("metadata", {}))
+        return {
+            **metadata,
+            "score": result.get("score", 0.0),
+            "text": result.get("text", ""),
+        }
     
     def search(
         self,
@@ -211,12 +219,12 @@ class VectorRetriever:
         seen = set()
         
         for result in results:
-            metadata = result.get("metadata", {})
+            metadata = dict(result.get("metadata", {}))
             table_name = metadata.get("table_name")
             column_name = metadata.get("column_name")
             
             if table_name and column_name and (table_name, column_name) not in seen:
-                columns.append(metadata)
+                columns.append(self._result_entry(result))
                 seen.add((table_name, column_name))
         
         return columns
@@ -228,18 +236,12 @@ class VectorRetriever:
         seen = set()
 
         for result in results:
-            metadata = dict(result.get("metadata", {}))
+            metadata = self._result_entry(result)
             table_name = metadata.get("table_name")
             if not table_name or table_name in seen:
                 continue
             seen.add(table_name)
-            tables.append(
-                {
-                    **metadata,
-                    "score": result.get("score", 0.0),
-                    "text": result.get("text", ""),
-                }
-            )
+            tables.append(metadata)
 
         return tables
     
@@ -259,7 +261,7 @@ class VectorRetriever:
         seen = set()
         
         for result in results:
-            metadata = result.get("metadata", {})
+            metadata = self._result_entry(result)
             term = metadata.get("term")
             
             if term and term not in seen:
@@ -284,7 +286,7 @@ class VectorRetriever:
         seen = set()
 
         for result in results:
-            metadata = result.get("metadata", {})
+            metadata = self._result_entry(result)
             signature = (
                 metadata.get("from_table"),
                 metadata.get("from_column"),

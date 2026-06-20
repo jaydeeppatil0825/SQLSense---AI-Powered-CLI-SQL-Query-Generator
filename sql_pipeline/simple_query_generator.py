@@ -303,6 +303,8 @@ def _pick_measure_column(
         semantic_type = str(column.get("semantic_type", "")).lower()
         column_type = str(column.get("type", "")).lower()
         tokens = set(_tokenize(column_name))
+        if not _column_type_is_numeric(column_type):
+            return -1.0
         score = 0.0
 
         if semantic_type == "money":

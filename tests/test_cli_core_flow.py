@@ -166,6 +166,51 @@ def test_process_question_uses_persisted_vector_index_after_reload(monkeypatch, 
     assert captured["vector_status"]["persistence"]["source"] == "disk"
 
 
+def test_persisted_vector_status_includes_database_identity_and_schema_hash(monkeypatch, tmp_path):
+    vector_dir = tmp_path / "vector_index"
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(vector_dir))
+
+    service = AppService()
+    service.database_service.knowledge_base = KB
+    service.database_service.knowledge_base_origin = "built"
+    service.database_service.business_glossary = {
+        "order amount": {
+            "description": "Order amount",
+            "mapped_columns": [{"table": "orders", "column": "final_amount", "confidence": "high"}],
+            "example_questions": ["show order amount"],
+        }
+    }
+    service.database_service.db_config = {
+        "db_type": "mysql",
+        "host": "localhost",
+        "port": 3306,
+        "database": "runtime_dynamic_db",
+    }
+
+    service.database_service.refresh_vector_index()
+
+    vector_status = service.database_service.get_vector_status()
+    persistence = vector_status["persistence"]
+    retriever = service.database_service.get_vector_retriever()
+    table_details = retriever.get_relevant_table_details("show orders", top_k=3)
+    column_details = retriever.get_relevant_columns("order amount", top_k=3)
+
+    assert persistence["db_engine"] == "mysql"
+    assert persistence["db_host"] == "localhost"
+    assert persistence["db_port"] == "3306"
+    assert persistence["db_name"] == "runtime_dynamic_db"
+    assert persistence["schema_hash"]
+    assert persistence["vector_index_version"] == 2
+    assert table_details[0]["db_name"] == "runtime_dynamic_db"
+    assert table_details[0]["schema_hash"] == persistence["schema_hash"]
+    assert table_details[0]["source_type"] == "table"
+    assert table_details[0]["evidence_source"] == "knowledge_base_table"
+    assert column_details[0]["db_name"] == "runtime_dynamic_db"
+    assert column_details[0]["source_type"] == "column"
+    assert column_details[0]["evidence_source"] == "knowledge_base_column"
+
+
 def test_invalid_generated_sql_never_becomes_last_executable_sql(monkeypatch, tmp_path):
     service = _service_with_orders(monkeypatch, tmp_path)
     monkeypatch.setattr(

@@ -250,7 +250,7 @@ def test_vector_index_persistence_detects_schema_fingerprint_change(monkeypatch,
         source_context=_source_context(schema_fingerprint="schema-v2"),
     )
     assert inspection["fresh"] is False
-    assert inspection["stale_reason"] == "schema fingerprint changed"
+    assert inspection["stale_reason"] == "schema hash changed"
 
 
 def test_vector_index_persistence_sanitizes_runtime_metadata(monkeypatch, tmp_path):

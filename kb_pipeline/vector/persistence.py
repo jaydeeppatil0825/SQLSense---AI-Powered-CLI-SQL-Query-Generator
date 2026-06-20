@@ -22,7 +22,7 @@ from kb_pipeline.vector.embedding_service import EmbeddingService
 
 logger = get_logger()
 
-INDEX_SCHEMA_VERSION = 1
+INDEX_SCHEMA_VERSION = 2
 
 
 class VectorIndexPersistence:
@@ -44,13 +44,22 @@ class VectorIndexPersistence:
         """Build a deterministic signature for the current KB, glossary, and embedding backend."""
         embedding_status = embedding_service.get_status()
         source_context = source_context or {}
+        db_engine = str(source_context.get("db_engine", source_context.get("database_type", "")) or "")
+        db_name = str(source_context.get("db_name", source_context.get("database_name", "")) or "")
+        schema_hash = str(source_context.get("schema_hash", source_context.get("schema_fingerprint", "")) or "")
         return {
             "schema_version": INDEX_SCHEMA_VERSION,
+            "vector_index_version": INDEX_SCHEMA_VERSION,
             "knowledge_base_hash": self._content_hash(knowledge_base or {}),
             "glossary_hash": self._content_hash(glossary or {}),
-            "database_name": str(source_context.get("database_name", "") or ""),
-            "database_type": str(source_context.get("database_type", "") or ""),
-            "schema_fingerprint": str(source_context.get("schema_fingerprint", "") or ""),
+            "db_engine": db_engine,
+            "db_host": str(source_context.get("db_host", "") or ""),
+            "db_port": str(source_context.get("db_port", "") or ""),
+            "db_name": db_name,
+            "schema_hash": schema_hash,
+            "database_name": db_name,
+            "database_type": db_engine,
+            "schema_fingerprint": schema_hash,
             "embedding": {
                 "backend": embedding_status.get("backend"),
                 "model": embedding_status.get("model"),
@@ -99,21 +108,25 @@ class VectorIndexPersistence:
         manifest_embedding = manifest.get("embedding", {})
         details["document_count"] = int(manifest.get("document_count", 0) or 0)
 
-        if int(manifest.get("schema_version", 0) or 0) != INDEX_SCHEMA_VERSION:
+        manifest_version = int(
+            manifest.get("vector_index_version", manifest.get("schema_version", 0)) or 0
+        )
+        if manifest_version != INDEX_SCHEMA_VERSION:
             details["stale_reason"] = "index schema version changed"
             return details
 
-        expected_database_name = str(signature.get("database_name", "") or "")
-        manifest_database_name = str(manifest.get("database_name", "") or "")
-        if expected_database_name and manifest_database_name and manifest_database_name != expected_database_name:
-            details["stale_reason"] = "database name changed"
-            return details
-
-        expected_schema_fingerprint = str(signature.get("schema_fingerprint", "") or "")
-        manifest_schema_fingerprint = str(manifest.get("schema_fingerprint", "") or "")
-        if expected_schema_fingerprint and manifest_schema_fingerprint and manifest_schema_fingerprint != expected_schema_fingerprint:
-            details["stale_reason"] = "schema fingerprint changed"
-            return details
+        for key, alias, reason in (
+            ("db_engine", "database_type", "database engine changed"),
+            ("db_host", "", "database host changed"),
+            ("db_port", "", "database port changed"),
+            ("db_name", "database_name", "database name changed"),
+            ("schema_hash", "schema_fingerprint", "schema hash changed"),
+        ):
+            expected_value = str(signature.get(key, "") or "")
+            manifest_value = str(manifest.get(key, manifest.get(alias, "")) or "")
+            if expected_value and manifest_value and manifest_value != expected_value:
+                details["stale_reason"] = reason
+                return details
 
         if manifest.get("knowledge_base_hash") != signature["knowledge_base_hash"]:
             details["stale_reason"] = "knowledge base hash changed"
@@ -221,9 +234,11 @@ class VectorIndexPersistence:
 
         manifest = {
             **signature,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "built_at": datetime.now(timezone.utc).isoformat(),
             "document_count": len(documents),
+            "storage_backend": "json_files",
         }
 
         serializable_documents = []
@@ -270,9 +285,15 @@ class VectorIndexPersistence:
             "persistence_error": "",
             "knowledge_base_hash": signature.get("knowledge_base_hash"),
             "glossary_hash": signature.get("glossary_hash"),
+            "db_engine": signature.get("db_engine"),
+            "db_host": signature.get("db_host"),
+            "db_port": signature.get("db_port"),
+            "db_name": signature.get("db_name"),
+            "schema_hash": signature.get("schema_hash"),
             "database_name": signature.get("database_name"),
             "database_type": signature.get("database_type"),
             "schema_fingerprint": signature.get("schema_fingerprint"),
+            "vector_index_version": signature.get("vector_index_version"),
             "embedding_backend": embedding_signature.get("backend"),
             "embedding_model": embedding_signature.get("model"),
             "embedding_dimension": embedding_signature.get("dimension"),

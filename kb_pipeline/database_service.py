@@ -94,9 +94,17 @@ class DatabaseService:
         """Return the active connected database identity for KB/vector checks."""
         database_type = str(self.db_config.get("db_type", "") or "")
         database_name = str(self.db_config.get("database", "") or "")
+        database_host = str(self.db_config.get("host", "") or "")
+        database_port = self.db_config.get("port", "")
         if database_type == "sqlite" and not database_name:
             database_name = str(self.db_config.get("sqlite_path", "") or "")
+            database_host = ""
+            database_port = ""
         return {
+            "db_engine": database_type,
+            "db_host": database_host,
+            "db_port": str(database_port or ""),
+            "db_name": database_name,
             "database_type": database_type,
             "database_name": database_name,
         }
@@ -125,12 +133,22 @@ class DatabaseService:
         metadata_name = str(metadata.get("database_name", "") or "")
         expected_type = str(expected.get("database_type", "") or "")
         expected_name = str(expected.get("database_name", "") or "")
+        expected_host = str(expected.get("db_host", "") or "")
+        expected_port = str(expected.get("db_port", "") or "")
+        metadata_host = str(metadata.get("db_host", "") or "")
+        metadata_port = str(metadata.get("db_port", "") or "")
 
         if not expected_type or not expected_name:
             return True
         if not metadata_type or not metadata_name:
             return False
-        return metadata_type == expected_type and metadata_name == expected_name
+        if metadata_type != expected_type or metadata_name != expected_name:
+            return False
+        if expected_host and metadata_host and metadata_host != expected_host:
+            return False
+        if expected_port and metadata_port and metadata_port != expected_port:
+            return False
+        return True
 
     def _is_missing_database_error(self, error: Exception) -> bool:
         message = str(error or "").lower()
@@ -444,6 +462,7 @@ class DatabaseService:
             }
             self.knowledge_base_metadata = {
                 **self._connected_database_identity(),
+                "schema_hash": self.vector_index_storage._content_hash(schema_payload),
                 "schema_fingerprint": self.vector_index_storage._content_hash(schema_payload),
             }
             self._save_knowledge_base_metadata_file(self.knowledge_base_metadata)
@@ -554,6 +573,7 @@ class DatabaseService:
         self.knowledge_base_origin = "built"
         self.knowledge_base_metadata = {
             **self._connected_database_identity(),
+            "schema_hash": self.vector_index_storage._content_hash(self._schema_fingerprint_payload()),
             "schema_fingerprint": self.vector_index_storage._content_hash(self._schema_fingerprint_payload()),
         }
         try:
@@ -703,6 +723,12 @@ class DatabaseService:
             "database_name": "",
             "database_type": "",
             "schema_fingerprint": "",
+            "db_engine": "",
+            "db_host": "",
+            "db_port": "",
+            "db_name": "",
+            "schema_hash": "",
+            "vector_index_version": "",
             "embedding_backend": self.embedding_service.get_backend_name(),
             "embedding_model": self.embedding_service.get_model_name(),
             "embedding_dimension": self.embedding_service.get_dimension(),
@@ -730,27 +756,39 @@ class DatabaseService:
         return payload
 
     def _vector_source_context(self) -> Dict[str, Any]:
-        database_type = str(self.db_config.get("db_type", "") or "")
-        database_name = str(self.db_config.get("database", "") or "")
-        if database_type == "sqlite" and not database_name:
-            database_name = str(self.db_config.get("sqlite_path", "") or "")
-        if not database_type:
-            database_type = str(self.knowledge_base_metadata.get("database_type", "") or "")
-        if not database_name:
-            database_name = str(self.knowledge_base_metadata.get("database_name", "") or "")
+        database_identity = self._connected_database_identity()
+        if not database_identity.get("db_engine"):
+            database_identity = {
+                **database_identity,
+                "db_engine": str(self.knowledge_base_metadata.get("db_engine", self.knowledge_base_metadata.get("database_type", "")) or ""),
+                "db_host": str(self.knowledge_base_metadata.get("db_host", "") or ""),
+                "db_port": str(self.knowledge_base_metadata.get("db_port", "") or ""),
+                "db_name": str(self.knowledge_base_metadata.get("db_name", self.knowledge_base_metadata.get("database_name", "")) or ""),
+            }
 
-        schema_fingerprint = self.vector_index_storage._content_hash(self._schema_fingerprint_payload())
+        schema_hash = self.vector_index_storage._content_hash(self._schema_fingerprint_payload())
         return {
-            "database_type": database_type,
-            "database_name": database_name,
-            "schema_fingerprint": schema_fingerprint,
+            **database_identity,
+            "database_type": database_identity.get("db_engine", ""),
+            "database_name": database_identity.get("db_name", ""),
+            "schema_hash": schema_hash,
+            "schema_fingerprint": schema_hash,
         }
 
     def _build_vector_documents(self) -> list[dict[str, Any]]:
         """Build vector documents from the active KB and glossary."""
-        documents = self.vector_index_builder.build_from_knowledge_base(self.knowledge_base or {})
+        source_context = self._vector_source_context()
+        documents = self.vector_index_builder.build_from_knowledge_base(
+            self.knowledge_base or {},
+            source_context=source_context,
+        )
         if self.business_glossary:
-            documents.extend(self.vector_index_builder.build_from_glossary(self.business_glossary))
+            documents.extend(
+                self.vector_index_builder.build_from_glossary(
+                    self.business_glossary,
+                    source_context=source_context,
+                )
+            )
         return documents
 
     def _load_persisted_vector_index_only(self) -> None:
@@ -803,7 +841,14 @@ class DatabaseService:
         if (
             self.engine is not None
             and self.knowledge_base_origin != "built"
-            and rebuild_reason in {"database name changed", "schema fingerprint changed"}
+            and rebuild_reason in {
+                "database name changed",
+                "database engine changed",
+                "database host changed",
+                "database port changed",
+                "schema hash changed",
+                "schema fingerprint changed",
+            }
         ):
             self.vector_retriever = None
             self.vector_index_status = "stale"

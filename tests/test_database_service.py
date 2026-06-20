@@ -442,7 +442,7 @@ def test_database_service_rebuilds_persisted_index_when_schema_changes(monkeypat
     second_status = second_service.get_vector_status()
     assert second_status["index_status"] == "ready"
     assert second_status["persistence"]["source"] == "rebuilt"
-    assert "schema fingerprint changed" in second_status["persistence"]["stale_reason"]
+    assert "schema hash changed" in second_status["persistence"]["stale_reason"]
 
 
 def test_database_service_marks_loaded_index_stale_when_connected_database_changes(monkeypatch, tmp_path):

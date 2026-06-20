@@ -10,7 +10,7 @@ from typing import Any
 import re
 
 from kb_pipeline.schema_facts import enrich_knowledge_base_schema_facts
-from kb_pipeline.vector import VectorIndexBuilder, VectorRetriever, EmbeddingService
+from kb_pipeline.vector import VectorRetriever
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -410,12 +410,18 @@ def _retrieve_with_vector(
     try:
         active_retriever = retriever
         if active_retriever is None:
-            embedding_service = EmbeddingService()
-            index_builder = VectorIndexBuilder(embedding_service)
-            active_retriever = VectorRetriever(embedding_service)
-            active_retriever.add_documents(index_builder.build_from_knowledge_base(knowledge_base))
-            if business_glossary:
-                active_retriever.add_documents(index_builder.build_from_glossary(business_glossary))
+            return {
+                "table_names": [],
+                "tables": [],
+                "columns": [],
+                "glossary_terms": [],
+                "relationships": [],
+                "semantic_descriptions": [],
+                "profiling_hints": [],
+                "retriever_status": {},
+                "used_vector": False,
+                "error": "vector retriever unavailable",
+            }
 
         return {
             "table_names": active_retriever.get_relevant_tables(question, top_k=5),

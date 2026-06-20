@@ -1,5 +1,10 @@
 {
-    "database_type": "mysql",
-    "database_name": "sqlsense_small_test",
-    "schema_fingerprint": "320ac217ae8e76f203480ed4ff89f5a11719fe526f59f24f3edc9c0939939945"
+    "db_engine": "sqlite",
+    "db_host": "",
+    "db_port": "",
+    "db_name": ":memory:",
+    "database_type": "sqlite",
+    "database_name": ":memory:",
+    "schema_hash": "10a3b1de425f9167030fc9531cc90972446130bb1542e4c93102aa19d270632a",
+    "schema_fingerprint": "10a3b1de425f9167030fc9531cc90972446130bb1542e4c93102aa19d270632a"
 }
