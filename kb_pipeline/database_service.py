@@ -18,6 +18,7 @@ from kb_pipeline.connection import connect_engine, get_engine, list_accessible_d
 from core.ai_backend_service import check_ollama_status, get_ai_backend_service
 from kb_pipeline.knowledge_base_builder import build_knowledge_base
 from kb_pipeline.schema_facts import enrich_knowledge_base_schema_facts, summarize_knowledge_base
+from kb_pipeline.schema_facts import column_business_terms
 from kb_pipeline.business_glossary import load_business_glossary, generate_business_glossary, save_business_glossary
 from kb_pipeline.ai_semantic_enricher import (
     enrich_knowledge_base_with_ai,
@@ -215,7 +216,7 @@ class DatabaseService:
         except Exception:
             try:
                 has_ai_terms = any(
-                    column.get("business_terms")
+                    column_business_terms(column)
                     for table_data in (self.knowledge_base or {}).values()
                     for column in table_data.get("columns", [])
                 )
@@ -650,7 +651,7 @@ class DatabaseService:
         try:
             if self.knowledge_base:
                 has_ai_terms = any(
-                    column.get("business_terms")
+                    column_business_terms(column)
                     for table_data in self.knowledge_base.values()
                     for column in table_data.get("columns", [])
                 )

@@ -209,7 +209,7 @@ def _format_phrase_list(values: list[str]) -> str:
 def _collect_table_sample_texts(table_data: dict) -> set[str]:
     sample_texts: set[str] = set()
     for column in table_data.get("columns", []):
-        for value in column.get("sample_values", []) or []:
+        for value in column_sample_values(column):
             cleaned = _normalize_free_text(value)
             if cleaned:
                 sample_texts.add(cleaned)
@@ -420,7 +420,7 @@ def _sanitize_column_description(text: str, column: dict, semantic_type: str) ->
     cleaned = sanitize_short_text(text, fallback=fallback)
     sample_texts = {
         _normalize_free_text(value)
-        for value in (column.get("sample_values", []) or [])
+        for value in column_sample_values(column)
         if _normalize_free_text(value)
     }
     if _looks_like_literal_value(cleaned) or _looks_like_sample_echo(cleaned, sample_texts):
@@ -437,7 +437,7 @@ def _sanitize_business_terms(terms: list[str], column: dict, semantic_type: str)
     context_tokens = _column_context_tokens(column, semantic_type)
     sample_texts = {
         _normalize_free_text(value)
-        for value in (column.get("sample_values", []) or [])
+        for value in column_sample_values(column)
         if _normalize_free_text(value)
     }
     clean_terms: list[str] = []
@@ -465,7 +465,7 @@ def _sanitize_reason(text: str, fallback: str, column: dict) -> str:
     cleaned = sanitize_short_text(text, fallback=fallback)
     sample_texts = {
         _normalize_free_text(value)
-        for value in (column.get("sample_values", []) or [])
+        for value in column_sample_values(column)
         if _normalize_free_text(value)
     }
     if _looks_like_literal_value(cleaned) or _looks_like_sample_echo(cleaned, sample_texts):

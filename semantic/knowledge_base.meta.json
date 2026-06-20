@@ -1,10 +1,10 @@
 {
-    "db_engine": "sqlite",
-    "db_host": "",
-    "db_port": "",
-    "db_name": ":memory:",
-    "database_type": "sqlite",
-    "database_name": ":memory:",
-    "schema_hash": "10a3b1de425f9167030fc9531cc90972446130bb1542e4c93102aa19d270632a",
-    "schema_fingerprint": "10a3b1de425f9167030fc9531cc90972446130bb1542e4c93102aa19d270632a"
+    "db_engine": "mysql",
+    "db_host": "localhost",
+    "db_port": "3306",
+    "db_name": "sqlsense_small_test",
+    "database_type": "mysql",
+    "database_name": "sqlsense_small_test",
+    "schema_hash": "b0455769550b1f7eb1fac683bb33f7d9982482621bf47c18872b297138f5fc3a",
+    "schema_fingerprint": "b0455769550b1f7eb1fac683bb33f7d9982482621bf47c18872b297138f5fc3a"
 }

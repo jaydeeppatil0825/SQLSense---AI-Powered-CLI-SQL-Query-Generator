@@ -10,7 +10,7 @@ core `semantic_type`.
 
 from __future__ import annotations
 
-from kb_pipeline.schema_facts import CORE_SEMANTIC_TYPES, classify_semantic_type
+from kb_pipeline.schema_facts import CORE_SEMANTIC_TYPES, apply_column_contract, classify_semantic_type
 
 _ALLOWED_SEMANTIC_TYPES = set(CORE_SEMANTIC_TYPES)
 
@@ -67,6 +67,10 @@ def add_semantic_mapping(schema_data: dict) -> dict:
                 semantic_type = existing_semantic_type if existing_semantic_type in _ALLOWED_SEMANTIC_TYPES else structural_semantic_type
 
             column["semantic_type"] = semantic_type
-            column["is_date"] = bool(semantic_type == "date")
+            apply_column_contract(
+                column,
+                primary_keys={str(value) for value in primary_keys if str(value)},
+                foreign_keys={str(value) for value in foreign_keys if str(value)},
+            )
 
     return schema_data

@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from kb_pipeline.schema_facts import resolved_semantic_type
+from kb_pipeline.schema_facts import column_sample_values, resolved_semantic_type
 
 _COMPLEX_KEYWORDS = {
     " group ",
@@ -245,7 +245,7 @@ def _status_value_for_question(question: str, column: dict[str, Any]) -> str | N
     normalized_question = _normalize(question)
     question_terms = set(_tokenize(question))
 
-    for raw_value in (column.get("sample_values") or []):
+    for raw_value in column_sample_values(column):
         if raw_value is None:
             continue
         sample_value = str(raw_value)
@@ -397,7 +397,7 @@ def _selected_column_names(
 
 def _pick_quantity_column(table_data: dict[str, Any]) -> str | None:
     for column in _table_columns(table_data):
-        if str(column.get("semantic_type", "")).lower() == "quantity":
+        if resolved_semantic_type(column) == "quantity":
             return str(column.get("name", ""))
     for column in _table_columns(table_data):
         name = _normalize_identifier(column.get("name", ""))
@@ -448,7 +448,7 @@ def _resolve_status_value(
     filter_data: dict[str, Any],
     column: dict[str, Any],
 ) -> str | None:
-    sample_values = [str(value) for value in (column.get("sample_values") or []) if value is not None]
+    sample_values = [str(value) for value in column_sample_values(column) if value is not None]
     sample_lookup = {value.lower(): value for value in sample_values}
 
     explicit_value = str(filter_data.get("value") or "").strip()
@@ -473,7 +473,7 @@ def _resolve_filter_value(
     if explicit_value:
         return explicit_value
 
-    for raw_value in (column.get("sample_values") or []):
+    for raw_value in column_sample_values(column):
         if raw_value is None:
             continue
         sample_value = str(raw_value)

@@ -100,17 +100,28 @@ def resolved_semantic_type(column: dict[str, Any], fallback: str = "unknown") ->
         if ai_semantic_type:
             return ai_semantic_type
 
-    metric_type = str((column or {}).get("metric_type", "")).strip().lower()
+    ai_metadata = column_ai_metadata(column)
+    metric_type = str(ai_metadata.get("ai_semantic_type", "")).strip().lower()
+    if metric_type not in _MEASURE_SEMANTIC_TYPES:
+        metric_type = str((column or {}).get("metric_type", "")).strip().lower()
     if metric_type in _MEASURE_SEMANTIC_TYPES:
         return metric_type
 
-    if bool((column or {}).get("is_date")):
+    structural_facts = (column or {}).get("structural_facts")
+    if not isinstance(structural_facts, dict):
+        structural_facts = {}
+    if bool(structural_facts.get("is_date", bool((column or {}).get("is_date")))):
         return "date"
 
-    if bool((column or {}).get("is_dimension")) and raw_semantic_type in {"text_candidate", "category_candidate"}:
+    planner_roles = (column or {}).get("planner_roles")
+    if not isinstance(planner_roles, dict):
+        planner_roles = {}
+    is_dimension = bool(planner_roles.get("dimension_candidate", bool((column or {}).get("is_dimension"))))
+    if is_dimension and raw_semantic_type in {"text_candidate", "category_candidate"}:
         return "text"
 
-    if bool((column or {}).get("is_measure")) and raw_semantic_type == "numeric_candidate":
+    is_measure = bool(planner_roles.get("measure_candidate", bool((column or {}).get("is_measure"))))
+    if is_measure and raw_semantic_type == "numeric_candidate":
         return "numeric_candidate"
 
     if raw_semantic_type in CORE_SEMANTIC_TYPES:
@@ -171,6 +182,7 @@ def column_profile_facts(column: dict[str, Any]) -> dict[str, Any]:
         sample_values = [sample_values]
     return {
         "null_count": int(raw.get("null_count", (column or {}).get("null_count", 0)) or 0),
+        "non_null_count": int(raw.get("non_null_count", (column or {}).get("non_null_count", 0)) or 0),
         "unique_count": int(raw.get("unique_count", (column or {}).get("unique_count", 0)) or 0),
         "sample_values": list(sample_values),
         "min": raw.get("min", (column or {}).get("min", (column or {}).get("min_value"))),
@@ -242,6 +254,18 @@ def column_planner_roles(column: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def column_is_measure(column: dict[str, Any]) -> bool:
+    return bool(column_planner_roles(column).get("measure_candidate"))
+
+
+def column_is_dimension(column: dict[str, Any]) -> bool:
+    return bool(column_planner_roles(column).get("dimension_candidate"))
+
+
+def column_is_date(column: dict[str, Any]) -> bool:
+    return bool(column_structural_facts(column).get("is_date"))
+
+
 def column_formula_evidence(column: dict[str, Any]) -> list[dict[str, Any]]:
     raw = (column or {}).get("formula_evidence")
     if isinstance(raw, list):
@@ -267,19 +291,30 @@ def apply_column_contract(
     column["ai_metadata"] = ai_metadata
     column["planner_roles"] = planner_roles
     column["formula_evidence"] = formula_evidence
-    column["is_primary_key"] = structural_facts["is_primary_key"]
-    column["is_foreign_key"] = structural_facts["is_foreign_key"]
-    column["is_date"] = structural_facts["is_date"]
-    column["sample_values"] = list(profile_facts["sample_values"])
-    column["null_count"] = profile_facts["null_count"]
-    column["unique_count"] = profile_facts["unique_count"]
-    column["min"] = profile_facts["min"]
-    column["max"] = profile_facts["max"]
-    column["min_value"] = profile_facts["min"]
-    column["max_value"] = profile_facts["max"]
-    column["business_description"] = ai_metadata["business_description"]
-    column["business_terms"] = list(ai_metadata["business_terms"])
-    column["confidence"] = max(float(column.get("confidence", 0.0) or 0.0), float(ai_metadata["confidence"] or 0.0))
+    for legacy_key in (
+        "is_primary_key",
+        "is_foreign_key",
+        "is_id",
+        "is_date",
+        "is_boolean",
+        "sample_values",
+        "null_count",
+        "non_null_count",
+        "unique_count",
+        "min",
+        "max",
+        "min_value",
+        "max_value",
+        "business_description",
+        "business_terms",
+        "confidence",
+        "reason",
+        "ai_semantic_type",
+        "metric_type",
+        "is_measure",
+        "is_dimension",
+    ):
+        column.pop(legacy_key, None)
     return column
 
 
@@ -618,6 +653,9 @@ __all__ = [
     "classify_semantic_type",
     "column_core_semantic_type",
     "column_formula_evidence",
+    "column_is_date",
+    "column_is_dimension",
+    "column_is_measure",
     "column_planner_roles",
     "column_profile_facts",
     "column_sample_values",

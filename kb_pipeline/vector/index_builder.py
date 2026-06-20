@@ -6,6 +6,9 @@ from typing import Dict, List, Any
 from utils.logger import get_logger
 from kb_pipeline.schema_facts import (
     column_ai_metadata,
+    column_is_date,
+    column_is_dimension,
+    column_is_measure,
     column_profile_facts,
     resolved_semantic_type,
 )
@@ -231,9 +234,9 @@ class VectorIndexBuilder:
             "null_count": null_count,
             "min": min_value,
             "max": max_value,
-            "is_measure": bool(column.get("is_measure")),
-            "is_dimension": bool(column.get("is_dimension")),
-            "is_date": bool(column.get("is_date")),
+            "is_measure": column_is_measure(column),
+            "is_dimension": column_is_dimension(column),
+            "is_date": column_is_date(column),
         }
         
         document = {

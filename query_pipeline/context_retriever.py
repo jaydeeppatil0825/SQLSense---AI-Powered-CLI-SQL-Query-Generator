@@ -16,6 +16,9 @@ from typing import Any, Dict, Optional
 from kb_pipeline.schema_facts import (
     column_business_description,
     column_business_terms,
+    column_is_date,
+    column_is_dimension,
+    column_is_measure,
     column_sample_values,
     resolved_semantic_type,
 )
@@ -232,9 +235,9 @@ def _match_columns(query_terms: list[str], knowledge_base: Dict[str, Any]) -> li
                     "column": column_name,
                     "semantic_type": resolved_semantic_type(column),
                     "core_semantic_type": str(column.get("semantic_type", "")).strip().lower(),
-                    "is_measure": bool(column.get("is_measure")),
-                    "is_dimension": bool(column.get("is_dimension")),
-                    "is_date": bool(column.get("is_date")),
+                    "is_measure": column_is_measure(column),
+                    "is_dimension": column_is_dimension(column),
+                    "is_date": column_is_date(column),
                     "score": round(best_score, 4),
                     "matched_terms": _unique(matched_terms),
                     "source": "kb_identifier",

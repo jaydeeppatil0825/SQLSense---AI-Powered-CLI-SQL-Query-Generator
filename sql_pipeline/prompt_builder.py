@@ -20,6 +20,7 @@ import re
 from typing import Any
 
 from kb_pipeline.business_glossary import load_business_glossary
+from kb_pipeline.schema_facts import column_profile_facts
 
 
 _QUERY_RULES = """
@@ -181,14 +182,15 @@ def _build_schema_section(knowledge_base: dict) -> list[str]:
             col_type = col.get("type", "")
             nullable = "nullable" if col.get("nullable") else "not null"
             sem_type = col.get("semantic_type", "general")
+            profile_facts = column_profile_facts(col)
             lines.append(
                 f"  COLUMN: {name}  type={col_type}  {nullable}  semantic_type={sem_type}"
             )
-            samples = [str(v) for v in (col.get("sample_values") or [])[:5] if v is not None]
+            samples = [str(v) for v in (profile_facts.get("sample_values") or [])[:5] if v is not None]
             if samples:
                 lines.append(f"    sample_values: {', '.join(samples)}")
-            if "min_value" in col and col["min_value"] is not None:
-                lines.append(f"    range: {col['min_value']} .. {col.get('max_value')}")
+            if profile_facts.get("min") is not None:
+                lines.append(f"    range: {profile_facts.get('min')} .. {profile_facts.get('max')}")
 
         foreign_keys = table_data.get("foreign_keys", [])
         if foreign_keys:
