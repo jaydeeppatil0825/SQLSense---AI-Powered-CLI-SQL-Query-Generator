@@ -61,7 +61,7 @@ Current files:
 - `kb_pipeline/semantic_mapper.py`
 - `kb_pipeline/business_glossary.py`
 - `kb_pipeline/relationship_graph.py`
-- `semantic/erp_metadata.py`
+- `kb_pipeline/schema_facts.py`
 - `kb_pipeline/vector/embedding_service.py`
 - `kb_pipeline/vector/index_builder.py`
 - `kb_pipeline/vector/retriever.py`
@@ -77,6 +77,7 @@ Compatibility wrappers kept at old paths:
 - `semantic/semantic_mapper.py`
 - `semantic/business_glossary.py`
 - `semantic/relationship_graph.py`
+- `semantic/erp_metadata.py`
 - `vector_store/embedding_service.py`
 - `vector_store/index_builder.py`
 - `vector_store/retriever.py`
@@ -239,6 +240,8 @@ consume `possible_join_paths` during SQL generation and retry/repair.
 
 ## Neutral Naming Notes
 
+- `kb_pipeline/schema_facts.py` is the primary runtime implementation for
+  schema-fact enrichment and neutral metadata helpers.
 - `semantic/erp_metadata.py` is still the file path for backward compatibility.
 - Active runtime enrichment is schema-fact-only.
 - Use `enrich_knowledge_base_schema_facts(...)` as the neutral runtime API.

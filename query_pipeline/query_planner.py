@@ -9,7 +9,7 @@ from datetime import date
 from typing import Any
 import re
 
-from semantic.erp_metadata import enrich_knowledge_base_schema_facts
+from kb_pipeline.schema_facts import enrich_knowledge_base_schema_facts
 from kb_pipeline.vector import VectorIndexBuilder, VectorRetriever, EmbeddingService
 from utils.logger import get_logger
 

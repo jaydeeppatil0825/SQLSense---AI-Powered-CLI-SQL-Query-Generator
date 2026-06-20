@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from kb_pipeline.data_profiler import profile_database_data
 from kb_pipeline.schema_reader import read_database_schema
-from semantic.erp_metadata import enrich_knowledge_base_schema_facts
+from kb_pipeline.schema_facts import enrich_knowledge_base_schema_facts
 from kb_pipeline.semantic_mapper import add_semantic_mapping
 
 

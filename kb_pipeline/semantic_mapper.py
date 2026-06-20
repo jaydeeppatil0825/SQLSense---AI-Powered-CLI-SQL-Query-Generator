@@ -23,7 +23,7 @@ Generic semantic categories:
 
 from __future__ import annotations
 
-from semantic.erp_metadata import classify_semantic_type
+from kb_pipeline.schema_facts import classify_semantic_type
 
 _ALLOWED_SEMANTIC_TYPES = {
     "money",

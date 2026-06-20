@@ -28,7 +28,7 @@ def build_relationship_graph(schema_data: dict[str, Any]) -> dict[str, dict[str,
     Returns:
         Dictionary mapping table names to their adjacency lists
     """
-    from semantic.erp_metadata import detect_relationships
+    from kb_pipeline.schema_facts import detect_relationships
     
     graph: dict[str, dict[str, Any]] = {}
     relationships = detect_relationships(schema_data)

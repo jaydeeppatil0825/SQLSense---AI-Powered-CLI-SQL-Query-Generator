@@ -17,7 +17,7 @@ from sqlalchemy.engine import Engine
 from kb_pipeline.connection import connect_engine, get_engine, list_accessible_databases, SUPPORTED_DB_TYPES
 from core.ai_backend_service import check_ollama_status, get_ai_backend_service
 from kb_pipeline.knowledge_base_builder import build_knowledge_base
-from semantic.erp_metadata import enrich_knowledge_base_schema_facts, summarize_knowledge_base
+from kb_pipeline.schema_facts import enrich_knowledge_base_schema_facts, summarize_knowledge_base
 from kb_pipeline.business_glossary import load_business_glossary, generate_business_glossary, save_business_glossary
 from kb_pipeline.ai_semantic_enricher import (
     enrich_knowledge_base_with_ai,

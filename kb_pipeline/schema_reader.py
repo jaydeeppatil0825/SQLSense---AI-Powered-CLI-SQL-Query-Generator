@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy import MetaData
 
-from semantic.erp_metadata import detect_relationships
+from kb_pipeline.schema_facts import detect_relationships
 
 
 def _relationship_exists(

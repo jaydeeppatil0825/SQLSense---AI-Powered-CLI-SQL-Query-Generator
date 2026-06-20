@@ -15,7 +15,11 @@ import json
 import re
 
 from core.ai_backend_service import call_ai_backend as _call_ai_backend
-from semantic.erp_metadata import build_rule_based_business_purpose, sanitize_business_purpose, sanitize_short_text
+from kb_pipeline.schema_facts import (
+    build_rule_based_business_purpose,
+    sanitize_business_purpose,
+    sanitize_short_text,
+)
 from utils.logger import get_logger
 
 logger = get_logger()
