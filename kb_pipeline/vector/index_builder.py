@@ -4,6 +4,11 @@ Build and maintain vector index documents from dynamic KB evidence.
 
 from typing import Dict, List, Any
 from utils.logger import get_logger
+from kb_pipeline.schema_facts import (
+    column_ai_metadata,
+    column_profile_facts,
+    resolved_semantic_type,
+)
 from kb_pipeline.vector.embedding_service import EmbeddingService
 
 logger = get_logger()
@@ -169,13 +174,16 @@ class VectorIndexBuilder:
         """Create a vector document for a column."""
         column_name = column.get("name", "")
         column_type = column.get("type", "")
-        semantic_type = column.get("semantic_type", "general")
-        description = column.get("business_description", "")
-        business_terms = column.get("business_terms", [])
-        unique_count = column.get("unique_count")
-        null_count = column.get("null_count")
-        min_value = column.get("min")
-        max_value = column.get("max")
+        semantic_type = resolved_semantic_type(column)
+        core_semantic_type = str(column.get("semantic_type", "unknown")).strip().lower() or "unknown"
+        ai_metadata = column_ai_metadata(column)
+        profile_facts = column_profile_facts(column)
+        description = ai_metadata.get("business_description", "")
+        business_terms = ai_metadata.get("business_terms", [])
+        unique_count = profile_facts.get("unique_count")
+        null_count = profile_facts.get("null_count")
+        min_value = profile_facts.get("min")
+        max_value = profile_facts.get("max")
         
         # Build searchable text
         text_parts = [
@@ -192,7 +200,7 @@ class VectorIndexBuilder:
             text_parts.append(f"Business terms: {', '.join(business_terms)}")
         
         # Add sample values for context
-        sample_values = column.get("sample_values", [])
+        sample_values = profile_facts.get("sample_values", [])
         if sample_values:
             text_parts.append(f"Sample values: {', '.join(str(v) for v in sample_values[:5])}")
         if unique_count not in (None, ""):
@@ -213,6 +221,7 @@ class VectorIndexBuilder:
             "table_name": table_name,
             "column_name": column_name,
             "semantic_type": semantic_type,
+            "core_semantic_type": core_semantic_type,
             "column_type": column_type,
             "description": description,
             "business_terms": business_terms,

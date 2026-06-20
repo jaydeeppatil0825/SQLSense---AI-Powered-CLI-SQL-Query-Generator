@@ -9,7 +9,13 @@ from datetime import date
 from typing import Any
 import re
 
-from kb_pipeline.schema_facts import enrich_knowledge_base_schema_facts
+from kb_pipeline.schema_facts import (
+    column_business_description,
+    column_business_terms,
+    column_sample_values,
+    enrich_knowledge_base_schema_facts,
+    resolved_semantic_type,
+)
 from kb_pipeline.vector import VectorRetriever
 from utils.logger import get_logger
 
@@ -195,7 +201,7 @@ def _detect_date_range(question: str) -> dict | None:
 
 def _normalized_sample_values(column: dict[str, Any]) -> list[tuple[str, str]]:
     values = []
-    for raw_value in column.get("sample_values", []) or []:
+    for raw_value in column_sample_values(column):
         if raw_value is None:
             continue
         normalized = _normalize(str(raw_value))
@@ -205,11 +211,11 @@ def _normalized_sample_values(column: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def _column_can_hold_status(column: dict[str, Any]) -> bool:
-    return str(column.get("semantic_type", "")).lower() == "status"
+    return resolved_semantic_type(column) == "status"
 
 
 def _column_supports_sample_filter(column: dict[str, Any]) -> bool:
-    semantic_type = str(column.get("semantic_type", "")).lower()
+    semantic_type = resolved_semantic_type(column)
     if semantic_type in {"status", "name", "text", "code", "reference"}:
         return True
 
@@ -269,7 +275,7 @@ def _extract_preposition_filter_value(question: str) -> str | None:
 
 
 def _column_supports_generic_text_filter(column: dict[str, Any]) -> bool:
-    semantic_type = str(column.get("semantic_type", "")).lower()
+    semantic_type = resolved_semantic_type(column)
     if semantic_type in {"status", "date", "id", "money", "quantity", "percentage"}:
         return False
     column_type = _normalize(str(column.get("type", "")))
@@ -278,15 +284,15 @@ def _column_supports_generic_text_filter(column: dict[str, Any]) -> bool:
 
 def _column_metadata_tokens(column: dict[str, Any]) -> set[str]:
     tokens = set(_tokenize(str(column.get("name", ""))))
-    tokens.update(_tokenize(str(column.get("business_description", ""))))
-    for term in column.get("business_terms", []) or []:
+    tokens.update(_tokenize(column_business_description(column)))
+    for term in column_business_terms(column):
         tokens.update(_tokenize(str(term)))
     return tokens
 
 
 def _generic_filter_column_score(column: dict[str, Any], filter_value: str) -> float:
     score = 0.0
-    semantic_type = str(column.get("semantic_type", "")).lower()
+    semantic_type = resolved_semantic_type(column)
     if semantic_type in {"name", "text", "code", "reference"}:
         score += 1.0
 
@@ -537,7 +543,8 @@ def _question_text_for_table(table_name: str, table_data: dict) -> str:
     ]
     for column in table_data.get("columns", []):
         pieces.append(str(column.get("name", "")))
-        pieces.extend(str(term) for term in column.get("business_terms", []))
+        pieces.append(column_business_description(column))
+        pieces.extend(str(term) for term in column_business_terms(column))
     return " ".join(piece for piece in pieces if piece)
 
 
@@ -566,7 +573,7 @@ def _table_score(
         reasons.append("table name appears directly in the question")
 
     for semantic_hint in plan.get("semantic_hints", set()):
-        if any(str(column.get("semantic_type", "")).lower() == semantic_hint for column in table_data.get("columns", [])):
+        if any(resolved_semantic_type(column) == semantic_hint for column in table_data.get("columns", [])):
             score += 0.8
             reasons.append(f"contains {semantic_hint} column(s)")
 
@@ -577,12 +584,12 @@ def _table_score(
             score += 0.9
             reasons.append(f"dimension '{dimension}' matched table metadata")
 
-    if plan.get("date_range") and any(str(column.get("semantic_type", "")).lower() == "date" for column in table_data.get("columns", [])):
+    if plan.get("date_range") and any(resolved_semantic_type(column) == "date" for column in table_data.get("columns", [])):
         score += 0.6
         reasons.append("date filter needs a date column")
 
     if any(filter_data.get("type") == "status" for filter_data in plan.get("filters", [])):
-        if any(str(column.get("semantic_type", "")).lower() == "status" for column in table_data.get("columns", [])):
+        if any(resolved_semantic_type(column) == "status" for column in table_data.get("columns", [])):
             score += 0.6
             reasons.append("status filter needs a status column")
 
@@ -635,11 +642,11 @@ def _column_score(
     score = 0.0
     reasons: list[str] = []
     column_name = str(column.get("name", "")).lower()
-    semantic_type = str(column.get("semantic_type", "")).lower()
+    semantic_type = resolved_semantic_type(column)
     question_terms = set(plan.get("question_terms", []))
     column_tokens = set(_tokenize(column_name))
-    column_tokens.update(_tokenize(str(column.get("business_description", ""))))
-    for term in column.get("business_terms", []) or []:
+    column_tokens.update(_tokenize(column_business_description(column)))
+    for term in column_business_terms(column):
         column_tokens.update(_tokenize(term))
 
     overlap = len(question_terms & column_tokens)
@@ -707,17 +714,19 @@ def _select_columns_for_table(
                 str(column.get("name", "")),
                 score,
                 reasons,
-                str(column.get("semantic_type", "general")),
+                resolved_semantic_type(column),
+                str(column.get("semantic_type", "unknown")).strip().lower() or "unknown",
             )
         )
 
     scored_columns.sort(key=lambda item: (-item[1], item[0]))
     selected_columns = []
-    for column_name, score, reasons, semantic_type in scored_columns[:6]:
+    for column_name, score, reasons, semantic_type, core_semantic_type in scored_columns[:6]:
         selected_columns.append(
             {
                 "column": column_name,
                 "semantic_type": semantic_type,
+                "core_semantic_type": core_semantic_type,
                 "confidence": round(min(max(score / 3.0, 0.45), 0.99), 2),
                 "reason": "; ".join(dict.fromkeys(reasons)),
             }
@@ -913,7 +922,7 @@ def _infer_metric_from_glossary_matches(
             semantic_type = ""
             for column in knowledge_base.get(table_name, {}).get("columns", []):
                 if str(column.get("name", "")) == column_name:
-                    semantic_type = str(column.get("semantic_type", "")).lower()
+                    semantic_type = resolved_semantic_type(column)
                     break
 
             if semantic_type not in {"money", "quantity", "percentage"}:
@@ -1074,7 +1083,8 @@ def _selected_join_columns_for_table(table_name: str, table_data: dict[str, Any]
         selected_columns.append(
             {
                 "column": column_name,
-                "semantic_type": str(column.get("semantic_type", "id")),
+                "semantic_type": resolved_semantic_type(column, fallback="id"),
+                "core_semantic_type": str(column.get("semantic_type", "id")).strip().lower() or "id",
                 "confidence": 0.82,
                 "reason": "required by computed FK join path",
             }
@@ -1292,7 +1302,8 @@ def _column_selection_from_retrieved_context(
         selected.append(
             {
                 "column": str(entry.get("column") or ""),
-                "semantic_type": str(entry.get("semantic_type") or "general"),
+                "semantic_type": str(entry.get("semantic_type") or "unknown"),
+                "core_semantic_type": str(entry.get("core_semantic_type") or entry.get("semantic_type") or "unknown"),
                 "confidence": round(min(max(float(entry.get("score") or 0.0), 0.45), 0.99), 2),
                 "reason": "; ".join(
                     filter(

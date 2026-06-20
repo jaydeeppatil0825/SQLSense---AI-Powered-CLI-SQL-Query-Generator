@@ -13,6 +13,12 @@ from collections import deque
 import re
 from typing import Any, Dict, Optional
 
+from kb_pipeline.schema_facts import (
+    column_business_description,
+    column_business_terms,
+    column_sample_values,
+    resolved_semantic_type,
+)
 from utils.logger import get_logger
 from kb_pipeline.relationship_graph import build_relationship_graph, find_all_possible_join_paths
 
@@ -205,9 +211,9 @@ def _match_columns(query_terms: list[str], knowledge_base: Dict[str, Any]) -> li
                 continue
             search_texts = [
                 column_name,
-                column.get("business_description", ""),
-                *list(column.get("business_terms", []) or []),
-                *list(column.get("sample_values", []) or []),
+                column_business_description(column),
+                *column_business_terms(column),
+                *column_sample_values(column),
             ]
             best_score = 0.0
             matched_terms = []
@@ -224,7 +230,8 @@ def _match_columns(query_terms: list[str], knowledge_base: Dict[str, Any]) -> li
                 {
                     "table": table_name,
                     "column": column_name,
-                    "semantic_type": column.get("semantic_type"),
+                    "semantic_type": resolved_semantic_type(column),
+                    "core_semantic_type": str(column.get("semantic_type", "")).strip().lower(),
                     "is_measure": bool(column.get("is_measure")),
                     "is_dimension": bool(column.get("is_dimension")),
                     "is_date": bool(column.get("is_date")),
@@ -328,6 +335,7 @@ def _vector_context(normalized_question: str, vector_retriever: Optional[Any]) -
                 "table": entry.get("table_name"),
                 "column": entry.get("column_name"),
                 "semantic_type": entry.get("semantic_type"),
+                "core_semantic_type": entry.get("core_semantic_type"),
                 "is_measure": bool(entry.get("is_measure")),
                 "is_dimension": bool(entry.get("is_dimension")),
                 "is_date": bool(entry.get("is_date")),
@@ -544,7 +552,10 @@ def _candidate_columns(
     for entry in matched_columns:
         if require_measure and not bool(entry.get("is_measure")):
             continue
-        if require_dimension and not (bool(entry.get("is_dimension")) or str(entry.get("semantic_type") or "") in {"name", "text", "category_candidate", "date"}):
+        if require_dimension and not (
+            bool(entry.get("is_dimension"))
+            or str(entry.get("semantic_type") or "") in {"name", "text", "category_candidate", "text_candidate", "date"}
+        ):
             continue
         if require_filter and requested_terms:
             matched_terms = {str(term).lower() for term in entry.get("matched_terms", [])}

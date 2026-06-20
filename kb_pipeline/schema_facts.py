@@ -15,6 +15,20 @@ import re
 from typing import Any
 
 
+CORE_SEMANTIC_TYPES = {
+    "id",
+    "date",
+    "boolean",
+    "numeric_candidate",
+    "text_candidate",
+    "category_candidate",
+    "unknown",
+}
+
+_MEASURE_SEMANTIC_TYPES = {"money", "quantity", "percentage"}
+_DIMENSION_SEMANTIC_TYPES = {"status", "name", "text", "code", "reference"}
+
+
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip().lower())
 
@@ -64,6 +78,211 @@ def sanitize_business_purpose(text: str, table_name: str, module_name: str = "")
     return cleaned
 
 
+def is_core_semantic_type(value: str) -> bool:
+    return str(value or "").strip().lower() in CORE_SEMANTIC_TYPES
+
+
+def column_core_semantic_type(column: dict[str, Any], fallback: str = "unknown") -> str:
+    semantic_type = str((column or {}).get("semantic_type", "")).strip().lower()
+    if semantic_type in CORE_SEMANTIC_TYPES:
+        return semantic_type
+    return fallback
+
+
+def resolved_semantic_type(column: dict[str, Any], fallback: str = "unknown") -> str:
+    raw_semantic_type = str((column or {}).get("semantic_type", "")).strip().lower()
+    if raw_semantic_type and raw_semantic_type not in CORE_SEMANTIC_TYPES:
+        return raw_semantic_type
+
+    ai_metadata = (column or {}).get("ai_metadata")
+    if isinstance(ai_metadata, dict):
+        ai_semantic_type = str(ai_metadata.get("ai_semantic_type", ai_metadata.get("semantic_type", ""))).strip().lower()
+        if ai_semantic_type:
+            return ai_semantic_type
+
+    metric_type = str((column or {}).get("metric_type", "")).strip().lower()
+    if metric_type in _MEASURE_SEMANTIC_TYPES:
+        return metric_type
+
+    if bool((column or {}).get("is_date")):
+        return "date"
+
+    if bool((column or {}).get("is_dimension")) and raw_semantic_type in {"text_candidate", "category_candidate"}:
+        return "text"
+
+    if bool((column or {}).get("is_measure")) and raw_semantic_type == "numeric_candidate":
+        return "numeric_candidate"
+
+    if raw_semantic_type in CORE_SEMANTIC_TYPES:
+        return raw_semantic_type
+    return fallback
+
+
+def column_ai_metadata(column: dict[str, Any]) -> dict[str, Any]:
+    raw = (column or {}).get("ai_metadata")
+    if not isinstance(raw, dict):
+        raw = {}
+    raw_semantic_type = str((column or {}).get("semantic_type", "") or "").strip().lower()
+    fallback_ai_semantic = raw_semantic_type if raw_semantic_type and raw_semantic_type not in CORE_SEMANTIC_TYPES else ""
+    ai_semantic_type = str(
+        raw.get(
+            "ai_semantic_type",
+            raw.get("semantic_type", fallback_ai_semantic),
+        )
+        or ""
+    ).strip().lower()
+    business_description = str(
+        raw.get(
+            "business_description",
+            (column or {}).get("business_description", ""),
+        )
+        or ""
+    ).strip()
+    business_terms = raw.get("business_terms", (column or {}).get("business_terms", [])) or []
+    if not isinstance(business_terms, list):
+        business_terms = [business_terms]
+    confidence = raw.get("confidence", (column or {}).get("confidence", 0.0))
+    reason = str(raw.get("reason", (column or {}).get("reason", "")) or "").strip()
+    accepted = bool(raw.get("accepted", bool(ai_semantic_type)))
+    return {
+        "ai_semantic_type": ai_semantic_type,
+        "business_description": business_description,
+        "business_terms": [str(term).strip() for term in business_terms if str(term).strip()],
+        "confidence": float(confidence or 0.0),
+        "reason": reason,
+        "accepted": accepted,
+    }
+
+
+def column_business_description(column: dict[str, Any]) -> str:
+    return str(column_ai_metadata(column).get("business_description", "") or "").strip()
+
+
+def column_business_terms(column: dict[str, Any]) -> list[str]:
+    return list(column_ai_metadata(column).get("business_terms", []) or [])
+
+
+def column_profile_facts(column: dict[str, Any]) -> dict[str, Any]:
+    raw = (column or {}).get("profile_facts")
+    if not isinstance(raw, dict):
+        raw = {}
+    sample_values = raw.get("sample_values", (column or {}).get("sample_values", [])) or []
+    if not isinstance(sample_values, list):
+        sample_values = [sample_values]
+    return {
+        "null_count": int(raw.get("null_count", (column or {}).get("null_count", 0)) or 0),
+        "unique_count": int(raw.get("unique_count", (column or {}).get("unique_count", 0)) or 0),
+        "sample_values": list(sample_values),
+        "min": raw.get("min", (column or {}).get("min", (column or {}).get("min_value"))),
+        "max": raw.get("max", (column or {}).get("max", (column or {}).get("max_value"))),
+    }
+
+
+def column_sample_values(column: dict[str, Any]) -> list[Any]:
+    return list(column_profile_facts(column).get("sample_values", []) or [])
+
+
+def column_structural_facts(
+    column: dict[str, Any],
+    *,
+    primary_keys: set[str] | None = None,
+    foreign_keys: set[str] | None = None,
+) -> dict[str, bool]:
+    raw = (column or {}).get("structural_facts")
+    if not isinstance(raw, dict):
+        raw = {}
+    column_name = str((column or {}).get("name", "") or "")
+    core_semantic_type = column_core_semantic_type(column)
+    pk_names = {str(value) for value in (primary_keys or set()) if str(value)}
+    fk_names = {str(value) for value in (foreign_keys or set()) if str(value)}
+    is_primary_key = bool(raw.get("is_primary_key", column_name in pk_names or (column or {}).get("is_primary_key", False)))
+    is_foreign_key = bool(raw.get("is_foreign_key", column_name in fk_names or (column or {}).get("is_foreign_key", False)))
+    is_id = bool(raw.get("is_id", core_semantic_type == "id" or column_name.lower() == "id" or column_name.lower().endswith("_id")))
+    is_date = bool(raw.get("is_date", core_semantic_type == "date" or (column or {}).get("is_date", False)))
+    is_boolean = bool(raw.get("is_boolean", core_semantic_type == "boolean"))
+    return {
+        "is_primary_key": is_primary_key,
+        "is_foreign_key": is_foreign_key,
+        "is_id": is_id,
+        "is_date": is_date,
+        "is_boolean": is_boolean,
+    }
+
+
+def column_planner_roles(column: dict[str, Any]) -> dict[str, bool]:
+    raw = (column or {}).get("planner_roles")
+    if not isinstance(raw, dict):
+        raw = {}
+    core_semantic_type = column_core_semantic_type(column)
+    semantic_type = resolved_semantic_type(column)
+    structural = column_structural_facts(column)
+    measure_candidate = bool(raw.get("measure_candidate", bool((column or {}).get("is_measure"))))
+    dimension_candidate = bool(
+        raw.get(
+            "dimension_candidate",
+            bool((column or {}).get("is_dimension")) or semantic_type in _DIMENSION_SEMANTIC_TYPES or core_semantic_type in {"text_candidate", "category_candidate", "date", "boolean"},
+        )
+    )
+    filter_candidate = bool(
+        raw.get(
+            "filter_candidate",
+            dimension_candidate or core_semantic_type in {"date", "boolean", "category_candidate", "text_candidate"},
+        )
+    )
+    join_candidate = bool(raw.get("join_candidate", structural["is_primary_key"] or structural["is_foreign_key"] or structural["is_id"]))
+    date_candidate = bool(raw.get("date_candidate", structural["is_date"]))
+    sort_candidate = bool(raw.get("sort_candidate", measure_candidate or dimension_candidate or date_candidate))
+    return {
+        "measure_candidate": measure_candidate,
+        "dimension_candidate": dimension_candidate,
+        "filter_candidate": filter_candidate,
+        "join_candidate": join_candidate,
+        "date_candidate": date_candidate,
+        "sort_candidate": sort_candidate,
+    }
+
+
+def column_formula_evidence(column: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = (column or {}).get("formula_evidence")
+    if isinstance(raw, list):
+        return [entry for entry in raw if isinstance(entry, dict)]
+    return []
+
+
+def apply_column_contract(
+    column: dict[str, Any],
+    *,
+    primary_keys: set[str] | None = None,
+    foreign_keys: set[str] | None = None,
+) -> dict[str, Any]:
+    semantic_type = column_core_semantic_type(column)
+    structural_facts = column_structural_facts(column, primary_keys=primary_keys, foreign_keys=foreign_keys)
+    profile_facts = column_profile_facts(column)
+    ai_metadata = column_ai_metadata(column)
+    planner_roles = column_planner_roles(column)
+    formula_evidence = column_formula_evidence(column)
+    column["semantic_type"] = semantic_type
+    column["structural_facts"] = structural_facts
+    column["profile_facts"] = profile_facts
+    column["ai_metadata"] = ai_metadata
+    column["planner_roles"] = planner_roles
+    column["formula_evidence"] = formula_evidence
+    column["is_primary_key"] = structural_facts["is_primary_key"]
+    column["is_foreign_key"] = structural_facts["is_foreign_key"]
+    column["is_date"] = structural_facts["is_date"]
+    column["sample_values"] = list(profile_facts["sample_values"])
+    column["null_count"] = profile_facts["null_count"]
+    column["unique_count"] = profile_facts["unique_count"]
+    column["min"] = profile_facts["min"]
+    column["max"] = profile_facts["max"]
+    column["min_value"] = profile_facts["min"]
+    column["max_value"] = profile_facts["max"]
+    column["business_description"] = ai_metadata["business_description"]
+    column["business_terms"] = list(ai_metadata["business_terms"])
+    column["confidence"] = max(float(column.get("confidence", 0.0) or 0.0), float(ai_metadata["confidence"] or 0.0))
+    return column
+
+
 def classify_semantic_type(
     column_name: str,
     table_name: str = "",
@@ -88,8 +307,6 @@ def classify_semantic_type(
     normalized_name = _normalize_identifier(column_name)
     column_type_lower = str(column_type or "").lower()
     profiled_values = [value for value in (sample_values or []) if value is not None]
-    name_tokens = {token for token in normalized_name.split("_") if token}
-
     def _type_contains(*tokens: str) -> bool:
         return any(token in column_type_lower for token in tokens)
 
@@ -113,36 +330,19 @@ def classify_semantic_type(
     if _type_contains("enum", "set"):
         return "category_candidate"
     if _type_contains("varchar", "char", "text", "string", "nvarchar", "nchar", "json"):
-        if name_tokens & {"status", "state", "type", "category", "segment", "code", "flag"}:
-            return "category_candidate"
+        if profiled_values:
+            normalized_profile = [_normalize(value) for value in profiled_values if _normalize(value)]
+            distinct_profile = list(dict.fromkeys(normalized_profile))
+            if 0 < len(distinct_profile) <= 12 and all(len(value) <= 40 for value in distinct_profile):
+                return "category_candidate"
         return "text_candidate"
 
-    if name_tokens & {"status", "state", "type", "category", "segment", "code", "flag"}:
-        return "category_candidate"
-    if name_tokens & {"name", "label", "title", "text", "description", "comment", "note"}:
-        return "text_candidate"
-    if name_tokens & {
-        "amount",
-        "total",
-        "price",
-        "cost",
-        "balance",
-        "value",
-        "qty",
-        "quantity",
-        "units",
-        "rate",
-        "percent",
-        "percentage",
-    }:
-        return "numeric_candidate"
-
-    return "general"
+    return "unknown"
 
 
 def _column_confidence(column_name: str, semantic_type: str) -> float:
     normalized_name = _normalize_identifier(column_name)
-    if semantic_type == "general":
+    if semantic_type == "unknown":
         return 0.55
     if semantic_type == "id" and (normalized_name == "id" or normalized_name.endswith("_id")):
         return 0.98
@@ -154,7 +354,7 @@ def _column_confidence(column_name: str, semantic_type: str) -> float:
 
 
 def _column_reason(column_name: str, semantic_type: str) -> str:
-    if semantic_type == "general":
+    if semantic_type == "unknown":
         return "No strong structural fact was found; semantic meaning remains unresolved."
     if semantic_type == "id":
         return "Structural fact: primary/foreign-key or _id identifier column."
@@ -163,11 +363,11 @@ def _column_reason(column_name: str, semantic_type: str) -> str:
     if semantic_type == "boolean":
         return "Structural fact: boolean type or boolean-like profile values."
     if semantic_type == "numeric_candidate":
-        return "Candidate evidence: numeric-like type or numeric-style column meaning."
+        return "Candidate evidence: numeric-like SQL type."
     if semantic_type == "text_candidate":
-        return "Candidate evidence: text-like type or label-style column meaning."
+        return "Candidate evidence: text-like SQL type."
     if semantic_type == "category_candidate":
-        return "Candidate evidence: categorical/code-like type or column meaning."
+        return "Candidate evidence: low-cardinality text/category profile."
     return f"Structural semantic classification: {semantic_type}."
 
 
@@ -284,22 +484,34 @@ def enrich_knowledge_base_schema_facts(knowledge_base: dict[str, Any]) -> dict[s
         )
         table_data.setdefault("possible_business_questions", [])
         table_data.setdefault("relationships", [])
+        primary_keys = {str(value) for value in table_data.get("primary_keys", []) if str(value)}
+        foreign_keys = {
+            str(fk.get("column", ""))
+            for fk in table_data.get("foreign_keys", [])
+            if str(fk.get("column", ""))
+        }
 
         for column in table_data.get("columns", []):
-            semantic_type = str(column.get("semantic_type") or "")
-            if not semantic_type or semantic_type == "general":
+            original_semantic_type = str(column.get("semantic_type") or "").strip().lower()
+            if original_semantic_type and not is_core_semantic_type(original_semantic_type):
+                ai_metadata = column.get("ai_metadata")
+                if not isinstance(ai_metadata, dict):
+                    ai_metadata = {}
+                ai_metadata.setdefault("ai_semantic_type", original_semantic_type)
+                ai_metadata.setdefault("accepted", True)
+                column["ai_metadata"] = ai_metadata
+
+            semantic_type = original_semantic_type
+            if not is_core_semantic_type(semantic_type):
                 semantic_type = classify_semantic_type(
                     column.get("name", ""),
                     table_name=table_name,
                     column_type=column.get("type", ""),
-                    is_primary_key=str(column.get("name", "")) in set(table_data.get("primary_keys", [])),
-                    is_foreign_key=str(column.get("name", "")) in {
-                        str(fk.get("column", ""))
-                        for fk in table_data.get("foreign_keys", [])
-                    },
-                    sample_values=column.get("sample_values", []),
+                    is_primary_key=str(column.get("name", "")) in primary_keys,
+                    is_foreign_key=str(column.get("name", "")) in foreign_keys,
+                    sample_values=column_sample_values(column),
                 )
-            column["semantic_type"] = semantic_type
+            column["semantic_type"] = semantic_type if semantic_type in CORE_SEMANTIC_TYPES else "unknown"
             column["confidence"] = max(
                 float(column.get("confidence", 0.0) or 0.0),
                 _column_confidence(column.get("name", ""), semantic_type),
@@ -309,6 +521,11 @@ def enrich_knowledge_base_schema_facts(knowledge_base: dict[str, Any]) -> dict[s
                 fallback=_column_reason(column.get("name", ""), semantic_type),
             )
             column["is_date"] = bool(semantic_type == "date")
+            apply_column_contract(
+                column,
+                primary_keys=primary_keys,
+                foreign_keys=foreign_keys,
+            )
 
     for relationship in detected_relationships:
         from_table = relationship.get("from_table")
@@ -393,11 +610,24 @@ def summarize_knowledge_base(knowledge_base: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "apply_column_contract",
     "build_rule_based_business_purpose",
+    "column_ai_metadata",
+    "column_business_description",
+    "column_business_terms",
     "classify_semantic_type",
+    "column_core_semantic_type",
+    "column_formula_evidence",
+    "column_planner_roles",
+    "column_profile_facts",
+    "column_sample_values",
+    "column_structural_facts",
     "detect_relationships",
     "enrich_knowledge_base_for_erp",
     "enrich_knowledge_base_schema_facts",
+    "CORE_SEMANTIC_TYPES",
+    "is_core_semantic_type",
+    "resolved_semantic_type",
     "sanitize_business_purpose",
     "sanitize_short_text",
     "summarize_knowledge_base",

@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from kb_pipeline.schema_facts import resolved_semantic_type
 
 _COMPLEX_KEYWORDS = {
     " group ",
@@ -220,7 +221,7 @@ def _pick_table(
 
 def _pick_date_column(table_data: dict[str, Any]) -> str | None:
     for column in _table_columns(table_data):
-        if str(column.get("semantic_type", "")).lower() == "date":
+        if resolved_semantic_type(column) == "date":
             return str(column.get("name", ""))
     for column in _table_columns(table_data):
         name = _normalize_identifier(column.get("name", ""))
@@ -231,7 +232,7 @@ def _pick_date_column(table_data: dict[str, Any]) -> str | None:
 
 def _pick_status_column(table_data: dict[str, Any]) -> dict[str, Any] | None:
     for column in _table_columns(table_data):
-        if str(column.get("semantic_type", "")).lower() == "status":
+        if resolved_semantic_type(column) == "status":
             return column
     for column in _table_columns(table_data):
         name = _normalize_identifier(column.get("name", ""))
@@ -294,13 +295,13 @@ def _pick_measure_column(
             return True
         if normalized_name == "id" or normalized_name.endswith("_id"):
             return True
-        semantic_type = str(column.get("semantic_type", "")).lower()
+        semantic_type = resolved_semantic_type(column)
         return semantic_type == "id"
 
     def _measure_score(column_name: str, column: dict[str, Any]) -> float:
         if _is_identifier_column(column_name, column):
             return -1.0
-        semantic_type = str(column.get("semantic_type", "")).lower()
+        semantic_type = resolved_semantic_type(column)
         column_type = str(column.get("type", "")).lower()
         tokens = set(_tokenize(column_name))
         if not _column_type_is_numeric(column_type):
@@ -335,7 +336,7 @@ def _pick_measure_column(
         column = column_lookup.get(column_name)
         if not column:
             continue
-        semantic_type = str(column.get("semantic_type", "")).lower()
+        semantic_type = resolved_semantic_type(column)
         if semantic_type in {"money", "quantity", "percentage"} and not _is_identifier_column(column_name, column):
             score = _measure_score(column_name, column)
             if score > 0:
@@ -357,7 +358,7 @@ def _pick_measure_column(
     best_scored: tuple[float, str] | None = None
     for column in columns:
         column_name = str(column.get("name", ""))
-        semantic_type = str(column.get("semantic_type", "")).lower()
+        semantic_type = resolved_semantic_type(column)
         if preferred_semantics and semantic_type not in preferred_semantics and semantic_type not in {"money", "quantity", "percentage"}:
             continue
         score = _measure_score(column_name, column)

@@ -27,6 +27,12 @@ from query_pipeline.conversation.question_rewriter import rewrite_follow_up_ques
 from query_pipeline.conversation.action_detector import detect_conversation_action
 from query_pipeline.conversation.conversation_memory import ConversationMemory
 from utils.logger import get_logger
+from kb_pipeline.schema_facts import (
+    column_business_description,
+    column_business_terms,
+    column_sample_values,
+    resolved_semantic_type,
+)
 from kb_pipeline.vector.retriever import VectorRetriever
 
 logger = get_logger()
@@ -655,8 +661,8 @@ def _sql_literal(value: Any) -> str:
 def _semantic_type_for_column(knowledge_base: dict[str, Any], table_name: str, column_name: str) -> str:
     for column in knowledge_base.get(table_name, {}).get("columns", []):
         if str(column.get("name", "")) == str(column_name):
-            return str(column.get("semantic_type", "general")).lower()
-    return "general"
+            return resolved_semantic_type(column)
+    return "unknown"
 
 
 def _question_terms(query_context: dict[str, Any]) -> set[str]:
@@ -747,7 +753,7 @@ def _money_columns_for_table(query_context: dict[str, Any], table_name: str) -> 
         knowledge_base = query_context.get(kb_name) or {}
         for column in knowledge_base.get(table_name, {}).get("columns", []):
             column_name = str(column.get("name", "")).strip()
-            if not column_name or str(column.get("semantic_type", "")).lower() != "money":
+            if not column_name or resolved_semantic_type(column) != "money":
                 continue
             if column_name in columns_by_name:
                 continue
@@ -779,13 +785,13 @@ def _has_same_table_state_context(query_context: dict[str, Any], table_name: str
     for kb_name in ("selected_knowledge_base", "knowledge_base"):
         knowledge_base = query_context.get(kb_name) or {}
         for column in knowledge_base.get(table_name, {}).get("columns", []):
-            if str(column.get("semantic_type", "")).lower() != "status":
+            if resolved_semantic_type(column) != "status":
                 continue
             status_terms = set(_identifier_tokens(str(column.get("name", ""))))
-            status_terms.update(_identifier_tokens(str(column.get("business_description", ""))))
-            for term in column.get("business_terms", []) or []:
+            status_terms.update(_identifier_tokens(column_business_description(column)))
+            for term in column_business_terms(column):
                 status_terms.update(_identifier_tokens(str(term)))
-            for sample_value in column.get("sample_values", []) or []:
+            for sample_value in column_sample_values(column):
                 status_terms.update(_identifier_tokens(str(sample_value)))
             if status_terms & question_terms:
                 return True

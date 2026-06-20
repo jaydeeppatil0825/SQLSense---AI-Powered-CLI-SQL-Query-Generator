@@ -16,7 +16,13 @@ import re
 
 from core.ai_backend_service import call_ai_backend as _call_ai_backend
 from kb_pipeline.schema_facts import (
+    CORE_SEMANTIC_TYPES,
+    apply_column_contract,
     build_rule_based_business_purpose,
+    column_core_semantic_type,
+    column_profile_facts,
+    column_sample_values,
+    resolved_semantic_type,
     sanitize_business_purpose,
     sanitize_short_text,
 )
@@ -495,14 +501,14 @@ def _table_summary_prompt(table_name: str, table_data: dict) -> str:
 
 
 def _is_structural_semantic(column: dict) -> bool:
-    return str(column.get("semantic_type", "general")).lower() in _STRUCTURAL_TYPES
+    return column_core_semantic_type(column) in _STRUCTURAL_TYPES
 
 
 def _candidate_columns(table_data: dict) -> list[dict]:
     return [
         column
         for column in table_data.get("columns", [])
-        if str(column.get("semantic_type", "general")).lower() in _CANDIDATE_TYPES
+        if column_core_semantic_type(column) in _CANDIDATE_TYPES
     ]
 
 
@@ -570,13 +576,14 @@ def _table_relationship_hints(table_name: str, table_data: dict) -> list[str]:
     return list(dict.fromkeys(hints))[:8]
 
 def _profile_summary(column: dict) -> str:
-    samples = [str(value) for value in (column.get("sample_values", []) or []) if value is not None][:5]
+    profile_facts = column_profile_facts(column)
+    samples = [str(value) for value in (profile_facts.get("sample_values", []) or []) if value is not None][:5]
     return (
         f"samples={samples or []} | "
-        f"min={column.get('min_value', None)} | "
-        f"max={column.get('max_value', None)} | "
-        f"unique={column.get('unique_count', None)} | "
-        f"nulls={column.get('null_count', None)}"
+        f"min={profile_facts.get('min', None)} | "
+        f"max={profile_facts.get('max', None)} | "
+        f"unique={profile_facts.get('unique_count', None)} | "
+        f"nulls={profile_facts.get('null_count', None)}"
     )
 
 
@@ -598,7 +605,7 @@ def _column_batch_prompt(table_name: str, table_data: dict, columns: list[dict])
     for col in columns:
         col_name = col.get("name", "")
         col_type = col.get("type", "")
-        sem_type = col.get("semantic_type", "general")
+        sem_type = column_core_semantic_type(col)
         pk_flag = bool(col.get("is_primary_key", False))
         fk_flag = bool(col.get("is_foreign_key", False))
         nearby = _nearby_column_names(table_data, str(col_name))
@@ -618,7 +625,7 @@ def _column_batch_prompt(table_name: str, table_data: dict, columns: list[dict])
     lines.append("Other table columns:")
     for col in table_data.get("columns", []):
         lines.append(
-            f"- {col.get('name', '')} | type={col.get('type', '')} | semantic_type={col.get('semantic_type', 'general')}"
+            f"- {col.get('name', '')} | type={col.get('type', '')} | semantic_type={column_core_semantic_type(col)}"
         )
 
     return (
@@ -705,7 +712,7 @@ def _normalize_ai_semantic_type(value: str, fallback: str) -> str:
     semantic_type = str(value or "").strip().lower()
     if semantic_type in _AI_RETURN_SEMANTIC_TYPES:
         return semantic_type
-    return str(fallback or "general").strip().lower() or "general"
+    return str(fallback or "unknown").strip().lower() or "unknown"
 
 
 def _finalize_candidate_semantic_type(column: dict, col_info: dict, semantic_type: str) -> str:
@@ -764,18 +771,39 @@ def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
             continue
         col["_table_context"] = table_data
         col_info = col_map[col_name]
-        fallback_semantic = str(col.get("semantic_type", "general")).lower()
-        semantic_type = _normalize_ai_semantic_type(col_info.get("semantic_type", fallback_semantic), fallback_semantic)
+        core_semantic_type = column_core_semantic_type(col)
+        semantic_type = _normalize_ai_semantic_type(col_info.get("semantic_type", core_semantic_type), core_semantic_type)
         semantic_type = _finalize_candidate_semantic_type(col, col_info, semantic_type)
         col["business_description"] = _sanitize_column_description(col_info.get("business_description", ""), col, semantic_type)
         col["business_terms"] = _sanitize_business_terms(list(col_info.get("business_terms", [])), col, semantic_type)
-        col["semantic_type"] = semantic_type
+        col["semantic_type"] = core_semantic_type if core_semantic_type in CORE_SEMANTIC_TYPES else "unknown"
         col["confidence"] = max(float(col.get("confidence", 0.0) or 0.0), min(max(float(col_info.get("confidence", 0.0) or 0.0), 0.0), 1.0))
         col["reason"] = _sanitize_reason(col_info.get("reason", ""), str(col.get("reason", "")), col)
         col["metric_type"] = semantic_type if semantic_type in {"money", "quantity", "percentage"} else "general"
         col["is_measure"] = semantic_type in {"money", "quantity", "percentage"} and bool(col_info.get("is_measure", False))
         col["is_dimension"] = semantic_type in {"status", "name", "text", "code", "reference"} or bool(col_info.get("is_dimension", False))
         col["is_date"] = bool(col_info.get("is_date", False) or semantic_type == "date")
+        col["ai_metadata"] = {
+            "ai_semantic_type": semantic_type,
+            "confidence": min(max(float(col_info.get("confidence", 0.0) or 0.0), 0.0), 1.0),
+            "reason": col["reason"],
+            "business_description": col["business_description"],
+            "business_terms": list(col["business_terms"]),
+            "accepted": bool(semantic_type and semantic_type != core_semantic_type),
+            "is_measure": bool(col["is_measure"]),
+            "is_dimension": bool(col["is_dimension"]),
+            "is_date": bool(col["is_date"]),
+            "resolved_semantic_type": resolved_semantic_type(col),
+        }
+        apply_column_contract(
+            col,
+            primary_keys={str(value) for value in table_data.get("primary_keys", []) if str(value)},
+            foreign_keys={
+                str(fk.get("column", ""))
+                for fk in table_data.get("foreign_keys", [])
+                if str(fk.get("column", ""))
+            },
+        )
         col.pop("_table_context", None)
 
 

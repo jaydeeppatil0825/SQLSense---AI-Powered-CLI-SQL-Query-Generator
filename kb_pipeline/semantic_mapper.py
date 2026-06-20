@@ -1,46 +1,18 @@
 """
 semantic/semantic_mapper.py
 ===========================
-Maps database columns to generic semantic types.
+Maps database columns to core structural semantic types.
 
-This module provides generic semantic classification for database columns
-based on column name patterns, data types, and sample values. It does not
-contain database-specific or ERP-specific table mappings.
-
-Generic semantic categories:
-- money: Financial amounts, prices, costs
-- quantity: Counts, measurements, stock levels
-- date: Temporal information
-- status: State flags, active/inactive indicators
-- id: Primary keys, identifiers
-- name: Text labels, descriptions
-- text: General text fields
-- boolean: True/false flags
-- percentage: Ratios, percentages
-- code: Reference codes, external identifiers
-- general: Default fallback type
+This module preserves only structural or candidate semantic categories at the
+knowledge-base layer. Richer business meaning belongs in AI metadata, not the
+core `semantic_type`.
 """
 
 from __future__ import annotations
 
-from kb_pipeline.schema_facts import classify_semantic_type
+from kb_pipeline.schema_facts import CORE_SEMANTIC_TYPES, classify_semantic_type
 
-_ALLOWED_SEMANTIC_TYPES = {
-    "money",
-    "quantity",
-    "date",
-    "status",
-    "id",
-    "name",
-    "text",
-    "boolean",
-    "percentage",
-    "code",
-    "general",
-    "numeric_candidate",
-    "text_candidate",
-    "category_candidate",
-}
+_ALLOWED_SEMANTIC_TYPES = set(CORE_SEMANTIC_TYPES)
 
 
 # Backward compatibility alias for existing imports
@@ -61,9 +33,9 @@ def add_semantic_mapping(schema_data: dict) -> dict:
     Assign a semantic_type to every reflected column using structural rules.
 
     Classification priority:
-    1. Existing semantic_type from AI enrichment (if present)
-    2. Structural rules (PK/FK, data type, sample values)
-    3. Fallback to 'general'
+    1. Structural facts (PK/FK, data type, sample values)
+    2. Candidate types for unresolved numeric/text/category columns
+    3. Fallback to 'unknown'
 
     This function does not use database-specific or ERP-specific mappings.
     """
@@ -92,10 +64,7 @@ def add_semantic_mapping(schema_data: dict) -> dict:
                 semantic_type = structural_semantic_type
             else:
                 existing_semantic_type = str(column.get("semantic_type", "")).lower()
-                if existing_semantic_type in _ALLOWED_SEMANTIC_TYPES - {"general", "numeric_candidate", "text_candidate", "category_candidate"}:
-                    semantic_type = existing_semantic_type
-                else:
-                    semantic_type = structural_semantic_type
+                semantic_type = existing_semantic_type if existing_semantic_type in _ALLOWED_SEMANTIC_TYPES else structural_semantic_type
 
             column["semantic_type"] = semantic_type
             column["is_date"] = bool(semantic_type == "date")

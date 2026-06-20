@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Dict, Any
 import re
 
+from kb_pipeline.schema_facts import column_ai_metadata, column_business_description, column_business_terms, column_structural_facts
 from utils.file_utils import save_json
 from utils.logger import get_logger
 
@@ -67,7 +68,7 @@ def _mapping_key(mapping: dict[str, Any]) -> tuple[str, str]:
 
 
 def _preferred_column_order(column: dict[str, Any]) -> tuple[int, str]:
-    semantic = str(column.get("semantic_type", "")).lower()
+    semantic = str(column_ai_metadata(column).get("ai_semantic_type", "") or column.get("semantic_type", "")).lower()
     name = str(column.get("name", ""))
     if semantic == "name":
         return (0, name)
@@ -272,16 +273,16 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                 continue
 
             column_description = (
-                str(column.get("business_description", "")).strip()
+                column_business_description(column)
                 or _generic_description_for_column(table_name, column)
             )
             mapping = {
                 "table": table_name,
                 "column": column_name,
                 "type": column.get("type", ""),
-                "confidence": "high" if column.get("business_terms") else "medium",
+                "confidence": "high" if column_business_terms(column) else "medium",
             }
-            column_ai_terms = _clean_ai_terms(column.get("business_terms", []))
+            column_ai_terms = _clean_ai_terms(column_business_terms(column))
             column_terms = _unique_preserve_order(
                 _schema_terms_for_column(column_name) + column_ai_terms
             )
@@ -290,7 +291,8 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                 includes_ai=bool(column_ai_terms or table_ai_terms),
                 includes_relationships=bool(relationship_terms),
             )
-            related_terms = relationship_terms if str(column.get("name", "")).endswith("_id") or column.get("is_foreign_key") else []
+            structural_facts = column_structural_facts(column)
+            related_terms = relationship_terms if structural_facts.get("is_foreign_key") or structural_facts.get("is_id") else []
 
             for term in column_terms:
                 _add_entry(
