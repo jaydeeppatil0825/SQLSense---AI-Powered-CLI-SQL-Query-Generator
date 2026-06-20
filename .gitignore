@@ -18,6 +18,8 @@ __pycache__/
 .hypothesis/
 .coverage
 htmlcov/
+.pytest_tmp*
+.pytest_cache/
 
 # Generated semantic artifacts
 semantic/knowledge_base.json

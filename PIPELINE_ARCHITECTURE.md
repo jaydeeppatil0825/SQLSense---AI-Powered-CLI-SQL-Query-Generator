@@ -51,6 +51,9 @@ Responsibilities:
 - vector index build/load
 - KB/glossary/vector metadata persistence
 
+
+
+
 Current files:
 - `kb_pipeline/connection.py`
 - `kb_pipeline/schema_reader.py`
