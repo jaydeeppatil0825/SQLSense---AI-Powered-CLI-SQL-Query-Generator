@@ -43,6 +43,34 @@ def _normalize_backend_name(value: str | None) -> str:
     return "local"
 
 
+def _has_explicit_nvidia_config() -> bool:
+    """Return True only when NVIDIA is intentionally and sufficiently configured."""
+    api_key = str(os.getenv("NVIDIA_API_KEY") or "").strip()
+    model = str(os.getenv("NVIDIA_MODEL") or "").strip()
+    return bool(api_key and model)
+
+
+def _resolve_active_backend_from_env() -> str:
+    """
+    Resolve the active backend from environment variables.
+
+    Local Ollama remains the default. NVIDIA becomes active only when
+    ``AI_BACKEND=nvidia`` is explicitly set and the required NVIDIA config
+    is present.
+    """
+    explicit_backend = _normalize_backend_name(os.getenv("AI_BACKEND"))
+    if explicit_backend == "nvidia" and _has_explicit_nvidia_config():
+        return "nvidia"
+    if explicit_backend == "local":
+        return "local"
+
+    legacy_backend = _normalize_backend_name(os.getenv("LLM_BACKEND"))
+    if legacy_backend == "local":
+        return "local"
+
+    return "local"
+
+
 def _read_int_env(name: str, default: int, minimum: int = 1) -> int:
     raw = str(os.getenv(name, str(default)) or str(default)).strip()
     try:
@@ -158,9 +186,7 @@ class AIBackendService:
         self._load_from_env()
 
     def _load_from_env(self) -> None:
-        self.active_backend = _normalize_backend_name(
-            os.getenv("AI_BACKEND") or os.getenv("LLM_BACKEND") or "local"
-        )
+        self.active_backend = _resolve_active_backend_from_env()
         self.local_model = (os.getenv("LOCAL_MODEL") or _DEFAULT_LOCAL_MODEL).strip() or _DEFAULT_LOCAL_MODEL
         self.local_api_url = (os.getenv("LOCAL_API_URL") or _DEFAULT_LOCAL_URL).strip().rstrip("/")
         self.local_timeout = _read_int_env("LOCAL_TIMEOUT", 120)

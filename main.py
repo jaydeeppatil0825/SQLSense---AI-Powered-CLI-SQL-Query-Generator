@@ -718,12 +718,15 @@ def handle_ai_backend_settings(state: SessionState) -> None:
     Shows and configures the active AI backend.
     """
     logger.info("User chose option 5: AI Backend Settings")
+    last_test_success: bool | None = None
+    last_test_message: str | None = None
 
     while True:
         config = state.app_service.get_backend_config()
-        success, message = state.app_service.test_backend_connection()
         backend_name = config.get("active_backend", "local")
-        status = "connected" if success else "not connected"
+        status = "not tested"
+        if last_test_success is not None:
+            status = "connected" if last_test_success else "not connected"
 
         print()
         print("=" * 52)
@@ -737,12 +740,14 @@ def handle_ai_backend_settings(state: SessionState) -> None:
             print(f"  Max tokens: {config.get('max_tokens', 2048)}")
         print(f"  Timeout: {config.get('timeout', 60)} seconds")
         print(f"  Backend status: {status}")
-        if success:
-            print(f"  Last test: {message}")
+        if last_test_message:
+            print(f"  Last test: {last_test_message}")
+            if last_test_success is False and backend_name == "local":
+                print("  Ollama is not running. Using rule-based fallback when needed.")
         elif backend_name == "local":
-            print("  Ollama is not running. Using rule-based fallback when needed.")
+            print("  No backend test run yet. Local Ollama remains the default backend.")
         else:
-            print(f"  NVIDIA test failed: {message}")
+            print("  No backend test run yet. NVIDIA is optional and tested only on demand.")
         print("-" * 52)
         print("  1) Use local backend")
         print("  2) Use NVIDIA backend")
@@ -762,8 +767,9 @@ def handle_ai_backend_settings(state: SessionState) -> None:
         elif choice == "2":
             handle_use_nvidia(state)
         elif choice == "3":
-            handle_test_backend_connection(state)
+            last_test_success, last_test_message = handle_test_backend_connection(state)
         elif choice == "4":
+            last_test_success, last_test_message = state.app_service.test_backend_connection()
             continue
         elif choice == "5":
             logger.info("User returned from AI Backend Settings")
@@ -863,7 +869,7 @@ def handle_view_current_backend(state: SessionState) -> None:
     print("-" * 52)
 
 
-def handle_test_backend_connection(state: SessionState) -> None:
+def handle_test_backend_connection(state: SessionState) -> tuple[bool, str]:
     """Test current AI backend connection."""
     logger.info("User chose: Test Current AI Backend Connection")
     
@@ -877,6 +883,7 @@ def handle_test_backend_connection(state: SessionState) -> None:
         print(f"  ✗ {message}")
     
     print("-" * 52)
+    return success, message
 
 
 def handle_search_business_glossary(state: SessionState) -> None:

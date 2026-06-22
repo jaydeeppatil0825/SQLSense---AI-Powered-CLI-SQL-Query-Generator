@@ -5,9 +5,34 @@ from unittest.mock import MagicMock, patch
 from core.ai_backend_service import AIBackendService, check_ollama_status
 
 
+def test_backend_defaults_to_local_when_backend_env_is_missing(monkeypatch):
+    monkeypatch.delenv("AI_BACKEND", raising=False)
+    monkeypatch.delenv("LLM_BACKEND", raising=False)
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_MODEL", raising=False)
+
+    service = AIBackendService()
+
+    assert service.get_active_backend() == "local"
+    assert service.get_backend_config()["active_backend"] == "local"
+    assert service.get_backend_config()["model"] == "llama3"
+
+
+def test_backend_stays_local_when_nvidia_is_not_fully_configured(monkeypatch):
+    monkeypatch.setenv("AI_BACKEND", "nvidia")
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.setenv("NVIDIA_MODEL", "")
+
+    service = AIBackendService()
+
+    assert service.get_active_backend() == "local"
+    assert service.get_backend_config()["active_backend"] == "local"
+
+
 def test_backend_uses_nvidia_when_env_requests_it(monkeypatch):
     monkeypatch.setenv("AI_BACKEND", "nvidia")
     monkeypatch.setenv("NVIDIA_MODEL", "nvidia/nemotron-3-ultra-550b-a55b")
+    monkeypatch.setenv("NVIDIA_API_KEY", "secret")
     monkeypatch.setenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
     monkeypatch.setenv("NVIDIA_TEMPERATURE", "1")
     monkeypatch.setenv("NVIDIA_MAX_TOKENS", "16384")

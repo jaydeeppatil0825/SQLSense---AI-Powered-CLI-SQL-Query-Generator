@@ -272,7 +272,6 @@ def test_ai_backend_status_refresh_updates_displayed_status(monkeypatch, capsys)
 
     responses = iter(
         [
-            (False, "Ollama is not running."),
             (True, "Ollama is running. Configured model 'llama3' matched available model 'llama3:latest'."),
         ]
     )
@@ -283,6 +282,6 @@ def test_ai_backend_status_refresh_updates_displayed_status(monkeypatch, capsys)
     main_module.handle_ai_backend_settings(state)
 
     output = capsys.readouterr().out
-    assert "Backend status: not connected" in output
+    assert "Backend status: not tested" in output
     assert "Backend status: connected" in output
     assert "llama3:latest" in output
