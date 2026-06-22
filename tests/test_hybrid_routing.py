@@ -480,6 +480,123 @@ def test_count_clients_can_be_rule_based(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "rule-based"
 
 
+CLIENTS_RELATIONSHIP_KB = {
+    "clients": {
+        "columns": [
+            {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "client_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+        ],
+        "primary_keys": ["client_id"],
+        "foreign_keys": [],
+        "relationships": [],
+    },
+    "agreements": {
+        "columns": [
+            {"name": "agreement_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "deal_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+        ],
+        "primary_keys": ["agreement_id"],
+        "foreign_keys": [
+            {"column": "client_id", "referenced_table": "clients", "referenced_column": "client_id"},
+        ],
+        "relationships": [],
+    },
+    "invoices": {
+        "columns": [
+            {"name": "invoice_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "billed_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+        ],
+        "primary_keys": ["invoice_id"],
+        "foreign_keys": [
+            {"column": "client_id", "referenced_table": "clients", "referenced_column": "client_id"},
+        ],
+        "relationships": [],
+    },
+}
+
+
+def test_show_all_clients_selected_table_stays_single_table_without_joins():
+    context = build_query_context("show all clients", CLIENTS_RELATIONSHIP_KB, use_vector_retrieval=False)
+
+    assert context["selected_table_names"] == ["clients"]
+    assert len(context["selected_tables"]) == 1
+    assert context["selected_tables"][0]["table"] == "clients"
+    assert context["join_paths"] == []
+
+
+def test_show_all_clients_uses_rule_based_without_join_or_ai(monkeypatch):
+    service = QuestionService()
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple client browse questions")),
+    )
+
+    success, message, sql, error = service.process_question("show all clients", CLIENTS_RELATIONSHIP_KB, ai_backend="local")
+
+    assert success is True
+    assert error is None
+    assert "FROM clients" in sql
+    assert "JOIN" not in sql.upper()
+    assert service.get_last_query_context()["selected_table_names"] == ["clients"]
+    assert service.get_last_query_context()["join_paths"] == []
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+
+
+def test_count_clients_uses_clients_only_without_join(monkeypatch):
+    service = QuestionService()
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple client count questions")),
+    )
+
+    success, message, sql, error = service.process_question("count clients", CLIENTS_RELATIONSHIP_KB, ai_backend="local")
+
+    assert success is True
+    assert error is None
+    assert sql == "SELECT COUNT(*) AS total_clients FROM clients;"
+    assert service.get_last_query_context()["selected_table_names"] == ["clients"]
+    assert service.get_last_query_context()["join_paths"] == []
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+
+
+def test_top_5_clients_by_deal_value_keeps_join_path_for_ai():
+    context = build_query_context("top 5 clients by deal value", CLIENTS_RELATIONSHIP_KB, use_vector_retrieval=False)
+
+    assert "clients" in context["selected_table_names"]
+    assert "agreements" in context["selected_table_names"]
+    assert context["join_paths"]
+    join_conditions = [
+        edge["join_condition"]
+        for join_path in context["join_paths"]
+        for edge in join_path["path"]
+    ]
+    assert (
+        "agreements.client_id = clients.client_id" in join_conditions
+        or "clients.client_id = agreements.client_id" in join_conditions
+    )
+    assert context["route_recommendation"] == "ai_sql_required"
+
+
+def test_billed_value_by_client_keeps_invoice_join_path_for_ai():
+    context = build_query_context("billed value by client", CLIENTS_RELATIONSHIP_KB, use_vector_retrieval=False)
+
+    assert "clients" in context["selected_table_names"]
+    assert "invoices" in context["selected_table_names"]
+    assert context["join_paths"]
+    join_conditions = [
+        edge["join_condition"]
+        for join_path in context["join_paths"]
+        for edge in join_path["path"]
+    ]
+    assert (
+        "invoices.client_id = clients.client_id" in join_conditions
+        or "clients.client_id = invoices.client_id" in join_conditions
+    )
+    assert context["route_recommendation"] == "ai_sql_required"
+
+
 def test_show_all_agreements_uses_rule_based_and_succeeds(monkeypatch):
     kb = {
         "agreements": {

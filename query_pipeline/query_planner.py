@@ -603,6 +603,52 @@ def _is_simple_primary_table_question(plan: dict[str, Any]) -> bool:
     )
 
 
+def _primary_table_for_simple_question_from_entries(
+    question: str,
+    plan: dict[str, Any],
+    table_entries: list[dict[str, Any]],
+) -> str | None:
+    """Choose one dominant table for simple single-table list/count questions."""
+    if not _is_simple_primary_table_question(plan) or not table_entries:
+        return None
+
+    ordered = [
+        entry for entry in table_entries
+        if str(entry.get("table", "")).strip()
+    ]
+    if not ordered:
+        return None
+
+    top_entry = ordered[0]
+    top_table = str(top_entry.get("table", "")).strip()
+    top_score = float(top_entry.get("score", top_entry.get("confidence", 0.0)) or 0.0)
+    second_score = (
+        float(ordered[1].get("score", ordered[1].get("confidence", 0.0)) or 0.0)
+        if len(ordered) > 1
+        else 0.0
+    )
+    direct_match = _table_name_matches_question(question, top_table)
+    second_direct_match = (
+        _table_name_matches_question(question, str(ordered[1].get("table", "")).strip())
+        if len(ordered) > 1
+        else False
+    )
+
+    if len(ordered) == 1:
+        return top_table if (direct_match or top_score >= 0.6) else None
+
+    if direct_match and not second_direct_match and top_score >= second_score:
+        return top_table
+
+    if top_score >= 0.85 and second_score < 0.7:
+        return top_table
+
+    if top_score >= second_score + 0.2 and top_score >= 0.65:
+        return top_table
+
+    return None
+
+
 def _table_name_matches_question(question: str, table_name: str) -> bool:
     normalized_question = _normalize(question)
     human_table = _humanize(table_name)
@@ -1641,9 +1687,19 @@ def _build_query_context_from_retrieved_context(
         table_name = str(entry.get("table", "")).strip()
         if table_name and table_name not in selected_table_names:
             selected_table_names.append(table_name)
-    for table_name in _tables_from_join_paths(join_paths):
-        if table_name in enriched_kb and table_name not in selected_table_names:
-            selected_table_names.append(table_name)
+
+    simple_primary_table = _primary_table_for_simple_question_from_entries(
+        question,
+        {"intent": planner_intent, "dimension": dimension, "grouping": [dimension] if dimension else [], "filters": requested_filters},
+        matched_tables,
+    )
+    if simple_primary_table:
+        selected_table_names = [simple_primary_table]
+        join_paths = []
+    else:
+        for table_name in _tables_from_join_paths(join_paths):
+            if table_name in enriched_kb and table_name not in selected_table_names:
+                selected_table_names.append(table_name)
 
     selected_tables = _table_entries_from_retrieved_context(
         [entry for entry in matched_tables if entry.get("table") in selected_table_names],
@@ -1651,13 +1707,14 @@ def _build_query_context_from_retrieved_context(
         join_paths,
         selected_table_names=selected_table_names,
     )
-    selected_table_names, selected_tables = _promote_join_path_tables(
-        selected_table_names,
-        selected_tables,
-        enriched_kb,
-        {"intent": planner_intent, "dimension": dimension, "grouping": [dimension] if dimension else [], "filters": requested_filters},
-        join_paths,
-    )
+    if not simple_primary_table:
+        selected_table_names, selected_tables = _promote_join_path_tables(
+            selected_table_names,
+            selected_tables,
+            enriched_kb,
+            {"intent": planner_intent, "dimension": dimension, "grouping": [dimension] if dimension else [], "filters": requested_filters},
+            join_paths,
+        )
 
     selected_columns = [
         {"table": entry["table"], **column_entry}
@@ -2042,6 +2099,24 @@ def build_query_context(
         glossary_matches,
         vector_results,
     )
+    simple_primary_table = _primary_table_for_simple_question_from_entries(
+        question,
+        plan,
+        [
+            {
+                "table": entry.get("table"),
+                "score": float(entry.get("confidence") or 0.0),
+                "confidence": float(entry.get("confidence") or 0.0),
+            }
+            for entry in selected_tables
+        ],
+    )
+    if simple_primary_table:
+        selected_tables = [
+            entry
+            for entry in selected_tables
+            if str(entry.get("table", "")).strip() == simple_primary_table
+        ]
     selected_names = [entry["table"] for entry in selected_tables if entry.get("table") in enriched_kb]
     if len(selected_names) != len(selected_tables):
         selected_tables = [entry for entry in selected_tables if entry.get("table") in enriched_kb]
@@ -2055,19 +2130,20 @@ def build_query_context(
         logger.debug(f"[DEBUG]   {table_name}: {len(edges['outgoing'])} outgoing, {len(edges['incoming'])} incoming")
     
     # Compute join paths between selected tables
-    join_paths = _compute_join_paths(selected_names, enriched_kb)
+    join_paths = [] if simple_primary_table else _compute_join_paths(selected_names, enriched_kb)
     logger.debug(f"[DEBUG] Computed {len(join_paths)} join paths between selected tables")
     for jp in join_paths[:3]:
         logger.debug(f"[DEBUG]   {jp['from_table']} -> {jp['to_table']} (length: {jp['length']})")
 
-    selected_names, selected_tables = _promote_join_path_tables(
-        selected_names,
-        selected_tables,
-        enriched_kb,
-        plan,
-        join_paths,
-    )
-    join_paths = _compute_join_paths(selected_names, enriched_kb)
+    if not simple_primary_table:
+        selected_names, selected_tables = _promote_join_path_tables(
+            selected_names,
+            selected_tables,
+            enriched_kb,
+            plan,
+            join_paths,
+        )
+        join_paths = _compute_join_paths(selected_names, enriched_kb)
     logger.debug(f"[DEBUG] Selected tables after join-path promotion: {selected_names}")
     logger.debug(f"[DEBUG] Recomputed {len(join_paths)} join paths after promotion")
 
