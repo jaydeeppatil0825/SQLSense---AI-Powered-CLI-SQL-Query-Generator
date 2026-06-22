@@ -306,6 +306,91 @@ def test_pipeline_context_bypasses_duplicate_context_build(monkeypatch):
     assert service.get_last_query_context()["retrieved_context"] == pipeline_context["retrieved_context"]
 
 
+def test_pipeline_route_needs_clarification_blocks_sql_generation(monkeypatch):
+    service = QuestionService()
+    pipeline_context = {
+        "normalized_question": "show entries",
+        "route_recommendation": "needs_clarification",
+        "query_context": {
+            "route_recommendation": "needs_clarification",
+            "plan": {"question": "show entries", "intent": "list"},
+            "selected_tables": [
+                {"table": "alpha_records", "confidence": 0.61},
+                {"table": "beta_events", "confidence": 0.58},
+            ],
+            "selected_table_names": ["alpha_records", "beta_events"],
+            "selected_columns": [],
+            "join_paths": [],
+        },
+        "plan": {"question": "show entries", "intent": "list"},
+        "retrieved_context": {},
+        "formula_evidence": [],
+        "evidence_sources": [],
+    }
+
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI generation should be blocked by planner clarification route")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generation should be blocked by planner clarification route")),
+    )
+
+    success, message, sql, error = service.process_question(
+        "show entries",
+        GENERIC_KB,
+        ai_backend="local",
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is False
+    assert sql is None
+    assert "ambiguous" in message.lower()
+    assert service.get_last_query_context()["route_used"] == "fallback-failed"
+
+
+def test_pipeline_route_cannot_plan_safely_blocks_sql_generation(monkeypatch):
+    service = QuestionService()
+    pipeline_context = {
+        "normalized_question": "show total by owner",
+        "route_recommendation": "cannot_plan_safely",
+        "query_context": {
+            "route_recommendation": "cannot_plan_safely",
+            "plan": {"question": "show total by owner", "intent": "total"},
+            "selected_tables": [{"table": "alpha_records", "confidence": 0.42}],
+            "selected_table_names": ["alpha_records"],
+            "selected_columns": [],
+            "join_paths": [],
+        },
+        "plan": {"question": "show total by owner", "intent": "total"},
+        "retrieved_context": {},
+        "formula_evidence": [],
+        "evidence_sources": [],
+    }
+
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI generation should be blocked when planner cannot plan safely")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generation should be blocked when planner cannot plan safely")),
+    )
+
+    success, message, sql, error = service.process_question(
+        "show total by owner",
+        GENERIC_KB,
+        ai_backend="local",
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is False
+    assert sql is None
+    assert "could not be planned safely" in message.lower()
+    assert service.get_last_query_context()["route_used"] == "fallback-failed"
+
+
 def test_legacy_simple_generator_signature_still_uses_rule_based(monkeypatch):
     service = QuestionService()
     monkeypatch.setattr("core.question_service.build_query_context", lambda *args, **kwargs: _context(["alpha_records"], intent="list"))

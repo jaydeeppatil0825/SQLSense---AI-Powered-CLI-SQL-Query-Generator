@@ -139,6 +139,9 @@ def generate_sql(
     user_question: str,
     knowledge_base: dict,
     backend: str | None = None,
+    normalized_question: str | None = None,
+    intent: dict | None = None,
+    retrieved_context: dict | None = None,
     query_plan: dict | None = None,
     selected_tables: list[dict] | None = None,
     selected_columns: list[dict] | None = None,
@@ -149,11 +152,15 @@ def generate_sql(
     join_paths: list[dict] | None = None,
     formula_evidence: list[dict] | None = None,
     evidence_sources: list[str] | None = None,
+    route_recommendation: str | None = None,
 ) -> str:
     """Generate a SQL SELECT statement from the provided runtime context."""
     messages = build_sql_prompt(
         user_question,
         knowledge_base,
+        normalized_question=normalized_question,
+        intent=intent,
+        retrieved_context=retrieved_context,
         query_plan=query_plan,
         selected_tables=selected_tables,
         selected_columns=selected_columns,
@@ -164,6 +171,7 @@ def generate_sql(
         join_paths=join_paths,
         formula_evidence=formula_evidence,
         evidence_sources=evidence_sources,
+        route_recommendation=route_recommendation,
     )
     raw_response = _call_ai_backend(messages, backend or "local")
     return _clean_sql_response(raw_response)
@@ -175,6 +183,9 @@ def generate_sql_with_retry(
     backend: str,
     first_attempt_sql: str,
     validation_reason: str,
+    normalized_question: str | None = None,
+    intent: dict | None = None,
+    retrieved_context: dict | None = None,
     query_plan: dict | None = None,
     selected_tables: list[dict] | None = None,
     selected_columns: list[dict] | None = None,
@@ -186,11 +197,15 @@ def generate_sql_with_retry(
     join_paths: list[dict] | None = None,
     formula_evidence: list[dict] | None = None,
     evidence_sources: list[str] | None = None,
+    route_recommendation: str | None = None,
 ) -> str:
     """Retry AI SQL generation once after a failed first attempt."""
     base_messages = build_sql_prompt(
         user_question,
         knowledge_base,
+        normalized_question=normalized_question,
+        intent=intent,
+        retrieved_context=retrieved_context,
         query_plan=query_plan,
         selected_tables=selected_tables,
         selected_columns=selected_columns,
@@ -201,6 +216,7 @@ def generate_sql_with_retry(
         join_paths=join_paths,
         formula_evidence=formula_evidence,
         evidence_sources=evidence_sources,
+        route_recommendation=route_recommendation,
     )
 
     correction_system = (

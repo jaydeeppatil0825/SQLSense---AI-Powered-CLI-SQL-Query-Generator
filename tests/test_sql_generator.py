@@ -1,6 +1,111 @@
 """Tests for AI SQL generation prompt assembly and retry context."""
 
-from ai.sql_generator import generate_sql_with_retry
+from ai.sql_generator import generate_sql, generate_sql_with_retry
+
+
+def test_generate_sql_prompt_uses_pipeline_context(monkeypatch):
+    captured = {}
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        captured["messages"] = messages
+        captured["backend"] = backend
+        return "SELECT a.account_label FROM accounts a;"
+
+    monkeypatch.setattr("ai.sql_generator._call_ai_backend", fake_call_ai_backend)
+
+    knowledge_base = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "semantic_type": "name"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+        },
+        "deals": {
+            "columns": [
+                {"name": "deal_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "account_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "deal_value", "type": "DECIMAL(12,2)", "semantic_type": "money"},
+            ],
+            "primary_keys": ["deal_id"],
+            "foreign_keys": [
+                {"column": "account_id", "referenced_table": "accounts", "referenced_column": "account_id"},
+            ],
+        },
+    }
+
+    sql = generate_sql(
+        user_question="top 5 accounts by deal value",
+        knowledge_base=knowledge_base,
+        backend="local",
+        normalized_question="top 5 accounts by deal value",
+        intent={
+            "intent_type": "ranking",
+            "requested_metrics": ["deal value"],
+            "requested_dimensions": ["accounts"],
+            "needs_grouping": True,
+            "needs_aggregation": True,
+            "needs_join": True,
+            "limit": 5,
+        },
+        retrieved_context={
+            "matched_tables": [{"table": "accounts", "score": 0.95}, {"table": "deals", "score": 0.93}],
+            "matched_columns": [{"table": "deals", "column": "deal_value", "score": 0.96}],
+            "possible_join_paths": [
+                {
+                    "from_table": "accounts",
+                    "to_table": "deals",
+                    "path": [
+                        {
+                            "from_table": "accounts",
+                            "from_column": "account_id",
+                            "to_table": "deals",
+                            "to_column": "account_id",
+                            "join_condition": "accounts.account_id = deals.account_id",
+                        }
+                    ],
+                }
+            ],
+            "retrieval_sources": ["kb_identifier", "relationship_context"],
+            "confidence": 0.94,
+        },
+        query_plan={"intent": "top_n", "grouping": ["accounts"], "limit": 5},
+        selected_tables=[{"table": "accounts", "confidence": 0.95}, {"table": "deals", "confidence": 0.93}],
+        selected_columns=[
+            {"table": "accounts", "column": "account_label", "semantic_type": "name"},
+            {"table": "deals", "column": "deal_value", "semantic_type": "money"},
+        ],
+        measure_candidates=[{"table": "deals", "column": "deal_value", "semantic_type": "money"}],
+        dimension_candidates=[{"table": "accounts", "column": "account_label", "semantic_type": "name"}],
+        join_paths=[
+            {
+                "from_table": "accounts",
+                "to_table": "deals",
+                "path": [
+                    {
+                        "from_table": "accounts",
+                        "from_column": "account_id",
+                        "to_table": "deals",
+                        "to_column": "account_id",
+                        "join_condition": "accounts.account_id = deals.account_id",
+                    }
+                ],
+            }
+        ],
+        evidence_sources=["kb_identifier", "relationship_context"],
+        route_recommendation="ai_sql_required",
+    )
+
+    assert sql == "SELECT a.account_label FROM accounts a;"
+    system_prompt = captured["messages"][0]["content"]
+    assert "Normalized question: top 5 accounts by deal value" in system_prompt
+    assert "Route recommendation: ai_sql_required" in system_prompt
+    assert "Structured intent from pipeline:" in system_prompt
+    assert "Retrieved dynamic context from pipeline:" in system_prompt
+    assert "possible_join_paths" in system_prompt
+    assert "accounts.account_id = deals.account_id" in system_prompt
+    assert "Use ONLY the provided selected tables, selected columns, runtime candidates, and supplied join paths." in system_prompt
 
 
 def test_retry_prompt_includes_validation_error_and_join_context(monkeypatch):

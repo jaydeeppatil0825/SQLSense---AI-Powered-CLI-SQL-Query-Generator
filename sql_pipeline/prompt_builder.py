@@ -451,9 +451,63 @@ def _build_relationship_section(knowledge_base: dict, selected_tables: list[dict
     return ["Detected schema relationships to prefer for JOINs:"] + relationship_lines + [""]
 
 
+def _build_pipeline_evidence_section(
+    normalized_question: str | None,
+    intent: dict | None,
+    retrieved_context: dict | None,
+    route_recommendation: str | None,
+) -> list[str]:
+    lines: list[str] = []
+    if normalized_question:
+        lines.append(f"Normalized question: {normalized_question}")
+    if route_recommendation:
+        lines.append(f"Route recommendation: {route_recommendation}")
+    if intent:
+        lines.append("Structured intent from pipeline:")
+        for key in (
+            "user_goal",
+            "intent_type",
+            "business_operation",
+            "requested_metrics",
+            "requested_dimensions",
+            "requested_filters",
+            "requested_sort",
+            "limit",
+            "needs_grouping",
+            "needs_aggregation",
+            "needs_join",
+            "raw_business_terms",
+            "confidence",
+        ):
+            if key in intent:
+                lines.append(f"  {key}: {intent.get(key)}")
+    if retrieved_context:
+        lines.append("Retrieved dynamic context from pipeline:")
+        for label, key in (
+            ("matched_tables", "matched_tables"),
+            ("matched_columns", "matched_columns"),
+            ("matched_glossary_terms", "matched_glossary_terms"),
+            ("matched_relationships", "matched_relationships"),
+            ("possible_join_paths", "possible_join_paths"),
+            ("measure_candidates", "measure_candidates"),
+            ("dimension_candidates", "dimension_candidates"),
+            ("filter_candidates", "filter_candidates"),
+            ("retrieval_sources", "retrieval_sources"),
+            ("confidence", "confidence"),
+        ):
+            if key in retrieved_context and retrieved_context.get(key) not in (None, [], {}, ""):
+                lines.append(f"  {label}: {retrieved_context.get(key)}")
+    if lines:
+        lines.append("")
+    return lines
+
+
 def build_sql_prompt(
     user_question: str,
     knowledge_base: dict,
+    normalized_question: str | None = None,
+    intent: dict | None = None,
+    retrieved_context: dict | None = None,
     query_plan: dict | None = None,
     selected_tables: list[dict] | None = None,
     selected_columns: list[dict] | None = None,
@@ -464,6 +518,7 @@ def build_sql_prompt(
     join_paths: list[dict] | None = None,
     formula_evidence: list[dict] | None = None,
     evidence_sources: list[str] | None = None,
+    route_recommendation: str | None = None,
 ) -> list[dict]:
     """Build an OpenAI-compatible message list for SQL generation."""
     if not knowledge_base:
@@ -497,8 +552,21 @@ def build_sql_prompt(
     system_parts.append("")
     system_parts.append(_AI_PLAN_RULES)
     system_parts.append("")
+    system_parts.append(
+        "Pipeline execution rule: Use ONLY the provided selected tables, selected columns, runtime candidates, "
+        "and supplied join paths. If safe evidence is missing, do not invent schema details."
+    )
+    system_parts.append("")
     system_parts.append(f"LIMIT rule: {limit_instruction}")
     system_parts.append("")
+    system_parts.extend(
+        _build_pipeline_evidence_section(
+            normalized_question,
+            intent,
+            retrieved_context,
+            route_recommendation,
+        )
+    )
     system_parts.append(_get_relevant_glossary_terms(user_question, knowledge_base, glossary=business_glossary))
     system_parts.append("")
     system_parts.extend(_build_plan_section(query_plan, selected_tables, join_paths))

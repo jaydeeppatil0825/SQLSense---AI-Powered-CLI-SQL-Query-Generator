@@ -369,6 +369,10 @@ def _merge_pipeline_metadata(
         query_context.setdefault("formula_evidence", list(pipeline_context["formula_evidence"]))
     if isinstance(pipeline_context.get("evidence_sources"), list):
         query_context.setdefault("evidence_sources", list(pipeline_context["evidence_sources"]))
+    if str(pipeline_context.get("normalized_question") or "").strip():
+        query_context.setdefault("normalized_question", str(pipeline_context["normalized_question"]).strip())
+    if str(pipeline_context.get("route_recommendation") or "").strip():
+        query_context.setdefault("route_recommendation", str(pipeline_context["route_recommendation"]).strip())
 
     pipeline_plan = pipeline_context.get("plan")
     if isinstance(pipeline_plan, dict):
@@ -381,6 +385,36 @@ def _merge_pipeline_metadata(
             query_context["plan"] = dict(pipeline_plan)
 
     return query_context
+
+
+def _route_recommendation(query_context: dict[str, Any]) -> str:
+    route = str(query_context.get("route_recommendation") or "").strip()
+    if route:
+        return route
+    pipeline_context = query_context.get("pipeline_context")
+    if isinstance(pipeline_context, dict):
+        route = str(pipeline_context.get("route_recommendation") or "").strip()
+        if route:
+            return route
+    return ""
+
+
+def _planning_block_message(query_context: dict[str, Any], route_recommendation: str) -> str:
+    if route_recommendation == "needs_clarification":
+        return _clarification_message(query_context)
+    return (
+        "Question could not be planned safely from the current schema context. "
+        "Please be more specific or rebuild the knowledge base."
+    )
+
+
+def _should_try_rule_based_from_pipeline(query_context: dict[str, Any]) -> tuple[bool, str]:
+    route_recommendation = _route_recommendation(query_context)
+    if route_recommendation == "simple_rule_ok":
+        return True, "query pipeline recommended deterministic SQL from strong runtime evidence"
+    if route_recommendation == "ai_sql_required":
+        return False, "query pipeline recommended AI SQL for this question"
+    return _should_try_rule_based_first(query_context)
 
 
 def _validate_business_sql_fit(sql: str, query_context: dict[str, Any]) -> tuple[bool, str]:
@@ -1152,6 +1186,15 @@ class QuestionService:
             )
         query_context = _merge_pipeline_metadata(query_context, pipeline_context)
         self.last_query_context = query_context
+        route_recommendation = _route_recommendation(query_context)
+        if isinstance(pipeline_context, dict) and route_recommendation in {"needs_clarification", "cannot_plan_safely"}:
+            route_reason = (
+                "query pipeline requested clarification before SQL generation"
+                if route_recommendation == "needs_clarification"
+                else "query pipeline could not plan this question safely from runtime evidence"
+            )
+            _set_route(query_context, "fallback-failed", route_reason)
+            return False, _planning_block_message(query_context, route_recommendation), None, None
         if _needs_simple_table_clarification(query_context):
             _set_route(
                 query_context,
@@ -1162,7 +1205,9 @@ class QuestionService:
         scoped_knowledge_base = query_context.get("selected_knowledge_base", knowledge_base)
         full_knowledge_base = query_context.get("knowledge_base", knowledge_base)
         query_plan = query_context.get("plan")
-        prefer_rule_based, route_reason = _should_try_rule_based_first(query_context)
+        intent_payload = query_context.get("intent") or (pipeline_context or {}).get("intent") or {}
+        retrieved_context_payload = query_context.get("retrieved_context") or (pipeline_context or {}).get("retrieved_context") or {}
+        prefer_rule_based, route_reason = _should_try_rule_based_from_pipeline(query_context)
         ai_failure_reason: str | None = None
         ai_rejected_sql: str | None = None
         last_rejected_sql: str | None = None
@@ -1331,6 +1376,9 @@ class QuestionService:
             try:
                 base_generate_kwargs = {
                     "backend": ai_backend,
+                    "normalized_question": str(query_context.get("normalized_question") or rewritten_question),
+                    "intent": intent_payload,
+                    "retrieved_context": retrieved_context_payload,
                     "query_plan": query_plan,
                     "selected_tables": query_context.get("selected_tables"),
                     "selected_columns": query_context.get("selected_columns"),
@@ -1341,6 +1389,7 @@ class QuestionService:
                     "join_paths": _possible_join_paths(query_context),
                     "formula_evidence": _formula_evidence_payload(query_context),
                     "evidence_sources": _evidence_sources_payload(query_context),
+                    "route_recommendation": route_recommendation or None,
                 }
                 raw_sql = _call_with_optional_kwargs(
                     generate_sql,
@@ -1349,6 +1398,9 @@ class QuestionService:
                     optional_kwargs=base_generate_kwargs,
                     removable_kwargs=(
                         "backend",
+                        "normalized_question",
+                        "intent",
+                        "retrieved_context",
                         "query_plan",
                         "selected_tables",
                         "selected_columns",
@@ -1359,6 +1411,7 @@ class QuestionService:
                         "join_paths",
                         "formula_evidence",
                         "evidence_sources",
+                        "route_recommendation",
                     ),
                 )
                 logger.info(f"SQL generated by AI: {raw_sql[:100]}...")
@@ -1378,6 +1431,9 @@ class QuestionService:
 
                 logger.warning(f"AI SQL did not meet validation requirements: {ai_reason}. Retrying...")
                 retry_generate_kwargs = {
+                    "normalized_question": str(query_context.get("normalized_question") or rewritten_question),
+                    "intent": intent_payload,
+                    "retrieved_context": retrieved_context_payload,
                     "query_plan": query_plan,
                     "selected_tables": query_context.get("selected_tables"),
                     "selected_columns": query_context.get("selected_columns"),
@@ -1389,6 +1445,7 @@ class QuestionService:
                     "join_paths": _possible_join_paths(query_context),
                     "formula_evidence": _formula_evidence_payload(query_context),
                     "evidence_sources": _evidence_sources_payload(query_context),
+                    "route_recommendation": route_recommendation or None,
                 }
                 retry_raw = _call_with_optional_kwargs(
                     generate_sql_with_retry,
@@ -1402,6 +1459,9 @@ class QuestionService:
                     },
                     removable_kwargs=(
                         "backend",
+                        "normalized_question",
+                        "intent",
+                        "retrieved_context",
                         "query_plan",
                         "selected_tables",
                         "selected_columns",
@@ -1413,6 +1473,7 @@ class QuestionService:
                         "join_paths",
                         "formula_evidence",
                         "evidence_sources",
+                        "route_recommendation",
                     ),
                 )
                 retry_sql = _apply_explicit_limit_if_safe(retry_raw.strip())

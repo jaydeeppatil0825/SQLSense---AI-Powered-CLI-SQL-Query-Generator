@@ -41,20 +41,25 @@ def _service_with_orders(monkeypatch, tmp_path):
 
 def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypatch, tmp_path):
     service = _service_with_orders(monkeypatch, tmp_path)
+    expected_sql = "SELECT SUM(final_amount) AS total_sales FROM orders;"
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: expected_sql,
+    )
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda user_question, knowledge_base, backend=None, query_plan=None, selected_tables=None: "SELECT SUM(final_amount) AS total_sales FROM orders;",
+        lambda user_question, knowledge_base, backend=None, query_plan=None, selected_tables=None: expected_sql,
     )
     monkeypatch.setattr(
         "core.question_service.generate_sql_with_retry",
-        lambda user_question, knowledge_base, backend, first_attempt_sql, validation_reason, query_plan=None, selected_tables=None: "SELECT SUM(final_amount) AS total_sales FROM orders;",
+        lambda user_question, knowledge_base, backend, first_attempt_sql, validation_reason, query_plan=None, selected_tables=None: expected_sql,
     )
 
     success, message, sql, error = service.process_question("show total sales", ai_backend="local")
 
     assert success is True
     assert error is None
-    assert sql == "SELECT SUM(final_amount) AS total_sales FROM orders;"
+    assert sql == expected_sql
     assert service.get_last_sql() == sql
 
     exec_success, exec_message, rows = service.execute_sql(service.get_last_sql(), revalidate=True)
