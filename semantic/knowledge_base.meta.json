@@ -2,9 +2,9 @@
     "db_engine": "mysql",
     "db_host": "localhost",
     "db_port": "3306",
-    "db_name": "sqlsense_small_test",
+    "db_name": "sqlsense_sg3_test",
     "database_type": "mysql",
-    "database_name": "sqlsense_small_test",
-    "schema_hash": "3adf346d197b7c43620d0a1fe781de5bd9aae364fd2da163cd956ed8988ed541",
-    "schema_fingerprint": "3adf346d197b7c43620d0a1fe781de5bd9aae364fd2da163cd956ed8988ed541"
+    "database_name": "sqlsense_sg3_test",
+    "schema_hash": "95b9d66273cf566e330d49812c42f67d925a498aa24784ef9977b6dcc96faee1",
+    "schema_fingerprint": "95b9d66273cf566e330d49812c42f67d925a498aa24784ef9977b6dcc96faee1"
 }
