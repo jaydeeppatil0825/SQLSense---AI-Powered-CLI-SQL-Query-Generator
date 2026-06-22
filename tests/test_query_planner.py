@@ -646,8 +646,8 @@ def test_qp1_missing_join_path_detection():
     assert context["missing_evidence"]["missing_join_path"] is True
 
 
-def test_qp1_missing_formula_evidence_detection():
-    """Test that formula evidence is marked as missing for pending billed amount questions."""
+def test_qp1_missing_formula_evidence_detection_requires_dynamic_context():
+    """Formula evidence should not be inferred from raw words alone in legacy planning mode."""
     knowledge_base = {
         "billing": {
             "columns": [
@@ -667,7 +667,7 @@ def test_qp1_missing_formula_evidence_detection():
         use_vector_retrieval=False,
     )
 
-    assert context["missing_evidence"]["missing_formula_evidence"] is True
+    assert context["missing_evidence"]["missing_formula_evidence"] is False
 
 
 def test_qp1_route_recommendation_simple_rule_ok():
