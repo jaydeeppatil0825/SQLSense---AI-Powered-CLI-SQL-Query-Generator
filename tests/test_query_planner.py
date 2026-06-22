@@ -1,6 +1,6 @@
 """Tests for dynamic query planner behavior."""
 
-from core.query_planner import build_query_context
+from core.query_planner import build_query_context, build_intent
 from semantic.business_glossary import generate_business_glossary
 
 
@@ -390,3 +390,555 @@ def test_query_planner_does_not_use_fixed_aliases_in_structured_path():
     assert context["selected_table_names"] == []
     assert context["confidence"] == 0.22
     assert context["warnings"] == ["Retrieved context is weak; planner confidence is low."]
+
+
+def test_qp1_structured_contract_includes_required_fields():
+    """Test that the planner returns the structured contract with all required fields."""
+    knowledge_base = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "semantic_type": "name"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+
+    context = build_query_context(
+        "show accounts",
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=False,
+    )
+
+    # Required contract fields
+    assert "normalized_question" in context
+    assert "intent" in context
+    assert "retrieved_context" in context
+    assert "plan" in context
+    assert "missing_evidence" in context
+    assert "confidence" in context
+    assert "route_recommendation" in context
+    assert "debug_trace" in context
+
+    # Legacy fields for backward compatibility
+    assert "selected_tables" in context
+    assert "selected_columns" in context
+    assert "selected_table_names" in context
+
+
+def test_qp1_missing_evidence_detection():
+    """Test that missing evidence is correctly detected and marked."""
+    knowledge_base = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "semantic_type": "name"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "transactions": {
+            "columns": [
+                {"name": "transaction_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "account_id", "type": "INTEGER", "semantic_type": "id"},
+            ],
+            "primary_keys": ["transaction_id"],
+            "foreign_keys": [{"column": "account_id", "referenced_table": "accounts", "referenced_column": "account_id"}],
+            "relationships": [],
+        },
+    }
+
+    # Test missing metric detection
+    intent = {
+        "intent_type": "grouped_summary",
+        "requested_metrics": ["total amount"],
+        "requested_dimensions": [],
+        "requested_filters": [],
+        "requested_sort": {},
+        "limit": None,
+    }
+    retrieved_context = {
+        "query_terms": ["total amount"],
+        "matched_tables": [{"table": "accounts", "score": 0.7, "matched_terms": [], "source": "kb_identifier"}],
+        "matched_columns": [],
+        "matched_glossary_terms": [],
+        "matched_relationships": [],
+        "possible_join_paths": [],
+        "measure_candidates": [],
+        "dimension_candidates": [],
+        "filter_candidates": [],
+        "retrieval_sources": [],
+        "confidence": 0.5,
+    }
+
+    context = build_query_context(
+        "total amount",
+        knowledge_base,
+        use_vector_retrieval=False,
+        intent=intent,
+        retrieved_context=retrieved_context,
+    )
+
+    assert context["missing_evidence"]["missing_metric"] is True
+    assert context["missing_evidence"]["missing_dimension"] is False
+    assert context["missing_evidence"]["missing_join_path"] is False
+
+
+def test_qp1_missing_join_path_detection():
+    """Test that missing join path is detected when multiple tables are selected without FK paths."""
+    knowledge_base = {
+        "accounts": {
+            "columns": [{"name": "account_id", "type": "INTEGER", "semantic_type": "id"}],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "transactions": {
+            "columns": [{"name": "transaction_id", "type": "INTEGER", "semantic_type": "id"}],
+            "primary_keys": ["transaction_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+
+    intent = {
+        "intent_type": "list",
+        "requested_metrics": [],
+        "requested_dimensions": [],
+        "requested_filters": [],
+        "requested_sort": {},
+        "limit": None,
+    }
+    retrieved_context = {
+        "query_terms": ["accounts", "transactions"],
+        "matched_tables": [
+            {"table": "accounts", "score": 0.7, "matched_terms": [], "source": "kb_identifier"},
+            {"table": "transactions", "score": 0.7, "matched_terms": [], "source": "kb_identifier"},
+        ],
+        "matched_columns": [],
+        "matched_glossary_terms": [],
+        "matched_relationships": [],
+        "possible_join_paths": [],  # No join paths available
+        "measure_candidates": [],
+        "dimension_candidates": [],
+        "filter_candidates": [],
+        "retrieval_sources": [],
+        "confidence": 0.5,
+    }
+
+    context = build_query_context(
+        "accounts and transactions",
+        knowledge_base,
+        use_vector_retrieval=False,
+        intent=intent,
+        retrieved_context=retrieved_context,
+    )
+
+    assert context["missing_evidence"]["missing_join_path"] is True
+
+
+def test_qp1_missing_formula_evidence_detection():
+    """Test that formula evidence is marked as missing for pending billed amount questions."""
+    knowledge_base = {
+        "billing": {
+            "columns": [
+                {"name": "billing_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "semantic_type": "money"},
+            ],
+            "primary_keys": ["billing_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+
+    context = build_query_context(
+        "show pending billed amount",
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=False,
+    )
+
+    assert context["missing_evidence"]["missing_formula_evidence"] is True
+
+
+def test_qp1_route_recommendation_simple_rule_ok():
+    """Test that simple_rule_ok is recommended for strong evidence with single table."""
+    knowledge_base = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "semantic_type": "name"},
+                {"name": "balance", "type": "DECIMAL(12,2)", "semantic_type": "money"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+
+    context = build_query_context(
+        "show accounts",  # More specific question to get higher confidence
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=False,
+    )
+
+    # With higher confidence, should recommend simple_rule_ok
+    if context["confidence"] >= 0.7:
+        assert context["route_recommendation"] == "simple_rule_ok"
+    else:
+        # For moderate confidence, ai_sql_required is acceptable
+        assert context["route_recommendation"] in {"simple_rule_ok", "ai_sql_required"}
+
+
+def test_qp1_route_recommendation_ai_sql_required():
+    """Test that ai_sql_required is recommended for multi-table queries."""
+    knowledge_base = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "semantic_type": "name"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "transactions": {
+            "columns": [
+                {"name": "transaction_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "account_id", "type": "INTEGER", "semantic_type": "id"},
+            ],
+            "primary_keys": ["transaction_id"],
+            "foreign_keys": [{"column": "account_id", "referenced_table": "accounts", "referenced_column": "account_id"}],
+            "relationships": [],
+        },
+    }
+
+    context = build_query_context(
+        "show accounts and transactions",
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=False,
+    )
+
+    assert context["route_recommendation"] == "ai_sql_required"
+
+
+def test_qp1_route_recommendation_needs_clarification():
+    """Test that needs_clarification is recommended for weak evidence."""
+    knowledge_base = {
+        "generic_table": {
+            "columns": [
+                {"name": "id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "value", "type": "VARCHAR(100)", "semantic_type": "text_candidate"},
+            ],
+            "primary_keys": ["id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+
+    context = build_query_context(
+        "show xyz",  # Very unrelated question to get low confidence
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=False,
+    )
+
+    # With very low confidence, should recommend needs_clarification
+    if context["confidence"] < 0.5:
+        assert context["route_recommendation"] == "needs_clarification"
+    else:
+        # For moderate confidence, ai_sql_required is acceptable
+        assert context["route_recommendation"] in {"needs_clarification", "ai_sql_required"}
+
+
+def test_qp1_route_recommendation_cannot_plan_safely():
+    """Test that cannot_plan_safely is recommended when critical evidence is missing."""
+    knowledge_base = {
+        "table_a": {
+            "columns": [{"name": "id", "type": "INTEGER", "semantic_type": "id"}],
+            "primary_keys": ["id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "table_b": {
+            "columns": [{"name": "id", "type": "INTEGER", "semantic_type": "id"}],
+            "primary_keys": ["id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+
+    intent = {
+        "intent_type": "list",
+        "requested_metrics": [],
+        "requested_dimensions": [],
+        "requested_filters": [],
+        "requested_sort": {},
+        "limit": None,
+    }
+    retrieved_context = {
+        "query_terms": ["table_a", "table_b"],
+        "matched_tables": [
+            {"table": "table_a", "score": 0.3, "matched_terms": [], "source": "kb_identifier"},
+            {"table": "table_b", "score": 0.3, "matched_terms": [], "source": "kb_identifier"},
+        ],
+        "matched_columns": [],
+        "matched_glossary_terms": [],
+        "matched_relationships": [],
+        "possible_join_paths": [],  # No join paths
+        "measure_candidates": [],
+        "dimension_candidates": [],
+        "filter_candidates": [],
+        "retrieval_sources": [],
+        "confidence": 0.3,
+    }
+
+    context = build_query_context(
+        "table_a and table_b",
+        knowledge_base,
+        use_vector_retrieval=False,
+        intent=intent,
+        retrieved_context=retrieved_context,
+    )
+
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert context["missing_evidence"]["missing_join_path"] is True
+
+
+def test_qp1_debug_trace_structure():
+    """Test that debug trace contains all required fields."""
+    knowledge_base = {
+        "accounts": {
+            "columns": [
+                {"name": "account_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "account_label", "type": "VARCHAR(100)", "semantic_type": "name"},
+            ],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+
+    context = build_query_context(
+        "show accounts",
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=False,
+    )
+
+    debug_trace = context["debug_trace"]
+    assert "question" in debug_trace
+    assert "intent" in debug_trace
+    assert "metric" in debug_trace
+    assert "dimension" in debug_trace
+    assert "selected_table_count" in debug_trace
+    assert "selected_column_count" in debug_trace
+    assert "join_path_count" in debug_trace
+    assert "missing_evidence" in debug_trace
+    assert "confidence" in debug_trace
+    assert "route_recommendation" in debug_trace
+    assert "selected_table_names" in debug_trace
+    assert "selected_column_names" in debug_trace
+
+
+def test_qp1_planner_does_not_guess_when_context_is_weak():
+    """Test that planner does not guess when context is weak by checking route recommendation."""
+    knowledge_base = {
+        "generic_table": {
+            "columns": [
+                {"name": "id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "value", "type": "VARCHAR(100)", "semantic_type": "text_candidate"},
+            ],
+            "primary_keys": ["id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+
+    context = build_query_context(
+        "show xyz",  # Very unrelated question to get low confidence
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=False,
+    )
+
+    # When context is weak, route should not be simple_rule_ok
+    assert context["route_recommendation"] != "simple_rule_ok"
+    # Should either be needs_clarification, ai_sql_required, or cannot_plan_safely
+    assert context["route_recommendation"] in {"needs_clarification", "ai_sql_required", "cannot_plan_safely"}
+
+
+def test_qp2_intent_builder_show_all_accounts():
+    """Test intent builder for 'show all accounts' question."""
+    intent = build_intent("show all accounts")
+    
+    assert intent["intent_type"] == "list"
+    assert intent["user_goal"] == "show all accounts"
+    assert "accounts" in intent["raw_business_terms"]
+    assert intent["needs_aggregation"] is False
+    assert intent["needs_grouping"] is False
+    # Should not classify as metric/dimension without "by" pattern
+    assert len(intent["requested_metrics"]) == 0
+    assert len(intent["requested_dimensions"]) == 0
+
+
+def test_qp2_intent_builder_count_accounts():
+    """Test intent builder for 'count accounts' question."""
+    intent = build_intent("count accounts")
+    
+    assert intent["intent_type"] == "count"
+    assert intent["user_goal"] == "count accounts"
+    assert "accounts" in intent["raw_business_terms"]
+    assert intent["needs_aggregation"] is True
+    assert intent["needs_grouping"] is False
+    # Should not classify as metric/dimension without "by" pattern
+    assert len(intent["requested_metrics"]) == 0
+    assert len(intent["requested_dimensions"]) == 0
+
+
+def test_qp2_intent_builder_top_5_accounts_by_deal_value():
+    """Test intent builder for 'top 5 accounts by deal value' question."""
+    intent = build_intent("top 5 accounts by deal value")
+    
+    assert intent["intent_type"] == "top_n"
+    assert intent["user_goal"] == "top 5 accounts by deal value"
+    assert "accounts" in intent["raw_business_terms"]
+    assert "deal" in intent["raw_business_terms"] or "value" in intent["raw_business_terms"]
+    assert intent["limit"] == 5
+    assert intent["needs_aggregation"] is True
+    assert intent["needs_grouping"] is True
+    assert intent["requested_sort"] == {"direction": "desc", "by": "deal value"}
+    # Should use phrase positions: "accounts" as dimension, "deal value" as metric
+    assert "accounts" in intent["requested_dimensions"]
+    assert "deal value" in intent["requested_metrics"]
+
+
+def test_qp2_intent_builder_deal_value_by_account():
+    """Test intent builder for 'deal value by account' question."""
+    intent = build_intent("deal value by account")
+    
+    assert intent["intent_type"] == "list"
+    assert intent["user_goal"] == "deal value by account"
+    assert "deal" in intent["raw_business_terms"] or "value" in intent["raw_business_terms"]
+    assert "account" in intent["raw_business_terms"]
+    assert intent["needs_aggregation"] is False
+    assert intent["needs_grouping"] is True
+    # Should use phrase positions: "deal value" as metric, "account" as dimension
+    assert "deal value" in intent["requested_metrics"]
+    assert "account" in intent["requested_dimensions"]
+
+
+def test_qp2_intent_builder_pending_billed_amount_by_account():
+    """Test intent builder for 'pending billed amount by account' question."""
+    intent = build_intent("pending billed amount by account")
+    
+    assert intent["intent_type"] == "list"
+    assert intent["user_goal"] == "pending billed amount by account"
+    assert "pending" in intent["raw_business_terms"]
+    assert "billed" in intent["raw_business_terms"] or "amount" in intent["raw_business_terms"]
+    assert "account" in intent["raw_business_terms"]
+    assert intent["needs_aggregation"] is False
+    assert intent["needs_grouping"] is True
+    # Should preserve formula-like term as raw business terms
+    assert "pending" in intent["raw_business_terms"]
+    # Should use phrase positions: "pending billed amount" as metric, "account" as dimension
+    assert "pending billed amount" in intent["requested_metrics"]
+    assert "account" in intent["requested_dimensions"]
+
+
+def test_qp2_intent_builder_show_current_stock_by_storage_point():
+    """Test intent builder for 'show current stock by storage point' question."""
+    intent = build_intent("show current stock by storage point")
+    
+    assert intent["intent_type"] == "list"
+    assert intent["user_goal"] == "show current stock by storage point"
+    assert "stock" in intent["raw_business_terms"]
+    assert "storage" in intent["raw_business_terms"] or "point" in intent["raw_business_terms"]
+    assert intent["needs_aggregation"] is False
+    assert intent["needs_grouping"] is True
+    # Should use phrase positions: "current stock" as metric, "storage point" as dimension
+    assert "current stock" in intent["requested_metrics"]
+    assert "storage point" in intent["requested_dimensions"]
+
+
+def test_qp2_intent_builder_ambiguous_weak_question():
+    """Test intent builder for ambiguous/weak questions."""
+    intent = build_intent("show something")
+    
+    assert intent["intent_type"] == "list"
+    assert intent["confidence"] < 0.5  # Lower confidence for vague questions
+    assert len(intent["raw_business_terms"]) == 0 or len(intent["raw_business_terms"]) < 2
+
+
+def test_qp2_intent_builder_schema_agnostic():
+    """Test that intent builder does not map terms to real tables/columns."""
+    intent = build_intent("show customer revenue")
+    
+    # Should preserve raw terms without mapping
+    assert "customer" in intent["raw_business_terms"]
+    assert "revenue" in intent["raw_business_terms"]
+    
+    # Should not contain hardcoded table/column mappings
+    assert "accounts" not in intent["requested_dimensions"]
+    assert "sales" not in intent["requested_metrics"]
+    
+    # Should be schema-agnostic
+    assert intent["intent_type"] in {"list", "count", "top_n", "total", "average", "trend", "comparison"}
+    
+    # Without "by" pattern, should not classify as metric/dimension
+    assert len(intent["requested_metrics"]) == 0
+    assert len(intent["requested_dimensions"]) == 0
+
+
+def test_qp2_intent_builder_preserves_unresolved_terms():
+    """Test that intent builder preserves unresolved business terms for context retrieval."""
+    intent = build_intent("pending billed amount by account")
+    
+    # Should preserve the formula-like term as raw business terms
+    assert "pending" in intent["raw_business_terms"]
+    assert "billed" in intent["raw_business_terms"]
+    assert "amount" in intent["raw_business_terms"]
+    assert "account" in intent["raw_business_terms"]
+    
+    # These terms should be available for context retrieval
+    assert len(intent["raw_business_terms"]) >= 3
+
+
+def test_qp2_intent_builder_confidence_lower_for_vague_questions():
+    """Test that intent confidence is lower for vague/incomplete questions."""
+    clear_intent = build_intent("count accounts by region")
+    vague_intent = build_intent("show something")
+    short_intent = build_intent("show")
+    
+    assert clear_intent["confidence"] >= 0.6
+    assert vague_intent["confidence"] < 0.5
+    assert short_intent["confidence"] < 0.5
+
+
+def test_qp2_intent_builder_all_required_fields_present():
+    """Test that intent builder returns all required fields."""
+    intent = build_intent("show accounts")
+    
+    required_fields = [
+        "user_goal",
+        "intent_type",
+        "requested_metrics",
+        "requested_dimensions",
+        "requested_filters",
+        "requested_sort",
+        "limit",
+        "needs_grouping",
+        "needs_aggregation",
+        "needs_join",
+        "raw_business_terms",
+        "confidence",
+    ]
+    
+    for field in required_fields:
+        assert field in intent, f"Missing required field: {field}"

@@ -50,8 +50,7 @@ Responsibilities:
 - BFS join-path foundation
 - vector index build/load
 - KB/glossary/vector metadata persistence
-
-
+-
 
 
 Current files:

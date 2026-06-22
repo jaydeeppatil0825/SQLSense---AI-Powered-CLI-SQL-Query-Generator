@@ -194,7 +194,7 @@ def _routing_tokens(value: str) -> set[str]:
         elif token.endswith("ses") and len(token) > 3:
             expanded.add(token[:-2])
         elif token.endswith("s") and not token.endswith("ss") and len(token) > 1:
-            expanded.add(token[:-1])
+            expanded.add(token[:-1]) 
     return expanded
 
 

@@ -139,6 +139,218 @@ def _detect_intent(question: str) -> str:
     return "list"
 
 
+def _extract_business_terms(question: str) -> list[str]:
+    """Extract business terms from question, preserving them for context retrieval."""
+    normalized = _normalize(question)
+    stop_words = {
+        "show", "list", "display", "get", "fetch", "what", "which", "where", "when",
+        "how", "many", "current", "latest", "recent", "all", "the", "a", "an", "by",
+        "per", "for", "with", "from", "in", "on", "at", "to", "and", "or", "top",
+        "highest", "largest", "lowest", "smallest", "most", "least", "count", "total",
+        "sum", "average", "avg", "mean", "compare", "comparison", "versus", "vs",
+        "trend", "monthly", "over", "time", "sorted", "sort", "order", "ordered",
+    }
+    
+    terms = []
+    for token in _tokenize(question):
+        if token and token not in stop_words and len(token) > 1:
+            terms.append(token)
+    
+    return terms
+
+
+def _extract_phrase_positions(question: str) -> dict[str, list[str]]:
+    """
+    Extract phrase positions from question using generic patterns.
+    This is schema-agnostic and does not classify terms as metrics/dimensions.
+    """
+    normalized = _normalize(question)
+    phrases = {
+        "metric_candidates": [],
+        "dimension_candidates": [],
+    }
+    
+    # Extract "top N X by Y" pattern first (takes precedence)
+    top_match = re.search(r"\btop\s+\d+\s+([a-z0-9_ ]+?)\s+by\s+([a-z0-9_ ]+)", normalized)
+    if top_match:
+        dimension_phrase = top_match.group(1).strip()
+        metric_phrase = top_match.group(2).strip()
+        if dimension_phrase:
+            phrases["dimension_candidates"].append(dimension_phrase)
+        if metric_phrase:
+            phrases["metric_candidates"].append(metric_phrase)
+        return phrases  # Return early to avoid duplicate matches
+    
+    # Extract "X by Y" pattern - X is metric candidate, Y is dimension candidate
+    by_match = re.search(r"\b(?:show|list|display|get|fetch|count|total|sum|average|avg|mean)?\s*([a-z0-9_ ]+?)\s+by\s+([a-z0-9_ ]+)", normalized)
+    if by_match:
+        metric_phrase = by_match.group(1).strip()
+        dimension_phrase = by_match.group(2).strip()
+        if metric_phrase:
+            phrases["metric_candidates"].append(metric_phrase)
+        if dimension_phrase:
+            phrases["dimension_candidates"].append(dimension_phrase)
+    
+    # Extract "X wise" pattern
+    wise_match = re.search(r"\b([a-z0-9_ ]+?)\s+wise\b", normalized)
+    if wise_match:
+        dimension_phrase = wise_match.group(1).strip()
+        if dimension_phrase:
+            phrases["dimension_candidates"].append(dimension_phrase)
+    
+    return phrases
+
+
+def _extract_requested_filters(question: str) -> list[str]:
+    """Extract filter terms from question in a schema-agnostic way."""
+    normalized = _normalize(question)
+    filters = []
+    
+    # Look for preposition patterns that suggest filters
+    filter_patterns = [
+        r"\b(?:from|in)\s+([a-z][a-z0-9_ ]*)",
+        r"\b(?:with|where)\s+([a-z][a-z0-9_ ]*)",
+    ]
+    
+    for pattern in filter_patterns:
+        matches = re.findall(pattern, normalized)
+        for match in matches:
+            # Clean up the match
+            clean_match = re.split(r"\b(?:by|and|or|top|sorted|order)\b", match)[0].strip()
+            if clean_match and len(clean_match) > 1:
+                filters.append(clean_match)
+    
+    return list(set(filters))
+
+
+def _compute_intent_confidence(question: str, intent: dict[str, Any]) -> float:
+    """Compute confidence score for the intent based on question clarity."""
+    normalized = _normalize(question)
+    confidence = 0.5  # Base confidence
+    
+    # Higher confidence if question has clear intent type
+    intent_type = intent.get("intent_type", "")
+    if intent_type in {"count", "total", "average", "top_n"}:
+        confidence += 0.2
+    
+    # Higher confidence if question has explicit metrics
+    if intent.get("requested_metrics"):
+        confidence += 0.15
+    
+    # Higher confidence if question has explicit dimensions
+    if intent.get("requested_dimensions"):
+        confidence += 0.1
+    
+    # Higher confidence if question has explicit limit
+    if intent.get("limit"):
+        confidence += 0.1
+    
+    # Lower confidence if question is very short
+    if len(normalized.split()) < 3:
+        confidence -= 0.1  # Reduced penalty from 0.2 to 0.1
+    
+    # Lower confidence if question contains vague terms
+    vague_terms = {"something", "anything", "everything", "all", "stuff", "things"}
+    if any(term in normalized for term in vague_terms):
+        confidence -= 0.15
+    
+    # Lower confidence if question has no business terms
+    if not intent.get("raw_business_terms"):
+        confidence -= 0.1
+    
+    # Boost confidence for simple, clear questions
+    if intent_type == "list" and len(intent.get("raw_business_terms", [])) >= 1:
+        confidence += 0.1
+    
+    if intent_type == "count" and len(intent.get("raw_business_terms", [])) >= 1:
+        confidence += 0.1
+    
+    # Clamp confidence between 0.0 and 1.0
+    return max(0.0, min(1.0, confidence))
+
+
+def build_intent(question: str) -> dict[str, Any]:
+    """
+    Build a structured intent from a natural language question.
+    
+    This function is schema-agnostic and does not map terms to real tables, columns, or formulas.
+    It preserves unresolved business terms for context retrieval.
+    
+    Returns:
+        dict with keys:
+            - user_goal: str (extracted from question)
+            - intent_type: str (count, list, top_n, etc.)
+            - requested_metrics: list[str] (conservative, based on phrase positions)
+            - requested_dimensions: list[str] (conservative, based on phrase positions)
+            - requested_filters: list[str]
+            - requested_sort: dict | None
+            - limit: int | None
+            - needs_grouping: bool
+            - needs_aggregation: bool
+            - needs_join: bool
+            - raw_business_terms: list[str]
+            - confidence: float
+    """
+    normalized = _normalize(question)
+    
+    # Extract intent type (generic query shape)
+    intent_type = _detect_intent(question)
+    
+    # Extract business terms (preserved for context retrieval, no classification)
+    raw_business_terms = _extract_business_terms(question)
+    
+    # Extract phrase positions (conservative, based on "X by Y" patterns)
+    phrase_positions = _extract_phrase_positions(question)
+    
+    # Use phrase positions for metrics/dimensions (conservative approach)
+    requested_metrics = phrase_positions["metric_candidates"]
+    requested_dimensions = phrase_positions["dimension_candidates"]
+    
+    # Extract requested filters
+    requested_filters = _extract_requested_filters(question)
+    
+    # Extract sorting
+    requested_sort = _detect_sorting(question)
+    
+    # Extract limit
+    limit = _extract_limit(question) or _default_limit_for_intent(intent_type)
+    
+    # Determine if grouping is needed (based on phrase positions, not semantic classification)
+    needs_grouping = bool(requested_dimensions) or intent_type in {"trend", "top_n"}
+    
+    # Determine if aggregation is needed (based on intent type)
+    needs_aggregation = intent_type in {"count", "total", "average", "top_n"}
+    
+    # Determine if join is needed (heuristic based on multiple business terms)
+    needs_join = len(raw_business_terms) > 1 and len(requested_dimensions) > 1
+    
+    # Extract user goal (simplified version of the question)
+    user_goal = normalized
+    
+    # Compute confidence (lower if unsure about metrics/dimensions)
+    confidence = _compute_intent_confidence(question, {
+        "intent_type": intent_type,
+        "requested_metrics": requested_metrics,
+        "requested_dimensions": requested_dimensions,
+        "raw_business_terms": raw_business_terms,
+    })
+    
+    return {
+        "user_goal": user_goal,
+        "intent_type": intent_type,
+        "requested_metrics": requested_metrics,
+        "requested_dimensions": requested_dimensions,
+        "requested_filters": requested_filters,
+        "requested_sort": requested_sort,
+        "limit": limit,
+        "needs_grouping": needs_grouping,
+        "needs_aggregation": needs_aggregation,
+        "needs_join": needs_join,
+        "raw_business_terms": raw_business_terms,
+        "confidence": round(confidence, 2),
+    }
+
+
 
 def _detect_dimension(question: str, intent: str | None = None) -> str | None:
     normalized = _normalize(question)
@@ -1370,6 +1582,7 @@ def _tables_from_column_candidates(candidates: list[dict[str, Any]]) -> list[str
 
 def _build_query_context_from_retrieved_context(
     question: str,
+    normalized_question: str,
     enriched_kb: dict,
     intent: dict[str, Any],
     retrieved_context: dict[str, Any],
@@ -1493,14 +1706,52 @@ def _build_query_context_from_retrieved_context(
     if requested_metrics and not measure_candidates:
         warnings.append("Requested metric remains unresolved in dynamic context.")
 
+    # Detect missing evidence
+    missing_evidence = _detect_missing_evidence(
+        plan,
+        selected_tables,
+        selected_columns,
+        join_paths,
+        requested_metrics,
+        requested_dimensions,
+        requested_filters,
+    )
+    
+    # Compute route recommendation
+    route_recommendation = _compute_route_recommendation(
+        plan,
+        missing_evidence,
+        confidence,
+        selected_tables,
+    )
+    
+    # Build debug trace
+    debug_trace = _build_debug_trace(
+        question,
+        plan,
+        selected_tables,
+        selected_columns,
+        join_paths,
+        missing_evidence,
+        confidence,
+        route_recommendation,
+    )
+
     return {
+        "normalized_question": normalized_question,
+        "intent": intent,
+        "retrieved_context": retrieved_context,
         "plan": plan,
+        "missing_evidence": missing_evidence,
+        "confidence": round(confidence, 2),
+        "route_recommendation": route_recommendation,
+        "debug_trace": debug_trace,
+        # Legacy fields for backward compatibility
         "selected_tables": selected_tables,
         "selected_columns": selected_columns,
         "selected_table_names": selected_table_names,
         "selected_knowledge_base": reduced_kb,
         "warnings": warnings,
-        "confidence": round(confidence, 2),
         "knowledge_base": enriched_kb,
         "vector_results": None,
         "vector_used": False,
@@ -1511,6 +1762,114 @@ def _build_query_context_from_retrieved_context(
         "dimension_candidates": dimension_candidates,
         "filters": filters,
         "evidence_sources": list(retrieved_context.get("retrieval_sources") or []),
+    }   
+
+
+def _detect_missing_evidence(
+    plan: dict[str, Any],
+    selected_tables: list[dict[str, Any]],
+    selected_columns: list[dict[str, Any]],
+    join_paths: list[dict],
+    requested_metrics: list[str],
+    requested_dimensions: list[str],
+    requested_filters: list[str],
+) -> dict[str, Any]:
+    """Detect missing evidence for planning."""
+    missing_evidence: dict[str, Any] = {
+        "missing_metric": False,
+        "missing_dimension": False,
+        "missing_join_path": False,
+        "missing_filter_column": False,
+        "missing_formula_evidence": False,
+    }
+    
+    # Check for missing metric
+    if requested_metrics and not any(
+        col.get("semantic_type") in {"money", "quantity", "percentage"}
+        for col in selected_columns
+    ):
+        missing_evidence["missing_metric"] = True
+    
+    # Check for missing dimension
+    if requested_dimensions and not any(
+        col.get("semantic_type") in {"name", "text", "date", "category_candidate"}
+        for col in selected_columns
+    ):
+        missing_evidence["missing_dimension"] = True
+    
+    # Check for missing join path when multiple tables are selected
+    if len(selected_tables) > 1 and not join_paths:
+        missing_evidence["missing_join_path"] = True
+    
+    # Check for missing filter column
+    if requested_filters and not plan.get("filters"):
+        missing_evidence["missing_filter_column"] = True
+    
+    # Check for missing formula evidence (e.g., "pending billed amount")
+    # This should stay missing unless dynamic formula evidence exists
+    question_lower = _normalize(plan.get("question", ""))
+    formula_keywords = {"pending", "billed", "outstanding", "due", "balance"}
+    if any(keyword in question_lower for keyword in formula_keywords):
+        # No dynamic formula evidence exists in current implementation
+        missing_evidence["missing_formula_evidence"] = True
+    
+    return missing_evidence
+
+
+def _compute_route_recommendation(
+    plan: dict[str, Any],
+    missing_evidence: dict[str, Any],
+    confidence: float,
+    selected_tables: list[dict[str, Any]],
+) -> str:
+    """Compute route recommendation based on evidence strength."""
+    # Cannot plan safely if critical evidence is missing
+    if missing_evidence.get("missing_join_path") and len(selected_tables) > 1:
+        return "cannot_plan_safely"
+    
+    if confidence < 0.3:
+        return "cannot_plan_safely"
+    
+    # Needs clarification if evidence is very weak
+    if confidence < 0.5:
+        return "needs_clarification"
+    
+    # Simple rule OK for strong evidence with single table
+    if confidence >= 0.7 and len(selected_tables) == 1:
+        return "simple_rule_ok"
+    
+    # AI SQL required for multi-table joins or missing metrics
+    if len(selected_tables) > 1 or missing_evidence.get("missing_metric"):
+        return "ai_sql_required"
+    
+    # For moderate confidence with single table, default to ai_sql_required
+    return "ai_sql_required"
+
+
+def _build_debug_trace(
+    question: str,
+    plan: dict[str, Any],
+    selected_tables: list[dict[str, Any]],
+    selected_columns: list[dict[str, Any]],
+    join_paths: list[dict],
+    missing_evidence: dict[str, Any],
+    confidence: float,
+    route_recommendation: str,
+) -> dict[str, Any]:
+    """Build debug trace for planning transparency."""
+    return {
+        "question": question,
+        "intent": plan.get("intent"),
+        "metric": plan.get("metric"),
+        "dimension": plan.get("dimension"),
+        "selected_table_count": len(selected_tables),
+        "selected_column_count": len(selected_columns),
+        "join_path_count": len(join_paths),
+        "missing_evidence": missing_evidence,
+        "confidence": confidence,
+        "route_recommendation": route_recommendation,
+        "selected_table_names": [t.get("table") for t in selected_tables],
+        "selected_column_names": [(c.get("table"), c.get("column")) for c in selected_columns[:10]],
     }
 
 
@@ -1525,14 +1884,17 @@ def build_query_context(
 ) -> dict:
     """Build a structured plan and reduced schema slice for SQL generation."""
     enriched_kb = _enriched_kb(knowledge_base)
+    normalized_question = _normalize(question)
+    
     if intent and retrieved_context is not None:
         return _build_query_context_from_retrieved_context(
             question,
+            normalized_question,
             enriched_kb,
             intent,
             retrieved_context,
         )
-    normalized_question = _normalize(question)
+    
     intent = _detect_intent(normalized_question)
     dimension = _detect_dimension(normalized_question, intent)
     date_range = _detect_date_range(normalized_question)
@@ -1750,14 +2112,52 @@ def build_query_context(
     else:
         plan["metric"] = None
 
+    # Detect missing evidence
+    missing_evidence = _detect_missing_evidence(
+        plan,
+        selected_tables,
+        selected_columns,
+        join_paths,
+        plan.get("requested_metrics", []),
+        plan.get("requested_dimensions", []),
+        plan.get("requested_filters", []),
+    )
+    
+    # Compute route recommendation
+    route_recommendation = _compute_route_recommendation(
+        plan,
+        missing_evidence,
+        overall_confidence,
+        selected_tables,
+    )
+    
+    # Build debug trace
+    debug_trace = _build_debug_trace(
+        question,
+        plan,
+        selected_tables,
+        selected_columns,
+        join_paths,
+        missing_evidence,
+        overall_confidence,
+        route_recommendation,
+    )
+
     return {
+        "normalized_question": normalized_question,
+        "intent": intent,
+        "retrieved_context": None,  # Built internally in this path
         "plan": plan,
+        "missing_evidence": missing_evidence,
+        "confidence": overall_confidence,
+        "route_recommendation": route_recommendation,
+        "debug_trace": debug_trace,
+        # Legacy fields for backward compatibility
         "selected_tables": selected_tables,
         "selected_columns": selected_columns,
         "selected_table_names": selected_names,
         "selected_knowledge_base": reduced_kb,
         "warnings": warnings,
-        "confidence": overall_confidence,
         "knowledge_base": enriched_kb,
         "vector_results": vector_results,
         "vector_used": bool(vector_results and vector_results.get("used_vector")),
