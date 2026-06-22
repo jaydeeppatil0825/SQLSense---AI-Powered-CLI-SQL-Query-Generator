@@ -15,6 +15,7 @@ runtime planning evidence plus trusted KB/glossary/relationship context.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from copy import deepcopy
@@ -82,6 +83,54 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip().lower())
 
 
+def _query_shape(
+    query_plan: dict | None,
+    intent: dict | None,
+    selected_tables: list[dict] | None,
+    join_paths: list[dict] | None,
+    formula_evidence: list[dict] | None,
+) -> str:
+    """Classify the SQL shape generically from pipeline evidence."""
+    plan = query_plan or {}
+    intent_payload = intent or {}
+    planner_intent = str(plan.get("intent") or "").strip().lower()
+    intent_type = str(intent_payload.get("intent_type") or "").strip().lower()
+    table_count = len([entry for entry in (selected_tables or []) if entry.get("table")])
+    has_join = bool(join_paths)
+    has_grouping = bool(plan.get("grouping") or plan.get("dimension") or intent_payload.get("needs_grouping"))
+    has_aggregation = bool(
+        planner_intent in {"count", "total", "average", "top_n"}
+        or intent_payload.get("needs_aggregation")
+    )
+    if has_grouping and plan.get("metric"):
+        has_aggregation = True
+    has_ranking = bool(planner_intent == "top_n" or intent_type == "ranking")
+    has_formula = bool(formula_evidence)
+    has_filters = bool(plan.get("filters"))
+
+    if planner_intent == "count" and table_count <= 1 and not has_join:
+        return "single_table_count"
+    if planner_intent == "list" and table_count <= 1 and not has_join and not has_grouping and not has_aggregation:
+        return "single_table_list"
+    if has_formula and has_grouping:
+        return "derived_grouped_aggregate"
+    if has_ranking and (has_grouping or has_aggregation):
+        return "ranking_grouped_aggregate"
+    if has_grouping and has_aggregation:
+        return "grouped_aggregate"
+    if has_join and has_aggregation:
+        return "joined_aggregate"
+    if has_join and has_filters:
+        return "joined_filtered_select"
+    if has_join:
+        return "joined_select"
+    if has_aggregation:
+        return "single_table_aggregate"
+    if has_filters:
+        return "single_table_filtered_list"
+    return "generic_select"
+
+
 def _extract_limit(user_question: str) -> int | None:
     match = re.search(
         r"\b(?:top|first|last|latest|recent|limit|show|get|return|fetch)\s+(\d+)\b"
@@ -121,6 +170,87 @@ def _build_retrieved_glossary_section(retrieved_context: dict | None) -> list[st
             lines.append(f"    mapped_columns: {', '.join(mappings)}")
     lines.append("")
     return lines
+
+
+def _get_relevant_glossary_terms(
+    user_question: str,
+    knowledge_base: dict,
+    glossary_path: str = "semantic/business_glossary.json",
+    glossary: dict | None = None,
+) -> str:
+    """
+    Backward-compatible glossary section builder used by legacy prompt tests.
+
+    Returns a human-readable glossary block derived only from the supplied
+    glossary or runtime schema-backed glossary file when available.
+    """
+    loaded_glossary = glossary
+    if loaded_glossary is None:
+        try:
+            with open(glossary_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, dict):
+                loaded_glossary = payload
+            else:
+                loaded_glossary = {}
+        except Exception:
+            loaded_glossary = {}
+
+    matches = []
+    question_normalized = _normalize(user_question)
+    question_terms = set(re.split(r"[^a-z0-9]+", question_normalized))
+    for term, entry in (loaded_glossary or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        normalized_term = _normalize(term)
+        aliases = entry.get("business_terms", []) or []
+        alias_hit = any(set(re.split(r"[^a-z0-9]+", _normalize(alias))) <= question_terms for alias in aliases if _normalize(alias))
+        if normalized_term and normalized_term in question_normalized or alias_hit:
+            matches.append((term, entry))
+
+    lines = ["Business glossary:"]
+    if not matches:
+        lines.append("  No relevant glossary terms matched. Use only runtime schema identifiers and selected evidence.")
+        return "\n".join(lines)
+
+    for term, entry in matches[:8]:
+        lines.append(f"  TERM: {term}")
+        description = str(entry.get("description", "")).strip()
+        if description:
+            lines.append(f"    Description: {description}")
+        mappings = []
+        for mapping in entry.get("mapped_columns", [])[:8]:
+            if not isinstance(mapping, dict):
+                continue
+            table_name = str(mapping.get("table", "")).strip()
+            column_name = str(mapping.get("column", "")).strip()
+            if table_name and column_name and table_name in knowledge_base:
+                mappings.append(f"{table_name}.{column_name}")
+        if mappings:
+            lines.append(f"    Mapped columns: {', '.join(mappings)}")
+    return "\n".join(lines)
+
+
+def _join_skeletons(join_paths: list[dict] | None) -> list[str]:
+    skeletons: list[str] = []
+    for join_path in join_paths or []:
+        if not isinstance(join_path, dict):
+            continue
+        parts: list[str] = []
+        current_table = str(join_path.get("from_table", "")).strip()
+        if current_table:
+            parts.append(f"FROM {current_table}")
+        for edge in join_path.get("path", []) or []:
+            if not isinstance(edge, dict):
+                continue
+            join_table = str(edge.get("to_table", "")).strip()
+            join_condition = str(edge.get("join_condition", "")).strip()
+            if join_table and join_condition:
+                parts.append(f"JOIN {join_table} ON {join_condition}")
+        skeleton = " ".join(parts).strip()
+        if skeleton and skeleton not in skeletons:
+            skeletons.append(skeleton)
+    return skeletons
 
 
 def _scoped_prompt_knowledge_base(
@@ -341,6 +471,160 @@ def _build_runtime_evidence_section(
     return lines
 
 
+def _build_allowed_context_section(
+    selected_tables: list[dict] | None,
+    selected_columns: list[dict] | None,
+    filter_candidates: list[dict] | None,
+    join_paths: list[dict] | None,
+    formula_evidence: list[dict] | None,
+) -> list[str]:
+    lines: list[str] = ["Allowed SQL generation context:"]
+    table_names = [
+        str(entry.get("table", "")).strip()
+        for entry in (selected_tables or [])
+        if str(entry.get("table", "")).strip()
+    ]
+    if table_names:
+        lines.append("  allowed_tables:")
+        for table_name in table_names[:10]:
+            lines.append(f"    - {table_name}")
+
+    allowed_columns = []
+    for entry in selected_columns or []:
+        table_name = str(entry.get("table", "")).strip()
+        column_name = str(entry.get("column", "")).strip()
+        if table_name and column_name:
+            allowed_columns.append(f"{table_name}.{column_name}")
+    if not allowed_columns:
+        for table_entry in selected_tables or []:
+            table_name = str(table_entry.get("table", "")).strip()
+            if not table_name:
+                continue
+            for column_entry in table_entry.get("selected_columns", []) or []:
+                column_name = str(column_entry.get("column", "")).strip()
+                if table_name and column_name:
+                    allowed_columns.append(f"{table_name}.{column_name}")
+    if allowed_columns:
+        lines.append("  allowed_columns:")
+        for value in list(dict.fromkeys(allowed_columns))[:20]:
+            lines.append(f"    - {value}")
+
+    if filter_candidates:
+        lines.append("  allowed_filter_columns:")
+        for entry in filter_candidates[:10]:
+            table_name = str(entry.get("table", "")).strip()
+            column_name = str(entry.get("column", "")).strip()
+            if table_name and column_name:
+                lines.append(f"    - {table_name}.{column_name}")
+
+    join_conditions = []
+    for join_path in join_paths or []:
+        for edge in join_path.get("path", []) or []:
+            join_condition = str(edge.get("join_condition", "")).strip()
+            if join_condition and join_condition not in join_conditions:
+                join_conditions.append(join_condition)
+    if join_conditions:
+        lines.append("  allowed_joins:")
+        for value in join_conditions[:12]:
+            lines.append(f"    - {value}")
+
+    skeletons = _join_skeletons(join_paths)
+    if skeletons:
+        lines.append("  allowed_from_join_skeletons:")
+        for value in skeletons[:6]:
+            lines.append(f"    - {value}")
+
+    if formula_evidence:
+        lines.append("  allowed_formulas:")
+        for entry in formula_evidence[:10]:
+            table_name = str(entry.get("table", "")).strip()
+            primary = str(entry.get("primary_column") or entry.get("column") or "").strip()
+            operation = str(entry.get("operation") or entry.get("formula_operation") or "").strip()
+            secondary = str(entry.get("secondary_column") or entry.get("secondary") or "").strip()
+            alias = str(entry.get("alias") or "").strip()
+            if table_name and primary and operation:
+                detail = f"{table_name}.{primary} operation={operation}"
+                if secondary:
+                    detail += f" secondary_column={secondary}"
+                if alias:
+                    detail += f" alias={alias}"
+                lines.append(f"    - {detail}")
+
+    lines.append("")
+    return lines
+
+
+def _build_sql_skeleton_section(
+    query_shape: str,
+    query_plan: dict | None,
+    join_paths: list[dict] | None,
+    explicit_limit: int | None,
+) -> list[str]:
+    lines = ["Generic SQL skeleton guidance:"]
+    skeletons = _join_skeletons(join_paths)
+    from_join_line = skeletons[0] if skeletons else "FROM <allowed_table>"
+    limit_line = f"LIMIT {explicit_limit}" if explicit_limit else "<omit LIMIT unless explicitly required>"
+
+    if query_shape == "ranking_grouped_aggregate":
+        lines.extend(
+            [
+                "  Query shape: ranking_grouped_aggregate",
+                "  Fill this shape using ONLY allowed evidence:",
+                "  SELECT <dimension_column>, SUM(<measure_column>) AS <result_alias>",
+                f"  {from_join_line}",
+                "  GROUP BY <dimension_column>",
+                "  ORDER BY <result_alias> DESC",
+                f"  {limit_line};",
+            ]
+        )
+    elif query_shape in {"grouped_aggregate", "derived_grouped_aggregate"}:
+        aggregate_expression = "<derived_expression_from_formula_evidence>" if query_shape == "derived_grouped_aggregate" else "<measure_column>"
+        lines.extend(
+            [
+                f"  Query shape: {query_shape}",
+                "  Fill this shape using ONLY allowed evidence:",
+                f"  SELECT <dimension_column>, SUM({aggregate_expression}) AS <result_alias>",
+                f"  {from_join_line}",
+                "  GROUP BY <dimension_column>",
+                "  ORDER BY <result_alias> DESC or omit ORDER BY if not requested",
+                f"  {limit_line};",
+            ]
+        )
+    elif query_shape == "joined_aggregate":
+        lines.extend(
+            [
+                "  Query shape: joined_aggregate",
+                "  Fill this shape using ONLY allowed evidence:",
+                "  SELECT SUM(<measure_column>) AS <result_alias>",
+                f"  {from_join_line}",
+                "  WHERE <allowed_filter_predicates_if_any>",
+                f"  {limit_line};",
+            ]
+        )
+    elif query_shape in {"joined_select", "joined_filtered_select"}:
+        lines.extend(
+            [
+                f"  Query shape: {query_shape}",
+                "  Fill this shape using ONLY allowed evidence:",
+                "  SELECT <allowed_display_columns>",
+                f"  {from_join_line}",
+                "  WHERE <allowed_filter_predicates_if_any>",
+                "  ORDER BY <allowed_sort_column_if_requested>",
+                f"  {limit_line};",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"  Query shape: {query_shape}",
+                "  Use only the allowed tables, columns, joins, and filters above.",
+            ]
+        )
+
+    lines.append("")
+    return lines
+
+
 def _build_ai_target_section(query_plan: dict | None, selected_tables: list[dict] | None) -> list[str]:
     if not query_plan:
         return []
@@ -526,6 +810,13 @@ def build_sql_prompt(
         )
 
     explicit_limit = _extract_limit(user_question)
+    query_shape = _query_shape(
+        query_plan,
+        intent,
+        selected_tables,
+        join_paths,
+        formula_evidence,
+    )
     if explicit_limit:
         limit_instruction = (
             f"The user asked for {explicit_limit} rows. "
@@ -581,6 +872,23 @@ def build_sql_prompt(
             filter_candidates,
             formula_evidence,
             evidence_sources,
+        )
+    )
+    system_parts.extend(
+        _build_allowed_context_section(
+            selected_tables,
+            selected_columns,
+            filter_candidates,
+            join_paths,
+            formula_evidence,
+        )
+    )
+    system_parts.extend(
+        _build_sql_skeleton_section(
+            query_shape,
+            query_plan,
+            join_paths,
+            explicit_limit,
         )
     )
     system_parts.extend(_build_ai_target_section(query_plan, selected_tables))

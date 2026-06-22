@@ -196,6 +196,9 @@ def test_prompt_includes_selected_columns_and_plan_execution_rules():
     assert "semantic_type=money" in system_message
     assert "Computed join paths between selected tables:" in system_message
     assert "invoice_headers.client_id = client_directory.client_id" in system_message
+    assert "Allowed SQL generation context:" in system_message
+    assert "allowed_tables:" in system_message
+    assert "allowed_columns:" in system_message
 
 
 def test_prompt_includes_bridge_table_schema_and_join_predicates_for_grouped_query():
@@ -308,3 +311,98 @@ def test_prompt_includes_bridge_table_schema_and_join_predicates_for_grouped_que
         "JOIN measure_events ON link_records.event_id = measure_events.event_id"
     ) in system_message
     assert "entity_groups.display_label [name]" in system_message
+    assert "Query shape: grouped_aggregate" in system_message
+    assert "Allowed SQL generation context:" in system_message
+    assert "allowed_from_join_skeletons:" in system_message
+    assert "SELECT <dimension_column>, SUM(<measure_column>) AS <result_alias>" in system_message
+    assert "GROUP BY <dimension_column>" in system_message
+
+
+def test_prompt_includes_ranking_sql_skeleton_from_dynamic_evidence():
+    knowledge_base = {
+        "clients": {
+            "columns": [
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "client_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["client_id"],
+            "foreign_keys": [],
+        },
+        "agreements": {
+            "columns": [
+                {"name": "agreement_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "deal_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+            ],
+            "primary_keys": ["agreement_id"],
+            "foreign_keys": [
+                {"column": "client_id", "referenced_table": "clients", "referenced_column": "client_id"},
+            ],
+        },
+    }
+    messages = build_sql_prompt(
+        "top 5 clients by deal value",
+        knowledge_base,
+        intent={
+            "intent_type": "ranking",
+            "requested_metrics": ["deal value"],
+            "requested_dimensions": ["clients"],
+            "needs_grouping": True,
+            "needs_aggregation": True,
+            "needs_join": True,
+            "limit": 5,
+        },
+        query_plan={
+            "intent": "top_n",
+            "metric": None,
+            "dimension": "clients",
+            "filters": [],
+            "date_range": None,
+            "grouping": ["clients"],
+            "sorting": {"direction": "desc", "by": "metric"},
+            "limit": 5,
+            "semantic_hints": {"money"},
+            "matched_glossary_terms": [],
+        },
+        selected_tables=[
+            {"table": "clients", "confidence": 0.95, "selected_columns": [{"column": "client_name", "semantic_type": "name"}]},
+            {"table": "agreements", "confidence": 0.94, "selected_columns": [{"column": "deal_value", "semantic_type": "money"}]},
+        ],
+        selected_columns=[
+            {"table": "clients", "column": "client_name", "semantic_type": "name"},
+            {"table": "agreements", "column": "deal_value", "semantic_type": "money"},
+            {"table": "agreements", "column": "client_id", "semantic_type": "id"},
+        ],
+        measure_candidates=[{"table": "agreements", "column": "deal_value", "semantic_type": "money"}],
+        dimension_candidates=[{"table": "clients", "column": "client_name", "semantic_type": "name"}],
+        join_paths=[
+            {
+                "from_table": "agreements",
+                "to_table": "clients",
+                "path": [
+                    {
+                        "from_table": "agreements",
+                        "from_column": "client_id",
+                        "to_table": "clients",
+                        "to_column": "client_id",
+                        "join_condition": "agreements.client_id = clients.client_id",
+                    }
+                ],
+                "length": 1,
+            }
+        ],
+    )
+    system_message = messages[0]["content"]
+
+    assert "Query shape: ranking_grouped_aggregate" in system_message
+    assert "allowed_tables:" in system_message
+    assert "    - clients" in system_message
+    assert "    - agreements" in system_message
+    assert "allowed_columns:" in system_message
+    assert "    - clients.client_name" in system_message
+    assert "    - agreements.deal_value" in system_message
+    assert "allowed_joins:" in system_message
+    assert "    - agreements.client_id = clients.client_id" in system_message
+    assert "SELECT <dimension_column>, SUM(<measure_column>) AS <result_alias>" in system_message
+    assert "ORDER BY <result_alias> DESC" in system_message
+    assert "LIMIT 5;" in system_message

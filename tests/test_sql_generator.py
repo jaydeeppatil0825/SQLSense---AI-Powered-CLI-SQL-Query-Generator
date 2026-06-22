@@ -108,6 +108,12 @@ def test_generate_sql_prompt_uses_pipeline_context(monkeypatch):
     assert "possible_join_paths" in system_prompt
     assert "accounts.account_id = deals.account_id" in system_prompt
     assert "Use ONLY the provided selected tables, selected columns, runtime candidates, and supplied join paths." in system_prompt
+    assert "Allowed SQL generation context:" in system_prompt
+    assert "allowed_tables:" in system_prompt
+    assert "allowed_columns:" in system_prompt
+    assert "allowed_joins:" in system_prompt
+    assert "Query shape: ranking_grouped_aggregate" in system_prompt
+    assert "SELECT <dimension_column>, SUM(<measure_column>) AS <result_alias>" in system_prompt
     assert "TABLE: accounts" in system_prompt
     assert "TABLE: deals" in system_prompt
 

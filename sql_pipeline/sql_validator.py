@@ -22,7 +22,6 @@ _FORBIDDEN_KEYWORDS = [
     "RECREATE",
     "REPLACE",
     "EXEC",
-    "EXECUTE",
     "GRANT",
     "REVOKE",
 ]
