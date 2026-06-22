@@ -5,6 +5,6 @@
     "db_name": "sqlsense_small_test",
     "database_type": "mysql",
     "database_name": "sqlsense_small_test",
-    "schema_hash": "b0455769550b1f7eb1fac683bb33f7d9982482621bf47c18872b297138f5fc3a",
-    "schema_fingerprint": "b0455769550b1f7eb1fac683bb33f7d9982482621bf47c18872b297138f5fc3a"
+    "schema_hash": "3adf346d197b7c43620d0a1fe781de5bd9aae364fd2da163cd956ed8988ed541",
+    "schema_fingerprint": "3adf346d197b7c43620d0a1fe781de5bd9aae364fd2da163cd956ed8988ed541"
 }
