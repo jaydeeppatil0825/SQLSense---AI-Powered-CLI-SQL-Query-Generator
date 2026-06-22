@@ -74,6 +74,10 @@ _ROUTING_FILLER_TERMS = {
     "first",
     "last",
 }
+_RANKING_QUERY_RE = re.compile(
+    r"\b(top|highest|lowest|best|worst|latest|recent|newest|oldest)\b",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_generic_select(sql: str) -> bool:
@@ -253,10 +257,14 @@ def _should_try_rule_based_first(query_context: dict[str, Any]) -> tuple[bool, s
     logger.debug(f"[DEBUG ROUTING] Intent: {intent}")
     logger.debug(f"[DEBUG ROUTING] Dimension: {plan.get('dimension')}")
     logger.debug(f"[DEBUG ROUTING] Grouping: {plan.get('grouping')}")
+    normalized_question = str(plan.get("question") or "")
 
     if intent not in {"list", "count"}:
         logger.debug(f"[DEBUG ROUTING] Rule-based skipped: intent '{intent}' is routed to AI for complex SQL generation")
         return False, f"intent '{intent}' needs richer reasoning"
+    if _RANKING_QUERY_RE.search(normalized_question):
+        logger.debug("[DEBUG ROUTING] Rule-based skipped: ranking-style question should use AI")
+        return False, "ranking-style question should use AI"
     if plan.get("dimension") or plan.get("grouping"):
         logger.debug(f"[DEBUG ROUTING] Rule-based skipped: question asks for grouped or dimensional output")
         return False, "question asks for grouped or dimensional output"
@@ -413,6 +421,9 @@ def _should_try_rule_based_from_pipeline(query_context: dict[str, Any]) -> tuple
     if route_recommendation == "simple_rule_ok":
         return True, "query pipeline recommended deterministic SQL from strong runtime evidence"
     if route_recommendation == "ai_sql_required":
+        heuristic_ok, heuristic_reason = _should_try_rule_based_first(query_context)
+        if heuristic_ok:
+            return True, "query pipeline selected one strong table for a simple list/count question"
         return False, "query pipeline recommended AI SQL for this question"
     return _should_try_rule_based_first(query_context)
 

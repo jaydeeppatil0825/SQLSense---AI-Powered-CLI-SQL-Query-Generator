@@ -480,6 +480,154 @@ def test_count_clients_can_be_rule_based(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "rule-based"
 
 
+def test_show_all_agreements_uses_rule_based_and_succeeds(monkeypatch):
+    kb = {
+        "agreements": {
+            "columns": [
+                {"name": "agreement_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "agreement_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["agreement_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+    service = QuestionService()
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple agreement listing")),
+    )
+
+    success, message, sql, error = service.process_question("show all agreements", kb, ai_backend="local")
+
+    assert success is True
+    assert "FROM agreements" in sql
+    assert "SELECT agreement_id, agreement_name" in sql
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+
+
+def test_count_agreements_uses_rule_based_and_succeeds(monkeypatch):
+    kb = {
+        "agreements": {
+            "columns": [
+                {"name": "agreement_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "agreement_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["agreement_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+    service = QuestionService()
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple agreement count")),
+    )
+
+    success, message, sql, error = service.process_question("count agreements", kb, ai_backend="local")
+
+    assert success is True
+    assert "COUNT(*)" in sql
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+
+
+def test_pipeline_ai_route_still_allows_rule_based_for_strong_simple_list(monkeypatch):
+    service = QuestionService()
+    pipeline_context = {
+        "normalized_question": "show all agreements",
+        "route_recommendation": "ai_sql_required",
+        "intent": {"intent_type": "list"},
+        "retrieved_context": {},
+        "query_context": {
+            "route_recommendation": "ai_sql_required",
+            "plan": {
+                "question": "show all agreements",
+                "intent": "list",
+                "metric": None,
+                "dimension": None,
+                "filters": [],
+                "date_range": None,
+                "grouping": [],
+                "sorting": None,
+                "limit": 50,
+                "question_terms": ["show", "all", "agreements"],
+                "semantic_hints": set(),
+            },
+            "selected_tables": [
+                {
+                    "table": "agreements",
+                    "confidence": 0.91,
+                    "reason": "selected dynamically",
+                    "selected_columns": [
+                        {"column": "agreement_id", "semantic_type": "id", "confidence": 0.91, "reason": "selected"},
+                        {"column": "agreement_name", "semantic_type": "name", "confidence": 0.91, "reason": "selected"},
+                    ],
+                }
+            ],
+            "selected_columns": [
+                {"table": "agreements", "column": "agreement_id", "semantic_type": "id", "confidence": 0.91, "reason": "selected"},
+                {"table": "agreements", "column": "agreement_name", "semantic_type": "name", "confidence": 0.91, "reason": "selected"},
+            ],
+            "selected_table_names": ["agreements"],
+            "confidence": 0.91,
+            "vector_results": {"table_names": ["agreements"], "columns": [], "glossary_terms": [], "relationships": []},
+            "selected_knowledge_base": {
+                "agreements": {
+                    "columns": [
+                        {"name": "agreement_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                        {"name": "agreement_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+                    ],
+                    "primary_keys": ["agreement_id"],
+                    "foreign_keys": [],
+                    "relationships": [],
+                }
+            },
+            "knowledge_base": {
+                "agreements": {
+                    "columns": [
+                        {"name": "agreement_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                        {"name": "agreement_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+                    ],
+                    "primary_keys": ["agreement_id"],
+                    "foreign_keys": [],
+                    "relationships": [],
+                }
+            },
+        },
+        "plan": {
+            "question": "show all agreements",
+            "intent": "list",
+            "metric": None,
+            "dimension": None,
+            "filters": [],
+            "date_range": None,
+            "grouping": [],
+            "sorting": None,
+            "limit": 50,
+            "question_terms": ["show", "all", "agreements"],
+            "semantic_hints": set(),
+        },
+        "formula_evidence": [],
+        "evidence_sources": [],
+    }
+
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for strong simple list query")),
+    )
+
+    success, message, sql, error = service.process_question(
+        "show all agreements",
+        pipeline_context["query_context"]["knowledge_base"],
+        ai_backend="local",
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is True
+    assert "FROM agreements" in sql
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+
+
 def test_simple_limit_query_uses_rule_based(monkeypatch):
     service = QuestionService()
     context = _context(["alpha_records"], intent="list")
