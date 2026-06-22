@@ -5,6 +5,6 @@
     "db_name": "sqlsense_sg3_test",
     "database_type": "mysql",
     "database_name": "sqlsense_sg3_test",
-    "schema_hash": "49dd532c05591f206c9ce239d7ecb836fba03eeeeffab669d3e3a5131c310cc7",
-    "schema_fingerprint": "49dd532c05591f206c9ce239d7ecb836fba03eeeeffab669d3e3a5131c310cc7"
+    "schema_hash": "95b9d66273cf566e330d49812c42f67d925a498aa24784ef9977b6dcc96faee1",
+    "schema_fingerprint": "95b9d66273cf566e330d49812c42f67d925a498aa24784ef9977b6dcc96faee1"
 }
