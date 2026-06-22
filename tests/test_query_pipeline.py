@@ -67,6 +67,7 @@ def test_query_pipeline_returns_structured_debug_fields(monkeypatch):
         ],
         "selected_knowledge_base": KNOWLEDGE_BASE,
         "join_paths": [],
+        "complex_sql_plan": None,
         "vector_results": {
             "tables": [{"table_name": "accounts"}],
             "columns": [{"table_name": "accounts", "column_name": "account_label"}],
@@ -114,6 +115,7 @@ def test_query_pipeline_returns_structured_debug_fields(monkeypatch):
     assert captured["pipeline_context"]["retrieved_context"] == retrieved_context
     assert captured["pipeline_context"]["plan"]["intent"] == "list"
     assert captured["pipeline_context"]["route_recommendation"] == "simple_rule_ok"
+    assert captured["pipeline_context"]["complex_sql_plan"] is None
     assert captured["pipeline_context"]["formula_evidence"] == []
     assert captured["pipeline_context"]["evidence_sources"] == ["kb_identifier"]
 
@@ -160,6 +162,7 @@ def test_query_pipeline_reports_validation_failure_when_sql_generation_fails(mon
         "selected_columns": [],
         "selected_tables": [{"table": "accounts", "confidence": 0.52}],
         "join_paths": [],
+        "complex_sql_plan": None,
         "vector_results": {},
         "route_used": "fallback-failed",
     }

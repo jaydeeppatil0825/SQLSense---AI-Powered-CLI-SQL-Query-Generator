@@ -261,6 +261,11 @@ def test_query_planner_uses_retrieved_context_for_ranking_query():
     assert context["measure_candidates"][0]["column"] == "deal_value"
     assert context["dimension_candidates"][0]["column"] == "account_label"
     assert context["evidence_sources"] == ["kb_identifier", "glossary"]
+    assert context["complex_sql_plan"]["query_shape"] == "ranking_aggregation"
+    assert context["complex_sql_plan"]["aggregation_type"] == "sum"
+    assert context["complex_sql_plan"]["required_joins"] == ["accounts.account_id = deals.account_id"]
+    assert context["complex_sql_plan"]["limit"] == 5
+    assert context["complex_sql_plan"]["sql_skeleton_type"] == "ranking_aggregation"
 
 
 def test_query_planner_leaves_pending_billed_amount_unresolved_without_formula_evidence():
@@ -343,7 +348,106 @@ def test_query_planner_leaves_pending_billed_amount_unresolved_without_formula_e
     assert context["measure_candidates"] == []
     assert context["plan"]["metric"] is None
     assert context["confidence"] == 0.49
+    assert context["complex_sql_plan"]["query_shape"] == "formula_query"
+    assert context["missing_evidence"]["missing_formula_evidence"] is True
+    assert context["route_recommendation"] == "cannot_plan_safely"
     assert "Requested metric remains unresolved in dynamic context." in context["warnings"]
+
+
+def test_query_planner_builds_grouped_aggregation_complex_plan_from_dynamic_context():
+    knowledge_base = {
+        "clients": {
+            "columns": [
+                {"name": "client_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "client_name", "type": "VARCHAR(100)", "semantic_type": "name", "is_dimension": True},
+            ],
+            "primary_keys": ["client_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "agreements": {
+            "columns": [
+                {"name": "agreement_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "client_id", "type": "INTEGER", "semantic_type": "id", "is_foreign_key": True},
+                {"name": "deal_value", "type": "DECIMAL(12,2)", "semantic_type": "money", "is_measure": True},
+            ],
+            "primary_keys": ["agreement_id"],
+            "foreign_keys": [{"column": "client_id", "referenced_table": "clients", "referenced_column": "client_id"}],
+            "relationships": [],
+        },
+    }
+    intent = {
+        "intent_type": "grouped_summary",
+        "requested_metrics": ["deal value"],
+        "requested_dimensions": ["client"],
+        "requested_filters": [],
+        "requested_sort": {},
+        "limit": None,
+        "needs_grouping": True,
+        "needs_aggregation": True,
+        "needs_join": True,
+    }
+    retrieved_context = {
+        "query_terms": ["deal value", "client"],
+        "matched_tables": [
+            {"table": "clients", "score": 0.87, "matched_terms": ["client"], "source": "kb_identifier"},
+            {"table": "agreements", "score": 0.85, "matched_terms": ["deal value"], "source": "glossary"},
+        ],
+        "matched_columns": [
+            {"table": "clients", "column": "client_name", "semantic_type": "name", "is_dimension": True, "score": 0.92, "matched_terms": ["client"], "source": "glossary"},
+            {"table": "agreements", "column": "deal_value", "semantic_type": "money", "is_measure": True, "score": 0.91, "matched_terms": ["deal value"], "source": "glossary"},
+        ],
+        "matched_glossary_terms": [{"term": "deal value", "score": 0.89, "source": "glossary"}],
+        "matched_relationships": [
+            {
+                "from_table": "agreements",
+                "from_column": "client_id",
+                "to_table": "clients",
+                "to_column": "client_id",
+                "join_condition": "agreements.client_id = clients.client_id",
+                "source": "fk_relationship",
+            }
+        ],
+        "possible_join_paths": [
+            {
+                "from_table": "clients",
+                "to_table": "agreements",
+                "path": [
+                    {
+                        "from_table": "clients",
+                        "from_column": "client_id",
+                        "to_table": "agreements",
+                        "to_column": "client_id",
+                        "join_condition": "clients.client_id = agreements.client_id",
+                    }
+                ],
+                "length": 1,
+            }
+        ],
+        "measure_candidates": [
+            {"table": "agreements", "column": "deal_value", "semantic_type": "money", "is_measure": True, "score": 0.91, "matched_terms": ["deal value"], "source": "glossary"},
+        ],
+        "dimension_candidates": [
+            {"table": "clients", "column": "client_name", "semantic_type": "name", "is_dimension": True, "score": 0.92, "matched_terms": ["client"], "source": "glossary"},
+        ],
+        "filter_candidates": [],
+        "retrieval_sources": ["kb_identifier", "glossary", "relationship_context"],
+        "confidence": 0.88,
+    }
+
+    context = build_query_context(
+        "deal value by client",
+        knowledge_base,
+        use_vector_retrieval=False,
+        intent=intent,
+        retrieved_context=retrieved_context,
+    )
+
+    assert context["route_recommendation"] == "ai_sql_required"
+    assert context["complex_sql_plan"]["query_shape"] == "grouped_aggregation"
+    assert context["complex_sql_plan"]["aggregation_type"] == "sum"
+    assert context["complex_sql_plan"]["required_joins"] == ["clients.client_id = agreements.client_id"]
+    assert context["complex_sql_plan"]["missing_evidence"] == {}
 
 
 def test_query_planner_does_not_use_fixed_aliases_in_structured_path():
@@ -427,6 +531,7 @@ def test_qp1_structured_contract_includes_required_fields():
     assert "selected_tables" in context
     assert "selected_columns" in context
     assert "selected_table_names" in context
+    assert "complex_sql_plan" in context
 
 
 def test_qp1_missing_evidence_detection():
@@ -590,6 +695,7 @@ def test_qp1_route_recommendation_simple_rule_ok():
     # With higher confidence, should recommend simple_rule_ok
     if context["confidence"] >= 0.7:
         assert context["route_recommendation"] == "simple_rule_ok"
+        assert context["complex_sql_plan"] is None
     else:
         # For moderate confidence, ai_sql_required is acceptable
         assert context["route_recommendation"] in {"simple_rule_ok", "ai_sql_required"}

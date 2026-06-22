@@ -1163,8 +1163,20 @@ def test_ai_generation_receives_dynamic_pipeline_evidence(monkeypatch):
             "dimension_candidates": [{"table": "alpha_records", "column": "record_name", "semantic_type": "name"}],
             "filter_candidates": [],
             "join_paths": possible_join_paths,
+            "complex_sql_plan": {
+                "query_shape": "grouped_aggregation",
+                "required_joins": ["alpha_records.owner_id = beta_events.owner_id"],
+                "aggregation_type": "sum",
+                "sql_skeleton_type": "grouped_aggregation",
+            },
         },
         "plan": dict(pipeline_query_context["plan"]),
+        "complex_sql_plan": {
+            "query_shape": "grouped_aggregation",
+            "required_joins": ["alpha_records.owner_id = beta_events.owner_id"],
+            "aggregation_type": "sum",
+            "sql_skeleton_type": "grouped_aggregation",
+        },
         "formula_evidence": [],
         "evidence_sources": ["kb_identifier", "vector"],
     }
@@ -1202,6 +1214,7 @@ def test_ai_generation_receives_dynamic_pipeline_evidence(monkeypatch):
     assert captured["filter_candidates"] == []
     assert captured["join_paths"] == possible_join_paths
     assert captured["formula_evidence"] == []
+    assert captured["complex_sql_plan"]["query_shape"] == "grouped_aggregation"
     assert captured["evidence_sources"] == ["kb_identifier", "vector"]
 
 
@@ -1319,8 +1332,20 @@ def test_grouped_ai_query_receives_selected_dimension_and_measure_candidates(mon
             "dimension_candidates": [{"table": "alpha_records", "column": "record_name", "semantic_type": "name"}],
             "filter_candidates": [],
             "join_paths": possible_join_paths,
+            "complex_sql_plan": {
+                "query_shape": "grouped_aggregation",
+                "required_joins": ["alpha_records.owner_id = beta_events.owner_id"],
+                "aggregation_type": "sum",
+                "sql_skeleton_type": "grouped_aggregation",
+            },
         },
         "plan": dict(pipeline_query_context["plan"]),
+        "complex_sql_plan": {
+            "query_shape": "grouped_aggregation",
+            "required_joins": ["alpha_records.owner_id = beta_events.owner_id"],
+            "aggregation_type": "sum",
+            "sql_skeleton_type": "grouped_aggregation",
+        },
         "formula_evidence": [],
         "evidence_sources": ["kb_identifier"],
     }
@@ -1350,6 +1375,7 @@ def test_grouped_ai_query_receives_selected_dimension_and_measure_candidates(mon
     assert captured["measure_candidates"] == [{"table": "beta_events", "column": "event_total", "semantic_type": "money"}]
     assert captured["dimension_candidates"] == [{"table": "alpha_records", "column": "record_name", "semantic_type": "name"}]
     assert captured["join_paths"] == possible_join_paths
+    assert captured["complex_sql_plan"]["query_shape"] == "grouped_aggregation"
     assert "GROUP BY alpha_records.record_name" in sql
 
 

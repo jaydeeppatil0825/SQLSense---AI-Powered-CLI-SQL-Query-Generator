@@ -299,6 +299,16 @@ def test_prompt_includes_bridge_table_schema_and_join_predicates_for_grouped_que
         },
         selected_tables=selected_tables,
         join_paths=join_paths,
+        complex_sql_plan={
+            "query_shape": "grouped_aggregation",
+            "required_joins": [
+                "entity_groups.entity_id = link_records.entity_id",
+                "link_records.event_id = measure_events.event_id",
+            ],
+            "aggregation_type": "sum",
+            "limit": 50,
+            "sql_skeleton_type": "grouped_aggregation",
+        },
     )
     system_message = messages[0]["content"]
 
@@ -311,7 +321,8 @@ def test_prompt_includes_bridge_table_schema_and_join_predicates_for_grouped_que
         "JOIN measure_events ON link_records.event_id = measure_events.event_id"
     ) in system_message
     assert "entity_groups.display_label [name]" in system_message
-    assert "Query shape: grouped_aggregate" in system_message
+    assert "Prepared complex SQL plan from pipeline:" in system_message
+    assert "Query shape: grouped_aggregation" in system_message
     assert "Allowed SQL generation context:" in system_message
     assert "allowed_from_join_skeletons:" in system_message
     assert "SELECT <dimension_column>, SUM(<measure_column>) AS <result_alias>" in system_message
@@ -391,10 +402,19 @@ def test_prompt_includes_ranking_sql_skeleton_from_dynamic_evidence():
                 "length": 1,
             }
         ],
+        complex_sql_plan={
+            "query_shape": "ranking_aggregation",
+            "required_joins": ["agreements.client_id = clients.client_id"],
+            "aggregation_type": "sum",
+            "ordering": {"direction": "desc", "by": "deal value"},
+            "limit": 5,
+            "sql_skeleton_type": "ranking_aggregation",
+        },
     )
     system_message = messages[0]["content"]
 
-    assert "Query shape: ranking_grouped_aggregate" in system_message
+    assert "Prepared complex SQL plan from pipeline:" in system_message
+    assert "Query shape: ranking_aggregation" in system_message
     assert "allowed_tables:" in system_message
     assert "    - clients" in system_message
     assert "    - agreements" in system_message

@@ -95,6 +95,38 @@ def test_generate_sql_prompt_uses_pipeline_context(monkeypatch):
                 ],
             }
         ],
+        complex_sql_plan={
+            "query_shape": "ranking_aggregation",
+            "metric_candidates": [{"table": "deals", "column": "deal_value", "semantic_type": "money"}],
+            "dimension_candidates": [{"table": "accounts", "column": "account_label", "semantic_type": "name"}],
+            "filter_candidates": [],
+            "selected_tables": [{"table": "accounts", "confidence": 0.95}, {"table": "deals", "confidence": 0.93}],
+            "selected_columns": [
+                {"table": "accounts", "column": "account_label", "semantic_type": "name"},
+                {"table": "deals", "column": "deal_value", "semantic_type": "money"},
+            ],
+            "join_paths": [
+                {
+                    "from_table": "accounts",
+                    "to_table": "deals",
+                    "path": [
+                        {
+                            "from_table": "accounts",
+                            "from_column": "account_id",
+                            "to_table": "deals",
+                            "to_column": "account_id",
+                            "join_condition": "accounts.account_id = deals.account_id",
+                        }
+                    ],
+                }
+            ],
+            "required_joins": ["accounts.account_id = deals.account_id"],
+            "aggregation_type": "sum",
+            "ordering": {"direction": "desc", "by": "deal value"},
+            "limit": 5,
+            "formula_evidence": [],
+            "sql_skeleton_type": "ranking_aggregation",
+        },
         evidence_sources=["kb_identifier", "relationship_context"],
         route_recommendation="ai_sql_required",
     )
@@ -108,11 +140,12 @@ def test_generate_sql_prompt_uses_pipeline_context(monkeypatch):
     assert "possible_join_paths" in system_prompt
     assert "accounts.account_id = deals.account_id" in system_prompt
     assert "Use ONLY the provided selected tables, selected columns, runtime candidates, and supplied join paths." in system_prompt
+    assert "Prepared complex SQL plan from pipeline:" in system_prompt
     assert "Allowed SQL generation context:" in system_prompt
     assert "allowed_tables:" in system_prompt
     assert "allowed_columns:" in system_prompt
     assert "allowed_joins:" in system_prompt
-    assert "Query shape: ranking_grouped_aggregate" in system_prompt
+    assert "Query shape: ranking_aggregation" in system_prompt
     assert "SELECT <dimension_column>, SUM(<measure_column>) AS <result_alias>" in system_prompt
     assert "TABLE: accounts" in system_prompt
     assert "TABLE: deals" in system_prompt
@@ -247,6 +280,7 @@ def test_retry_prompt_includes_validation_error_and_join_context(monkeypatch):
         "join_paths": [{"from_table": "alpha_records", "to_table": "beta_events", "path": [{"from_table": "alpha_records", "to_table": "beta_events", "from_column": "record_name", "to_column": "owner_id"}]}],
         "join_conditions": ["alpha_records.record_name = beta_events.owner_id"],
         "join_skeletons": ["FROM alpha_records JOIN beta_events ON alpha_records.record_name = beta_events.owner_id"],
+        "complex_sql_plan": {"query_shape": "multi_table_lookup", "required_joins": ["alpha_records.record_name = beta_events.owner_id"]},
     }
     join_paths = validation_context["join_paths"]
 
@@ -267,6 +301,7 @@ def test_retry_prompt_includes_validation_error_and_join_context(monkeypatch):
     assert "SELECT record_name FROM LIMIT 50" in correction_user
     assert "Validation failure" in correction_user
     assert "missing a valid table name after FROM" in correction_user
+    assert "Complex SQL plan" in correction_user
     assert "Relationship/join paths" in correction_user
     assert "Join predicates to use" in correction_user
     assert "alpha_records.record_name = beta_events.owner_id" in correction_user

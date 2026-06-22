@@ -377,6 +377,8 @@ def _merge_pipeline_metadata(
         query_context.setdefault("formula_evidence", list(pipeline_context["formula_evidence"]))
     if isinstance(pipeline_context.get("evidence_sources"), list):
         query_context.setdefault("evidence_sources", list(pipeline_context["evidence_sources"]))
+    if isinstance(pipeline_context.get("complex_sql_plan"), dict):
+        query_context.setdefault("complex_sql_plan", dict(pipeline_context["complex_sql_plan"]))
     if str(pipeline_context.get("normalized_question") or "").strip():
         query_context.setdefault("normalized_question", str(pipeline_context["normalized_question"]).strip())
     if str(pipeline_context.get("route_recommendation") or "").strip():
@@ -561,6 +563,7 @@ def _build_validation_retry_context(query_context: dict[str, Any]) -> dict[str, 
         "dimension_candidates": list(query_context.get("dimension_candidates") or retrieved_context.get("dimension_candidates") or [])[:10],
         "filter_candidates": list(query_context.get("filter_candidates") or query_context.get("filters") or retrieved_context.get("filter_candidates") or [])[:10],
         "formula_evidence": list(query_context.get("formula_evidence") or retrieved_context.get("formula_evidence") or [])[:10],
+        "complex_sql_plan": dict(query_context.get("complex_sql_plan") or {}),
         "evidence_sources": list(query_context.get("evidence_sources") or retrieved_context.get("retrieval_sources") or [])[:10],
     }
 
@@ -1399,6 +1402,7 @@ class QuestionService:
                     "business_glossary": business_glossary,
                     "join_paths": _possible_join_paths(query_context),
                     "formula_evidence": _formula_evidence_payload(query_context),
+                    "complex_sql_plan": dict(query_context.get("complex_sql_plan") or {}),
                     "evidence_sources": _evidence_sources_payload(query_context),
                     "route_recommendation": route_recommendation or None,
                 }
@@ -1421,6 +1425,7 @@ class QuestionService:
                         "business_glossary",
                         "join_paths",
                         "formula_evidence",
+                        "complex_sql_plan",
                         "evidence_sources",
                         "route_recommendation",
                     ),
@@ -1455,6 +1460,7 @@ class QuestionService:
                     "validation_context": retry_context,
                     "join_paths": _possible_join_paths(query_context),
                     "formula_evidence": _formula_evidence_payload(query_context),
+                    "complex_sql_plan": dict(query_context.get("complex_sql_plan") or {}),
                     "evidence_sources": _evidence_sources_payload(query_context),
                     "route_recommendation": route_recommendation or None,
                 }
@@ -1483,6 +1489,7 @@ class QuestionService:
                         "validation_context",
                         "join_paths",
                         "formula_evidence",
+                        "complex_sql_plan",
                         "evidence_sources",
                         "route_recommendation",
                     ),

@@ -1763,7 +1763,17 @@ def _build_query_context_from_retrieved_context(
     if requested_metrics and not measure_candidates:
         warnings.append("Requested metric remains unresolved in dynamic context.")
 
-    # Detect missing evidence
+    query_shape = _derive_complex_query_shape(
+        plan,
+        intent,
+        selected_tables,
+        measure_candidates,
+        dimension_candidates,
+        filters,
+        join_paths,
+        retrieved_context.get("formula_evidence") or [],
+    )
+
     missing_evidence = _detect_missing_evidence(
         plan,
         selected_tables,
@@ -1772,17 +1782,36 @@ def _build_query_context_from_retrieved_context(
         requested_metrics,
         requested_dimensions,
         requested_filters,
+        measure_candidates,
+        dimension_candidates,
+        filters,
+        retrieved_context.get("formula_evidence") or [],
+        query_shape,
     )
-    
-    # Compute route recommendation
+
     route_recommendation = _compute_route_recommendation(
         plan,
         missing_evidence,
         confidence,
         selected_tables,
+        query_shape,
     )
-    
-    # Build debug trace
+
+    complex_sql_plan = _build_complex_sql_plan(
+        intent,
+        plan,
+        selected_tables,
+        selected_columns,
+        measure_candidates,
+        dimension_candidates,
+        filters,
+        join_paths,
+        retrieved_context.get("formula_evidence") or [],
+        missing_evidence,
+        route_recommendation,
+        query_shape,
+    )
+
     debug_trace = _build_debug_trace(
         question,
         plan,
@@ -1802,6 +1831,7 @@ def _build_query_context_from_retrieved_context(
         "missing_evidence": missing_evidence,
         "confidence": round(confidence, 2),
         "route_recommendation": route_recommendation,
+        "complex_sql_plan": complex_sql_plan,
         "debug_trace": debug_trace,
         # Legacy fields for backward compatibility
         "selected_tables": selected_tables,
@@ -1817,6 +1847,8 @@ def _build_query_context_from_retrieved_context(
         "matched_relationships": matched_relationships,
         "measure_candidates": measure_candidates,
         "dimension_candidates": dimension_candidates,
+        "filter_candidates": filter_candidates,
+        "formula_evidence": list(retrieved_context.get("formula_evidence") or []),
         "filters": filters,
         "evidence_sources": list(retrieved_context.get("retrieval_sources") or []),
     }   
@@ -1830,6 +1862,11 @@ def _detect_missing_evidence(
     requested_metrics: list[str],
     requested_dimensions: list[str],
     requested_filters: list[str],
+    measure_candidates: list[dict[str, Any]],
+    dimension_candidates: list[dict[str, Any]],
+    filters: list[dict[str, Any]],
+    formula_evidence: list[dict[str, Any]],
+    query_shape: str | None,
 ) -> dict[str, Any]:
     """Detect missing evidence for planning."""
     missing_evidence: dict[str, Any] = {
@@ -1839,37 +1876,22 @@ def _detect_missing_evidence(
         "missing_filter_column": False,
         "missing_formula_evidence": False,
     }
-    
-    # Check for missing metric
-    if requested_metrics and not any(
-        col.get("semantic_type") in {"money", "quantity", "percentage"}
-        for col in selected_columns
-    ):
+
+    if requested_metrics and not measure_candidates and not formula_evidence:
         missing_evidence["missing_metric"] = True
-    
-    # Check for missing dimension
-    if requested_dimensions and not any(
-        col.get("semantic_type") in {"name", "text", "date", "category_candidate"}
-        for col in selected_columns
-    ):
+
+    if requested_dimensions and not dimension_candidates:
         missing_evidence["missing_dimension"] = True
-    
-    # Check for missing join path when multiple tables are selected
+
     if len(selected_tables) > 1 and not join_paths:
         missing_evidence["missing_join_path"] = True
-    
-    # Check for missing filter column
-    if requested_filters and not plan.get("filters"):
+
+    if requested_filters and not filters:
         missing_evidence["missing_filter_column"] = True
-    
-    # Check for missing formula evidence (e.g., "pending billed amount")
-    # This should stay missing unless dynamic formula evidence exists
-    question_lower = _normalize(plan.get("question", ""))
-    formula_keywords = {"pending", "billed", "outstanding", "due", "balance"}
-    if any(keyword in question_lower for keyword in formula_keywords):
-        # No dynamic formula evidence exists in current implementation
+
+    if query_shape == "formula_query" and not formula_evidence:
         missing_evidence["missing_formula_evidence"] = True
-    
+
     return missing_evidence
 
 
@@ -1878,47 +1900,182 @@ def _compute_route_recommendation(
     missing_evidence: dict[str, Any],
     confidence: float,
     selected_tables: list[dict[str, Any]],
+    query_shape: str | None,
 ) -> str:
     """Compute route recommendation based on evidence strength."""
     intent = str(plan.get("intent") or "").strip().lower()
     has_grouping = bool(plan.get("grouping") or plan.get("dimension"))
     has_formula_gap = bool(missing_evidence.get("missing_formula_evidence"))
+    is_complex_shape = bool(query_shape)
 
-    # Cannot plan safely if critical evidence is missing
-    if missing_evidence.get("missing_join_path") and len(selected_tables) > 1:
+    if (
+        missing_evidence.get("missing_join_path")
+        or missing_evidence.get("missing_formula_evidence")
+        or (is_complex_shape and missing_evidence.get("missing_metric"))
+        or (is_complex_shape and has_grouping and missing_evidence.get("missing_dimension"))
+    ):
         return "cannot_plan_safely"
-    
+
     if confidence < 0.3:
         return "cannot_plan_safely"
-    
-    # Needs clarification if evidence is very weak
+
     if confidence < 0.5:
         return "needs_clarification"
-    
-    # Rule-based SQL is reserved for strong single-table list/count shapes only.
+
     if (
         confidence >= 0.7
         and len(selected_tables) == 1
         and intent in {"list", "count"}
         and not has_grouping
+        and not is_complex_shape
         and not has_formula_gap
         and not missing_evidence.get("missing_metric")
         and not missing_evidence.get("missing_dimension")
     ):
         return "simple_rule_ok"
-    
-    # Everything more complex than simple list/count should use AI.
+
     if (
-        len(selected_tables) > 1
+        is_complex_shape
+        or len(selected_tables) > 1
         or has_grouping
         or has_formula_gap
         or missing_evidence.get("missing_metric")
         or intent not in {"list", "count"}
     ):
         return "ai_sql_required"
-    
-    # For moderate confidence with single table, default to ai_sql_required
+
     return "ai_sql_required"
+
+
+def _derive_complex_query_shape(
+    plan: dict[str, Any],
+    intent: dict[str, Any] | None,
+    selected_tables: list[dict[str, Any]],
+    measure_candidates: list[dict[str, Any]],
+    dimension_candidates: list[dict[str, Any]],
+    filters: list[dict[str, Any]],
+    join_paths: list[dict[str, Any]],
+    formula_evidence: list[dict[str, Any]],
+) -> str | None:
+    planner_intent = str(plan.get("intent") or "").strip().lower()
+    intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
+    table_count = len([entry for entry in selected_tables if entry.get("table")])
+    has_join = bool(join_paths) or table_count > 1
+    has_grouping = bool(plan.get("grouping") or dimension_candidates or (intent or {}).get("needs_grouping"))
+    has_filters = bool(filters)
+    has_formula = bool(formula_evidence)
+    has_measure = bool(measure_candidates)
+    has_metric_request = bool(plan.get("requested_metrics"))
+    has_aggregation = bool(
+        planner_intent in {"count", "total", "average", "top_n"}
+        or (intent or {}).get("needs_aggregation")
+        or has_measure
+        or has_formula
+    )
+    has_ranking = bool(
+        planner_intent == "top_n"
+        or intent_type == "ranking"
+        or (plan.get("limit") is not None and plan.get("sorting"))
+    )
+
+    if (
+        has_metric_request
+        and not has_measure
+        and not has_formula
+        and (has_grouping or has_ranking or has_join)
+    ):
+        return "formula_query"
+    if has_ranking and (has_grouping or has_aggregation):
+        return "ranking_aggregation"
+    if has_grouping and (has_measure or has_formula or has_aggregation):
+        return "grouped_aggregation"
+    if has_filters and not has_grouping and not has_aggregation and not has_join:
+        return "filtered_list"
+    if has_join:
+        return "multi_table_lookup"
+    return None
+
+
+def _required_join_predicates(join_paths: list[dict[str, Any]]) -> list[str]:
+    predicates: list[str] = []
+    seen: set[str] = set()
+    for join_path in join_paths:
+        for edge in join_path.get("path", []) or []:
+            join_condition = str(edge.get("join_condition") or "").strip()
+            if not join_condition:
+                from_table = str(edge.get("from_table") or "").strip()
+                from_column = str(edge.get("from_column") or "").strip()
+                to_table = str(edge.get("to_table") or "").strip()
+                to_column = str(edge.get("to_column") or "").strip()
+                if from_table and from_column and to_table and to_column:
+                    join_condition = f"{from_table}.{from_column} = {to_table}.{to_column}"
+            if join_condition and join_condition not in seen:
+                seen.add(join_condition)
+                predicates.append(join_condition)
+    return predicates
+
+
+def _aggregation_type_for_complex_shape(
+    query_shape: str | None,
+    plan: dict[str, Any],
+    formula_evidence: list[dict[str, Any]],
+    measure_candidates: list[dict[str, Any]],
+) -> str | None:
+    planner_intent = str(plan.get("intent") or "").strip().lower()
+    if query_shape == "formula_query":
+        return "derived"
+    if planner_intent == "count":
+        return "count"
+    if planner_intent == "average":
+        return "average"
+    if query_shape in {"grouped_aggregation", "ranking_aggregation"} and (measure_candidates or formula_evidence):
+        return "sum"
+    return None
+
+
+def _build_complex_sql_plan(
+    intent: dict[str, Any] | None,
+    plan: dict[str, Any],
+    selected_tables: list[dict[str, Any]],
+    selected_columns: list[dict[str, Any]],
+    measure_candidates: list[dict[str, Any]],
+    dimension_candidates: list[dict[str, Any]],
+    filters: list[dict[str, Any]],
+    join_paths: list[dict[str, Any]],
+    formula_evidence: list[dict[str, Any]],
+    missing_evidence: dict[str, Any],
+    route_recommendation: str,
+    query_shape: str | None,
+) -> dict[str, Any] | None:
+    if not query_shape:
+        return None
+
+    return {
+        "query_shape": query_shape,
+        "metric_candidates": list(measure_candidates),
+        "dimension_candidates": list(dimension_candidates),
+        "filter_candidates": list(filters),
+        "selected_tables": list(selected_tables),
+        "selected_columns": list(selected_columns),
+        "join_paths": list(join_paths),
+        "required_joins": _required_join_predicates(join_paths),
+        "aggregation_type": _aggregation_type_for_complex_shape(
+            query_shape,
+            plan,
+            formula_evidence,
+            measure_candidates,
+        ),
+        "ordering": dict(plan.get("sorting") or (intent or {}).get("requested_sort") or {}),
+        "limit": plan.get("limit"),
+        "formula_evidence": list(formula_evidence),
+        "sql_skeleton_type": query_shape,
+        "missing_evidence": {
+            key: value
+            for key, value in missing_evidence.items()
+            if value
+        },
+        "route_recommendation": route_recommendation,
+    }
 
 
 def _build_debug_trace(
@@ -2206,7 +2363,21 @@ def build_query_context(
     else:
         plan["metric"] = None
 
-    # Detect missing evidence
+    measure_candidates: list[dict[str, Any]] = []
+    dimension_candidates: list[dict[str, Any]] = []
+    filter_candidates = list(plan.get("filters") or [])
+    formula_evidence = list(plan.get("formula_evidence") or [])
+    query_shape = _derive_complex_query_shape(
+        plan,
+        None,
+        selected_tables,
+        measure_candidates,
+        dimension_candidates,
+        filter_candidates,
+        join_paths,
+        formula_evidence,
+    )
+
     missing_evidence = _detect_missing_evidence(
         plan,
         selected_tables,
@@ -2215,17 +2386,36 @@ def build_query_context(
         plan.get("requested_metrics", []),
         plan.get("requested_dimensions", []),
         plan.get("requested_filters", []),
+        measure_candidates,
+        dimension_candidates,
+        filter_candidates,
+        formula_evidence,
+        query_shape,
     )
-    
-    # Compute route recommendation
+
     route_recommendation = _compute_route_recommendation(
         plan,
         missing_evidence,
         overall_confidence,
         selected_tables,
+        query_shape,
     )
-    
-    # Build debug trace
+
+    complex_sql_plan = _build_complex_sql_plan(
+        None,
+        plan,
+        selected_tables,
+        selected_columns,
+        measure_candidates,
+        dimension_candidates,
+        filter_candidates,
+        join_paths,
+        formula_evidence,
+        missing_evidence,
+        route_recommendation,
+        query_shape,
+    )
+
     debug_trace = _build_debug_trace(
         question,
         plan,
@@ -2245,6 +2435,7 @@ def build_query_context(
         "missing_evidence": missing_evidence,
         "confidence": overall_confidence,
         "route_recommendation": route_recommendation,
+        "complex_sql_plan": complex_sql_plan,
         "debug_trace": debug_trace,
         # Legacy fields for backward compatibility
         "selected_tables": selected_tables,
@@ -2257,4 +2448,8 @@ def build_query_context(
         "vector_used": bool(vector_results and vector_results.get("used_vector")),
         "join_paths": join_paths,
         "fk_relationships": fk_graph,
+        "measure_candidates": measure_candidates,
+        "dimension_candidates": dimension_candidates,
+        "filter_candidates": filter_candidates,
+        "formula_evidence": formula_evidence,
     }

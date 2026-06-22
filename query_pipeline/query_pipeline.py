@@ -38,6 +38,7 @@ class QueryPipelineResult:
     validation_result: Dict[str, Any]
     route: Optional[str]
     route_recommendation: Optional[str]
+    complex_sql_plan: Optional[Dict[str, Any]]
     formula_evidence: list[Dict[str, Any]]
     evidence_sources: list[str]
 
@@ -91,6 +92,7 @@ class QueryPipeline:
             "query_context": preview_context,
             "plan": dict(preview_context.get("plan") or {}),
             "route_recommendation": preview_context.get("route_recommendation"),
+            "complex_sql_plan": preview_context.get("complex_sql_plan"),
             "formula_evidence": formula_evidence,
             "evidence_sources": evidence_sources,
         }
@@ -120,6 +122,7 @@ class QueryPipeline:
             validation_result=validation_result,
             route=(final_context or {}).get("route_used"),
             route_recommendation=(final_context or preview_context or {}).get("route_recommendation"),
+            complex_sql_plan=(final_context or preview_context or {}).get("complex_sql_plan"),
             formula_evidence=formula_evidence,
             evidence_sources=evidence_sources,
         )

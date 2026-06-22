@@ -113,21 +113,19 @@ def _query_shape(
     if planner_intent == "list" and table_count <= 1 and not has_join and not has_grouping and not has_aggregation:
         return "single_table_list"
     if has_formula and has_grouping:
-        return "derived_grouped_aggregate"
+        return "formula_query"
     if has_ranking and (has_grouping or has_aggregation):
-        return "ranking_grouped_aggregate"
+        return "ranking_aggregation"
     if has_grouping and has_aggregation:
-        return "grouped_aggregate"
-    if has_join and has_aggregation:
-        return "joined_aggregate"
-    if has_join and has_filters:
-        return "joined_filtered_select"
+        return "grouped_aggregation"
+    if has_filters and not has_join and not has_aggregation and not has_grouping:
+        return "filtered_list"
     if has_join:
-        return "joined_select"
+        return "multi_table_lookup"
     if has_aggregation:
         return "single_table_aggregate"
     if has_filters:
-        return "single_table_filtered_list"
+        return "filtered_list"
     return "generic_select"
 
 
@@ -477,6 +475,7 @@ def _build_allowed_context_section(
     filter_candidates: list[dict] | None,
     join_paths: list[dict] | None,
     formula_evidence: list[dict] | None,
+    complex_sql_plan: dict | None = None,
 ) -> list[str]:
     lines: list[str] = ["Allowed SQL generation context:"]
     table_names = [
@@ -527,6 +526,16 @@ def _build_allowed_context_section(
         lines.append("  allowed_joins:")
         for value in join_conditions[:12]:
             lines.append(f"    - {value}")
+    elif isinstance(complex_sql_plan, dict):
+        required_joins = [
+            str(value).strip()
+            for value in (complex_sql_plan.get("required_joins") or [])
+            if str(value).strip()
+        ]
+        if required_joins:
+            lines.append("  allowed_joins:")
+            for value in required_joins[:12]:
+                lines.append(f"    - {value}")
 
     skeletons = _join_skeletons(join_paths)
     if skeletons:
@@ -559,16 +568,18 @@ def _build_sql_skeleton_section(
     query_plan: dict | None,
     join_paths: list[dict] | None,
     explicit_limit: int | None,
+    complex_sql_plan: dict | None = None,
 ) -> list[str]:
     lines = ["Generic SQL skeleton guidance:"]
     skeletons = _join_skeletons(join_paths)
     from_join_line = skeletons[0] if skeletons else "FROM <allowed_table>"
-    limit_line = f"LIMIT {explicit_limit}" if explicit_limit else "<omit LIMIT unless explicitly required>"
+    planned_limit = explicit_limit if explicit_limit is not None else (complex_sql_plan or {}).get("limit")
+    limit_line = f"LIMIT {planned_limit}" if planned_limit else "<omit LIMIT unless explicitly required>"
 
-    if query_shape == "ranking_grouped_aggregate":
+    if query_shape == "ranking_aggregation":
         lines.extend(
             [
-                "  Query shape: ranking_grouped_aggregate",
+                "  Query shape: ranking_aggregation",
                 "  Fill this shape using ONLY allowed evidence:",
                 "  SELECT <dimension_column>, SUM(<measure_column>) AS <result_alias>",
                 f"  {from_join_line}",
@@ -577,8 +588,8 @@ def _build_sql_skeleton_section(
                 f"  {limit_line};",
             ]
         )
-    elif query_shape in {"grouped_aggregate", "derived_grouped_aggregate"}:
-        aggregate_expression = "<derived_expression_from_formula_evidence>" if query_shape == "derived_grouped_aggregate" else "<measure_column>"
+    elif query_shape in {"grouped_aggregation", "formula_query"}:
+        aggregate_expression = "<derived_expression_from_formula_evidence>" if query_shape == "formula_query" else "<measure_column>"
         lines.extend(
             [
                 f"  Query shape: {query_shape}",
@@ -590,18 +601,7 @@ def _build_sql_skeleton_section(
                 f"  {limit_line};",
             ]
         )
-    elif query_shape == "joined_aggregate":
-        lines.extend(
-            [
-                "  Query shape: joined_aggregate",
-                "  Fill this shape using ONLY allowed evidence:",
-                "  SELECT SUM(<measure_column>) AS <result_alias>",
-                f"  {from_join_line}",
-                "  WHERE <allowed_filter_predicates_if_any>",
-                f"  {limit_line};",
-            ]
-        )
-    elif query_shape in {"joined_select", "joined_filtered_select"}:
+    elif query_shape in {"filtered_list", "multi_table_lookup"}:
         lines.extend(
             [
                 f"  Query shape: {query_shape}",
@@ -621,6 +621,27 @@ def _build_sql_skeleton_section(
             ]
         )
 
+    lines.append("")
+    return lines
+
+
+def _build_complex_sql_plan_section(complex_sql_plan: dict | None) -> list[str]:
+    if not isinstance(complex_sql_plan, dict) or not complex_sql_plan:
+        return []
+
+    lines = ["Prepared complex SQL plan from pipeline:"]
+    for key in (
+        "query_shape",
+        "aggregation_type",
+        "ordering",
+        "limit",
+        "sql_skeleton_type",
+        "required_joins",
+        "missing_evidence",
+        "route_recommendation",
+    ):
+        if key in complex_sql_plan:
+            lines.append(f"  {key}: {complex_sql_plan.get(key)}")
     lines.append("")
     return lines
 
@@ -799,6 +820,7 @@ def build_sql_prompt(
     business_glossary: dict | None = None,
     join_paths: list[dict] | None = None,
     formula_evidence: list[dict] | None = None,
+    complex_sql_plan: dict | None = None,
     evidence_sources: list[str] | None = None,
     route_recommendation: str | None = None,
 ) -> list[dict]:
@@ -810,7 +832,7 @@ def build_sql_prompt(
         )
 
     explicit_limit = _extract_limit(user_question)
-    query_shape = _query_shape(
+    query_shape = str((complex_sql_plan or {}).get("query_shape") or "").strip() or _query_shape(
         query_plan,
         intent,
         selected_tables,
@@ -864,6 +886,7 @@ def build_sql_prompt(
     )
     system_parts.extend(_build_retrieved_glossary_section(retrieved_context))
     system_parts.extend(_build_plan_section(query_plan, selected_tables, join_paths))
+    system_parts.extend(_build_complex_sql_plan_section(complex_sql_plan))
     system_parts.extend(
         _build_runtime_evidence_section(
             selected_columns,
@@ -881,6 +904,7 @@ def build_sql_prompt(
             filter_candidates,
             join_paths,
             formula_evidence,
+            complex_sql_plan,
         )
     )
     system_parts.extend(
@@ -889,6 +913,7 @@ def build_sql_prompt(
             query_plan,
             join_paths,
             explicit_limit,
+            complex_sql_plan,
         )
     )
     system_parts.extend(_build_ai_target_section(query_plan, selected_tables))

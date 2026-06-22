@@ -165,6 +165,7 @@ def generate_sql(
     business_glossary: dict | None = None,
     join_paths: list[dict] | None = None,
     formula_evidence: list[dict] | None = None,
+    complex_sql_plan: dict | None = None,
     evidence_sources: list[str] | None = None,
     route_recommendation: str | None = None,
 ) -> str:
@@ -188,6 +189,7 @@ def generate_sql(
         business_glossary=business_glossary,
         join_paths=join_paths,
         formula_evidence=formula_evidence,
+        complex_sql_plan=complex_sql_plan,
         evidence_sources=evidence_sources,
         route_recommendation=route_recommendation,
     )
@@ -214,6 +216,7 @@ def generate_sql_with_retry(
     validation_context: dict | None = None,
     join_paths: list[dict] | None = None,
     formula_evidence: list[dict] | None = None,
+    complex_sql_plan: dict | None = None,
     evidence_sources: list[str] | None = None,
     route_recommendation: str | None = None,
 ) -> str:
@@ -237,6 +240,7 @@ def generate_sql_with_retry(
         business_glossary=business_glossary,
         join_paths=join_paths,
         formula_evidence=formula_evidence,
+        complex_sql_plan=complex_sql_plan,
         evidence_sources=evidence_sources,
         route_recommendation=route_recommendation,
     )
@@ -256,6 +260,7 @@ def generate_sql_with_retry(
     dimension_entries = validation_context.get("dimension_candidates", []) if validation_context else []
     filter_entries = validation_context.get("filter_candidates", []) if validation_context else []
     formula_entries = validation_context.get("formula_evidence", formula_evidence or []) if validation_context else (formula_evidence or [])
+    complex_plan = validation_context.get("complex_sql_plan", complex_sql_plan or {}) if validation_context else (complex_sql_plan or {})
     source_entries = validation_context.get("evidence_sources", evidence_sources or []) if validation_context else (evidence_sources or [])
 
     correction_user = (
@@ -263,6 +268,7 @@ def generate_sql_with_retry(
         f"Rejected SQL:\n{first_attempt_sql}\n\n"
         f"Validation failure: {validation_reason}\n\n"
         f"Runtime schema and retrieval context:\n{validation_context or {}}\n\n"
+        f"Complex SQL plan: {complex_plan}\n"
         "Required tables: " + ", ".join([t.get("table", "") for t in (selected_tables or [])]) + "\n"
         "Required columns: " + ", ".join([f"{c.get('table', '')}.{c.get('column', '')}" for c in selected_column_entries]) + "\n"
         "Measure candidates: " + ", ".join([f"{c.get('table', '')}.{c.get('column', '')}" for c in measure_entries]) + "\n"
