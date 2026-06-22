@@ -14,11 +14,13 @@ import re
 from typing import Any, Dict, Optional
 
 from kb_pipeline.schema_facts import (
+    column_ai_metadata,
     column_business_description,
     column_business_terms,
     column_is_date,
     column_is_dimension,
     column_is_measure,
+    column_planner_roles,
     column_sample_values,
     resolved_semantic_type,
 )
@@ -158,6 +160,59 @@ def _score_text(term_tokens: list[str], *texts: str) -> float:
     return round(score, 4)
 
 
+def _score_match(term: str, *texts: str) -> tuple[float, list[str]]:
+    normalized_term = _normalize_text(term)
+    term_tokens = set(_tokenize(term))
+    if not normalized_term or not term_tokens:
+        return 0.0, []
+
+    best_score = 0.0
+    evidences: list[str] = []
+
+    for text in texts:
+        normalized_text = _normalize_text(text)
+        if not normalized_text:
+            continue
+        text_tokens = set(_tokenize(text))
+        if not text_tokens:
+            continue
+
+        local_score = 0.0
+        local_evidence: list[str] = []
+
+        if normalized_text == normalized_term:
+            local_score = 1.0
+            local_evidence.append("exact_phrase")
+        elif normalized_term in normalized_text:
+            local_score = max(local_score, 0.9 if len(term_tokens) > 1 else 0.82)
+            local_evidence.append("phrase_in_text")
+        elif text_tokens == term_tokens:
+            local_score = max(local_score, 0.92)
+            local_evidence.append("exact_token_match")
+        elif term_tokens <= text_tokens:
+            local_score = max(local_score, 0.84)
+            local_evidence.append("all_term_tokens_present")
+        else:
+            overlap = term_tokens & text_tokens
+            if overlap:
+                overlap_ratio = len(overlap) / max(len(term_tokens), 1)
+                if overlap_ratio >= 0.75:
+                    local_score = max(local_score, 0.72)
+                    local_evidence.append("strong_token_overlap")
+                elif overlap_ratio >= 0.5:
+                    local_score = max(local_score, 0.52)
+                    local_evidence.append("partial_token_overlap")
+                elif len(overlap) == 1:
+                    local_score = max(local_score, 0.28)
+                    local_evidence.append("single_token_overlap")
+
+        if local_score > best_score:
+            best_score = local_score
+            evidences = local_evidence
+
+    return round(best_score, 4), _unique(evidences)
+
+
 def _query_terms(normalized_question: str, intent: Dict[str, Any]) -> list[str]:
     terms = []
     for key in ("raw_business_terms", "requested_metrics", "requested_dimensions", "requested_filters"):
@@ -176,21 +231,34 @@ def _query_terms(normalized_question: str, intent: Dict[str, Any]) -> list[str]:
 def _match_tables(query_terms: list[str], knowledge_base: Dict[str, Any]) -> list[Dict[str, Any]]:
     matches = []
     for table_name, table_data in knowledge_base.items():
+        related_tables = []
+        for foreign_key in table_data.get("foreign_keys", []) or []:
+            related_tables.append(str(foreign_key.get("referenced_table", "") or ""))
+        for relationship in table_data.get("relationships", []) or []:
+            related_tables.extend(
+                [
+                    str(relationship.get("from_table", "") or ""),
+                    str(relationship.get("to_table", "") or ""),
+                ]
+            )
         search_texts = [
             table_name,
+            _humanize(table_name),
             table_data.get("business_description", ""),
             table_data.get("business_purpose", ""),
             *list(table_data.get("business_terms", []) or []),
+            *related_tables,
         ]
         best_score = 0.0
         matched_terms = []
+        evidence_sources: list[str] = []
         for term in query_terms:
-            term_tokens = _tokenize(term)
-            score = _score_text(term_tokens, *search_texts)
+            score, term_evidence = _score_match(term, *search_texts)
             if score <= 0:
                 continue
             best_score = max(best_score, score)
             matched_terms.append(term)
+            evidence_sources.extend(term_evidence)
         if best_score <= 0:
             continue
         matches.append(
@@ -198,6 +266,7 @@ def _match_tables(query_terms: list[str], knowledge_base: Dict[str, Any]) -> lis
                 "table": table_name,
                 "score": round(best_score, 4),
                 "matched_terms": _unique(matched_terms),
+                "evidence_sources": _unique(["runtime_table_name", *evidence_sources]),
                 "source": "kb_identifier",
             }
         )
@@ -212,21 +281,29 @@ def _match_columns(query_terms: list[str], knowledge_base: Dict[str, Any]) -> li
             column_name = str(column.get("name", "")).strip()
             if not column_name:
                 continue
+            ai_metadata = column_ai_metadata(column)
+            planner_roles = column_planner_roles(column)
             search_texts = [
                 column_name,
+                _humanize(column_name),
+                table_name,
+                _humanize(table_name),
                 column_business_description(column),
                 *column_business_terms(column),
                 *column_sample_values(column),
+                ai_metadata.get("ai_semantic_type", ""),
+                *[role_name.replace("_", " ") for role_name, enabled in planner_roles.items() if enabled],
             ]
             best_score = 0.0
             matched_terms = []
+            evidence_sources: list[str] = []
             for term in query_terms:
-                term_tokens = _tokenize(term)
-                score = _score_text(term_tokens, *search_texts)
+                score, term_evidence = _score_match(term, *search_texts)
                 if score <= 0:
                     continue
                 best_score = max(best_score, score)
                 matched_terms.append(term)
+                evidence_sources.extend(term_evidence)
             if best_score <= 0:
                 continue
             matches.append(
@@ -240,6 +317,7 @@ def _match_columns(query_terms: list[str], knowledge_base: Dict[str, Any]) -> li
                     "is_date": column_is_date(column),
                     "score": round(best_score, 4),
                     "matched_terms": _unique(matched_terms),
+                    "evidence_sources": _unique(["runtime_column_name", *evidence_sources]),
                     "source": "kb_identifier",
                 }
             )
@@ -257,12 +335,14 @@ def _match_glossary_terms(query_terms: list[str], glossary: Dict[str, Any]) -> l
         ]
         best_score = 0.0
         matched_terms = []
+        evidence_sources: list[str] = []
         for query_term in query_terms:
-            score = _score_text(_tokenize(query_term), *search_texts)
+            score, term_evidence = _score_match(query_term, *search_texts)
             if score <= 0:
                 continue
             best_score = max(best_score, score)
             matched_terms.append(query_term)
+            evidence_sources.extend(term_evidence)
         if best_score <= 0:
             continue
         matches.append(
@@ -271,6 +351,7 @@ def _match_glossary_terms(query_terms: list[str], glossary: Dict[str, Any]) -> l
                 "score": round(best_score, 4),
                 "matched_terms": _unique(matched_terms),
                 "mapped_columns": list(entry.get("mapped_columns", []) or []),
+                "evidence_sources": _unique(["dynamic_glossary", *evidence_sources]),
                 "source": "glossary",
             }
         )
@@ -293,6 +374,7 @@ def _glossary_mappings(glossary_matches: list[Dict[str, Any]]) -> tuple[list[Dic
                         "table": table_name,
                         "score": round(min(score + 0.15, 1.0), 4),
                         "matched_terms": [term] if term else [],
+                        "evidence_sources": ["dynamic_glossary", "glossary_table_mapping"],
                         "source": "glossary",
                     }
                 )
@@ -303,6 +385,7 @@ def _glossary_mappings(glossary_matches: list[Dict[str, Any]]) -> tuple[list[Dic
                         "column": column_name,
                         "score": round(min(score + 0.15, 1.0), 4),
                         "matched_terms": [term] if term else [],
+                        "evidence_sources": ["dynamic_glossary", "glossary_column_mapping"],
                         "source": "glossary",
                     }
                 )
@@ -328,6 +411,7 @@ def _vector_context(normalized_question: str, vector_retriever: Optional[Any]) -
                 "table": entry.get("table_name"),
                 "score": round(float(entry.get("score") or 0.0), 4),
                 "matched_terms": [],
+                "evidence_sources": ["vector_retrieval"],
                 "source": "vector",
             }
             for entry in table_details
@@ -344,6 +428,7 @@ def _vector_context(normalized_question: str, vector_retriever: Optional[Any]) -
                 "is_date": bool(entry.get("is_date")),
                 "score": 0.75,
                 "matched_terms": [],
+                "evidence_sources": ["vector_retrieval"],
                 "source": "vector",
             }
             for entry in columns
@@ -353,6 +438,7 @@ def _vector_context(normalized_question: str, vector_retriever: Optional[Any]) -
         "matched_relationships": [
             {
                 **entry,
+                "evidence_sources": _unique(["vector_retrieval", *(entry.get("evidence_sources") or [])]),
                 "source": "vector",
             }
             for entry in relationships
@@ -373,9 +459,11 @@ def _merge_table_candidates(*candidate_groups: list[Dict[str, Any]]) -> list[Dic
             if not existing:
                 merged[table_name] = dict(candidate)
                 merged[table_name]["matched_terms"] = _unique(candidate.get("matched_terms", []))
+                merged[table_name]["evidence_sources"] = _unique(candidate.get("evidence_sources", []))
                 continue
             existing["score"] = max(float(existing.get("score") or 0.0), float(candidate.get("score") or 0.0))
             existing["matched_terms"] = _unique(list(existing.get("matched_terms", [])) + list(candidate.get("matched_terms", [])))
+            existing["evidence_sources"] = _unique(list(existing.get("evidence_sources", [])) + list(candidate.get("evidence_sources", [])))
             existing["source"] = existing.get("source") if existing.get("source") == "vector" else candidate.get("source", existing.get("source"))
     results = list(merged.values())
     results.sort(key=lambda item: (-float(item.get("score") or 0.0), item["table"]))
@@ -395,9 +483,11 @@ def _merge_column_candidates(*candidate_groups: list[Dict[str, Any]]) -> list[Di
             if not existing:
                 merged[key] = dict(candidate)
                 merged[key]["matched_terms"] = _unique(candidate.get("matched_terms", []))
+                merged[key]["evidence_sources"] = _unique(candidate.get("evidence_sources", []))
                 continue
             existing["score"] = max(float(existing.get("score") or 0.0), float(candidate.get("score") or 0.0))
             existing["matched_terms"] = _unique(list(existing.get("matched_terms", [])) + list(candidate.get("matched_terms", [])))
+            existing["evidence_sources"] = _unique(list(existing.get("evidence_sources", [])) + list(candidate.get("evidence_sources", [])))
             existing["is_measure"] = bool(existing.get("is_measure")) or bool(candidate.get("is_measure"))
             existing["is_dimension"] = bool(existing.get("is_dimension")) or bool(candidate.get("is_dimension"))
             existing["is_date"] = bool(existing.get("is_date")) or bool(candidate.get("is_date"))
@@ -457,14 +547,38 @@ def _match_relationships(
     vector_relationships: list[Dict[str, Any]],
 ) -> list[Dict[str, Any]]:
     matched_names = {entry.get("table") for entry in matched_tables if entry.get("table")}
+    score_by_table = {
+        str(entry.get("table")): float(entry.get("score") or 0.0)
+        for entry in matched_tables
+        if entry.get("table")
+    }
     relationships = []
     for edge in _relationship_edges(knowledge_base):
         if edge["from_table"] in matched_names or edge["to_table"] in matched_names:
-            relationships.append(edge)
+            support = round(score_by_table.get(edge["from_table"], 0.0) + score_by_table.get(edge["to_table"], 0.0), 4)
+            relationships.append(
+                {
+                    **edge,
+                    "score": support,
+                    "evidence_sources": _unique(
+                        [
+                            "fk_relationship_context" if edge.get("source") == "fk_relationship" else "relationship_context",
+                            "matched_table_support",
+                        ]
+                    ),
+                }
+            )
     for edge in vector_relationships:
         if not edge.get("from_table") or not edge.get("to_table"):
             continue
-        relationships.append(edge)
+        support = round(score_by_table.get(str(edge.get("from_table")), 0.0) + score_by_table.get(str(edge.get("to_table")), 0.0), 4)
+        relationships.append(
+            {
+                **edge,
+                "score": max(float(edge.get("score") or 0.0), support),
+                "evidence_sources": _unique(list(edge.get("evidence_sources", [])) + ["matched_table_support"]),
+            }
+        )
     deduped = []
     seen = set()
     for edge in relationships:
@@ -473,12 +587,24 @@ def _match_relationships(
             continue
         seen.add(signature)
         deduped.append(edge)
+    deduped.sort(
+        key=lambda edge: (
+            -float(edge.get("score") or 0.0),
+            str(edge.get("from_table") or ""),
+            str(edge.get("to_table") or ""),
+        )
+    )
     return deduped[:12]
 
 
 def _possible_join_paths(knowledge_base: Dict[str, Any], matched_tables: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
     """Find possible join paths between matched tables using dynamic relationship graph."""
     selected_tables = [entry.get("table") for entry in matched_tables[:4] if entry.get("table")]
+    support_by_table = {
+        str(entry.get("table")): float(entry.get("score") or 0.0)
+        for entry in matched_tables
+        if entry.get("table")
+    }
     if len(selected_tables) < 2:
         return []
 
@@ -526,7 +652,12 @@ def _possible_join_paths(knowledge_base: Dict[str, Any], matched_tables: list[Di
                     "path": edges,
                     "length": path_result["path_length"],
                     "total_confidence": path_result["total_confidence"],
+                    "support_score": round(
+                        sum(support_by_table.get(table_name, 0.0) for table_name in path_result["path"]),
+                        4,
+                    ),
                     "edge_sources": path_result["edge_sources"],
+                    "evidence_sources": _unique(["join_path", "relationship_graph", *path_result["edge_sources"]]),
                 })
     
     # Sort by: length (shorter first), total_confidence (higher first), FK preference
@@ -534,6 +665,7 @@ def _possible_join_paths(knowledge_base: Dict[str, Any], matched_tables: list[Di
         fk_count = sum(1 for source in item.get("edge_sources", []) if source == "foreign_key")
         return (
             item["length"],
+            -item.get("support_score", 0.0),
             -item.get("total_confidence", 0.0),
             -fk_count,
         )
@@ -596,7 +728,7 @@ def _overall_confidence(
     if matched_glossary_terms:
         components.append(float(matched_glossary_terms[0].get("score") or 0.0))
     if matched_relationships:
-        components.append(0.75)
+        components.append(min(0.85, float(matched_relationships[0].get("score") or 0.0) or 0.5))
     if not components:
         return 0.25
     return round(sum(components) / len(components), 2)

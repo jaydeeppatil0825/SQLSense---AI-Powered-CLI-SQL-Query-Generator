@@ -124,7 +124,27 @@ def test_context_retriever_matches_runtime_account_table_names():
 
     assert context["matched_tables"]
     assert context["matched_tables"][0]["table"] == "accounts"
+    assert context["matched_tables"][0]["score"] >= 0.9
+    assert "runtime_table_name" in context["matched_tables"][0]["evidence_sources"]
     assert "kb_identifier" in context["retrieval_sources"]
+
+
+def test_context_retriever_exact_runtime_column_names_score_high():
+    intent = {
+        "requested_dimensions": [],
+        "requested_metrics": ["deal_value"],
+        "requested_filters": [],
+        "raw_business_terms": ["deal_value"],
+    }
+
+    context = retrieve_context("show deal_value", intent, KB, business_glossary=GLOSSARY, vector_retriever=None)
+
+    assert context["matched_columns"]
+    top_column = context["matched_columns"][0]
+    assert top_column["table"] == "deals"
+    assert top_column["column"] == "deal_value"
+    assert top_column["score"] >= 0.9
+    assert "runtime_column_name" in top_column["evidence_sources"]
 
 
 def test_context_retriever_finds_metric_dimension_and_relationship_context():
@@ -146,6 +166,8 @@ def test_context_retriever_finds_metric_dimension_and_relationship_context():
     assert ("deals", "deal_value") in measure_columns
     assert ("accounts", "account_label") in dimension_columns
     assert context["matched_relationships"]
+    assert any("dynamic_glossary" in entry.get("evidence_sources", []) for entry in context["matched_glossary_terms"])
+    assert any("fk_relationship_context" in entry.get("evidence_sources", []) for entry in context["matched_relationships"])
     assert any(path["from_table"] == "accounts" and path["to_table"] == "deals" for path in context["possible_join_paths"])
 
 
@@ -162,6 +184,7 @@ def test_context_retriever_preserves_pending_billed_amount_without_formula_inven
     assert "pending billed amount" in context["query_terms"]
     assert any(entry["term"] == "pending billed amount" for entry in context["matched_glossary_terms"])
     assert all("-" not in str(entry) for entry in context["measure_candidates"])
+    assert context.get("formula_evidence") in (None, [])
 
 
 def test_context_retriever_returns_fk_relationship_context_for_related_matches():
@@ -182,6 +205,7 @@ def test_context_retriever_returns_fk_relationship_context_for_related_matches()
         and relationship["from_column"] == "account_id"
         for relationship in relationships
     )
+    assert any("matched_table_support" in relationship.get("evidence_sources", []) for relationship in relationships)
 
 
 def test_context_retriever_does_not_use_fixed_alias_shortcuts():
@@ -198,4 +222,19 @@ def test_context_retriever_does_not_use_fixed_alias_shortcuts():
     context = retrieve_context("show all customers", intent, alias_free_kb, business_glossary={}, vector_retriever=None)
 
     assert context["matched_tables"] == []
+    assert context["confidence"] <= 0.25
+
+
+def test_context_retriever_unrelated_terms_stay_low_confidence():
+    intent = {
+        "requested_dimensions": ["nebula"],
+        "requested_metrics": ["galactic flux"],
+        "requested_filters": [],
+        "raw_business_terms": ["nebula", "galactic flux"],
+    }
+
+    context = retrieve_context("show galactic flux by nebula", intent, KB, business_glossary=GLOSSARY, vector_retriever=None)
+
+    assert context["matched_tables"] == []
+    assert context["matched_columns"] == []
     assert context["confidence"] <= 0.25
