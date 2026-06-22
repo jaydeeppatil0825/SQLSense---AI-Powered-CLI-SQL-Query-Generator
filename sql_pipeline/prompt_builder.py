@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import os
 import re
+from copy import deepcopy
 from typing import Any
 
-from kb_pipeline.business_glossary import load_business_glossary
 from kb_pipeline.schema_facts import column_profile_facts
 
 
@@ -94,74 +94,72 @@ def _extract_limit(user_question: str) -> int | None:
     return None
 
 
-def _term_matches_question(term: str, term_data: dict[str, Any], question: str) -> bool:
-    normalized_question = _normalize(question)
-    normalized_term = _normalize(term)
-    if normalized_term and normalized_term in normalized_question:
-        return True
+def _build_retrieved_glossary_section(retrieved_context: dict | None) -> list[str]:
+    matched_terms = list((retrieved_context or {}).get("matched_glossary_terms") or [])
+    if not matched_terms:
+        return ["Retrieved glossary evidence: no matched glossary terms were supplied by the pipeline.", ""]
 
-    question_terms = set(re.split(r"[^a-z0-9]+", normalized_question))
-    term_terms = {token for token in re.split(r"[^a-z0-9]+", normalized_term) if token}
-    if term_terms and term_terms <= question_terms:
-        return True
-
-    for alias in term_data.get("business_terms", []) or []:
-        alias_terms = {token for token in re.split(r"[^a-z0-9]+", _normalize(alias)) if token}
-        if alias_terms and alias_terms <= question_terms:
-            return True
-    return False
-
-
-def _get_relevant_glossary_terms(
-    user_question: str,
-    knowledge_base: dict | None = None,
-    glossary: dict | None = None,
-    glossary_path: str | None = None,
-) -> str:
-    """Load the active glossary and return the section relevant to this question."""
-    if glossary_path is None:
-        glossary_path = "semantic/business_glossary.json"
-
-    active_glossary = glossary if glossary is not None else load_business_glossary(glossary_path)
-    if not active_glossary:
-        return "Business glossary: no glossary terms are available for this session."
-
-    relevant_terms = {
-        term: term_data
-        for term, term_data in active_glossary.items()
-        if _term_matches_question(term, term_data, user_question)
-    }
-
-    if not relevant_terms and knowledge_base:
-        relevant_terms = dict(list(active_glossary.items())[:4])
-
-    if not relevant_terms:
-        return "Business glossary: no directly matched glossary terms. Use the selected schema context only."
-
-    lines = ["Business glossary for this question:"]
-    lines.append("")
-    for term, term_data in list(relevant_terms.items())[:8]:
-        lines.append(f"  TERM: {term}")
-        description = str(term_data.get("description", "")).strip()
+    lines = ["Retrieved glossary evidence from pipeline:"]
+    for entry in matched_terms[:8]:
+        if not isinstance(entry, dict):
+            continue
+        term = str(entry.get("term", "")).strip()
+        if term:
+            lines.append(f"  term: {term}")
+        description = str(entry.get("description", "")).strip()
         if description:
             lines.append(f"    description: {description}")
         mappings = []
-        for mapping in term_data.get("mapped_columns", [])[:5]:
-            table_name = mapping.get("table", "")
-            column_name = mapping.get("column", "")
+        for mapping in entry.get("mapped_columns", [])[:5]:
+            if not isinstance(mapping, dict):
+                continue
+            table_name = str(mapping.get("table", "")).strip()
+            column_name = str(mapping.get("column", "")).strip()
             if table_name and column_name:
                 mappings.append(f"{table_name}.{column_name}")
         if mappings:
             lines.append(f"    mapped_columns: {', '.join(mappings)}")
-        aliases = [str(alias) for alias in (term_data.get("business_terms") or [])[:5] if str(alias).strip()]
-        if aliases:
-            lines.append(f"    aliases: {', '.join(aliases)}")
-        examples = [str(example) for example in (term_data.get("example_questions") or [])[:2] if str(example).strip()]
-        if examples:
-            lines.append(f"    examples: {', '.join(examples)}")
-        lines.append("")
+    lines.append("")
+    return lines
 
-    return "\n".join(lines).strip()
+
+def _scoped_prompt_knowledge_base(
+    knowledge_base: dict,
+    selected_tables: list[dict] | None,
+    selected_columns: list[dict] | None,
+    join_paths: list[dict] | None,
+) -> dict:
+    table_names: set[str] = set()
+    for entry in selected_tables or []:
+        table_name = str(entry.get("table", "")).strip()
+        if table_name:
+            table_names.add(table_name)
+    for entry in selected_columns or []:
+        table_name = str(entry.get("table", "")).strip()
+        if table_name:
+            table_names.add(table_name)
+    for path in join_paths or []:
+        if not isinstance(path, dict):
+            continue
+        for key in ("from_table", "to_table"):
+            table_name = str(path.get(key, "")).strip()
+            if table_name:
+                table_names.add(table_name)
+        for edge in path.get("path", []) or []:
+            if not isinstance(edge, dict):
+                continue
+            for key in ("from_table", "to_table"):
+                table_name = str(edge.get(key, "")).strip()
+                if table_name:
+                    table_names.add(table_name)
+    if not table_names:
+        return knowledge_base
+    scoped = {
+        table_name: deepcopy(table_data)
+        for table_name, table_data in knowledge_base.items()
+        if table_name in table_names
+    }
+    return scoped or knowledge_base
 
 
 def _build_schema_section(knowledge_base: dict) -> list[str]:
@@ -538,6 +536,12 @@ def build_sql_prompt(
             "The user did not specify a row count. "
             "Do not add LIMIT unless the question explicitly requests a row count."
         )
+    scoped_knowledge_base = _scoped_prompt_knowledge_base(
+        knowledge_base,
+        selected_tables,
+        selected_columns,
+        join_paths,
+    )
 
     system_parts: list[str] = []
     system_parts.append(
@@ -567,8 +571,7 @@ def build_sql_prompt(
             route_recommendation,
         )
     )
-    system_parts.append(_get_relevant_glossary_terms(user_question, knowledge_base, glossary=business_glossary))
-    system_parts.append("")
+    system_parts.extend(_build_retrieved_glossary_section(retrieved_context))
     system_parts.extend(_build_plan_section(query_plan, selected_tables, join_paths))
     system_parts.extend(
         _build_runtime_evidence_section(
@@ -581,10 +584,10 @@ def build_sql_prompt(
         )
     )
     system_parts.extend(_build_ai_target_section(query_plan, selected_tables))
-    system_parts.extend(_build_relationship_section(knowledge_base, selected_tables))
+    system_parts.extend(_build_relationship_section(scoped_knowledge_base, selected_tables))
     system_parts.append(_SEMANTIC_GUIDANCE)
     system_parts.append("")
-    system_parts.extend(_build_schema_section(knowledge_base))
+    system_parts.extend(_build_schema_section(scoped_knowledge_base))
 
     system_content = "\n".join(system_parts).strip()
 

@@ -1,5 +1,7 @@
 """Tests for AI SQL generation prompt assembly and retry context."""
 
+import pytest
+
 from ai.sql_generator import generate_sql, generate_sql_with_retry
 
 
@@ -106,6 +108,107 @@ def test_generate_sql_prompt_uses_pipeline_context(monkeypatch):
     assert "possible_join_paths" in system_prompt
     assert "accounts.account_id = deals.account_id" in system_prompt
     assert "Use ONLY the provided selected tables, selected columns, runtime candidates, and supplied join paths." in system_prompt
+    assert "TABLE: accounts" in system_prompt
+    assert "TABLE: deals" in system_prompt
+
+
+def test_generate_sql_prompt_scopes_schema_to_selected_tables(monkeypatch):
+    captured = {}
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        captured["messages"] = messages
+        return "SELECT a.account_label FROM accounts a;"
+
+    monkeypatch.setattr("ai.sql_generator._call_ai_backend", fake_call_ai_backend)
+
+    knowledge_base = {
+        "accounts": {
+            "columns": [{"name": "account_label", "type": "VARCHAR(100)", "semantic_type": "name"}],
+            "primary_keys": ["account_id"],
+            "foreign_keys": [],
+        },
+        "hidden_table": {
+            "columns": [{"name": "hidden_value", "type": "INTEGER", "semantic_type": "numeric_candidate"}],
+            "primary_keys": ["hidden_id"],
+            "foreign_keys": [],
+        },
+    }
+
+    generate_sql(
+        user_question="show all accounts",
+        knowledge_base=knowledge_base,
+        backend="local",
+        normalized_question="show all accounts",
+        intent={"intent_type": "list"},
+        retrieved_context={},
+        query_plan={"intent": "list"},
+        selected_tables=[{"table": "accounts", "confidence": 0.95}],
+        selected_columns=[{"table": "accounts", "column": "account_label", "semantic_type": "name"}],
+    )
+
+    system_prompt = captured["messages"][0]["content"]
+    assert "TABLE: accounts" in system_prompt
+    assert "TABLE: hidden_table" not in system_prompt
+
+
+def test_generate_sql_blocks_backend_for_clarification_route(monkeypatch):
+    monkeypatch.setattr(
+        "ai.sql_generator._call_ai_backend",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI backend should not be called for blocked route")),
+    )
+
+    with pytest.raises(ValueError, match="needs_clarification"):
+        generate_sql(
+            user_question="show entries",
+            knowledge_base={"entries": {"columns": [{"name": "entry_id", "type": "INTEGER"}]}},
+            backend="local",
+            route_recommendation="needs_clarification",
+        )
+
+
+def test_generate_sql_safely_cleans_markdown_wrapped_select(monkeypatch):
+    monkeypatch.setattr(
+        "ai.sql_generator._call_ai_backend",
+        lambda messages, backend, response_format=None: "```sql\nSELECT id FROM alpha_records;\n```",
+    )
+
+    sql = generate_sql(
+        user_question="show records",
+        knowledge_base={"alpha_records": {"columns": [{"name": "id", "type": "INTEGER"}]}},
+        backend="local",
+    )
+
+    assert sql == "SELECT id FROM alpha_records;"
+
+
+def test_generate_sql_rejects_explanation_after_sql(monkeypatch):
+    monkeypatch.setattr(
+        "ai.sql_generator._call_ai_backend",
+        lambda messages, backend, response_format=None: "SELECT id FROM alpha_records;\nThis query lists rows.",
+    )
+
+    sql = generate_sql(
+        user_question="show records",
+        knowledge_base={"alpha_records": {"columns": [{"name": "id", "type": "INTEGER"}]}},
+        backend="local",
+    )
+
+    assert sql == "SELECT id FROM alpha_records;\nThis query lists rows."
+
+
+def test_generate_sql_rejects_multiple_statements(monkeypatch):
+    monkeypatch.setattr(
+        "ai.sql_generator._call_ai_backend",
+        lambda messages, backend, response_format=None: "SELECT id FROM alpha_records; DELETE FROM alpha_records;",
+    )
+
+    sql = generate_sql(
+        user_question="show records",
+        knowledge_base={"alpha_records": {"columns": [{"name": "id", "type": "INTEGER"}]}},
+        backend="local",
+    )
+
+    assert sql == "SELECT id FROM alpha_records; DELETE FROM alpha_records;"
 
 
 def test_retry_prompt_includes_validation_error_and_join_context(monkeypatch):
@@ -166,3 +269,25 @@ def test_retry_prompt_includes_validation_error_and_join_context(monkeypatch):
     assert "alpha_records" in correction_user
     assert "Use only allowed tables and columns" in correction_user
     assert "output complete sql only" in correction_user.lower()
+
+
+def test_retry_prompt_mentions_formula_constraint_when_formula_is_missing(monkeypatch):
+    captured = {}
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        captured["messages"] = messages
+        return "SELECT a.account_label FROM accounts a;"
+
+    monkeypatch.setattr("ai.sql_generator._call_ai_backend", fake_call_ai_backend)
+
+    generate_sql_with_retry(
+        user_question="pending billed amount by account",
+        knowledge_base={"accounts": {"columns": [{"name": "account_label", "type": "VARCHAR(100)"}]}},
+        backend="local",
+        first_attempt_sql="SELECT something FROM",
+        validation_reason="SQL is missing a table name after FROM.",
+        formula_evidence=[],
+    )
+
+    correction_user = captured["messages"][1]["content"]
+    assert "If no formula evidence is provided, do not invent a derived expression." in correction_user

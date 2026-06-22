@@ -157,6 +157,64 @@ def clean_sql_response(sql: str) -> str:
     return _repair_order_by(cleaned)
 
 
+def sanitize_ai_sql_output(sql: str) -> tuple[str, bool, str]:
+    """
+    Attempt to extract one safe SELECT statement from raw AI output.
+
+    Returns:
+        (cleaned_sql, is_safe_to_use, reason)
+
+    The output is considered safely cleanable only when any wrapper text is
+    limited to known lightweight preambles and/or markdown fences, and no
+    additional prose or second SQL statement remains after extraction.
+    """
+    if not isinstance(sql, str):
+        return "", False, "SQL must be a string."
+
+    raw = str(sql or "")
+    if not raw.strip():
+        return "", False, "SQL query is empty or missing."
+
+    select_match = re.search(r"\bSELECT\b", raw, re.IGNORECASE)
+    if not select_match:
+        return clean_sql_response(raw), False, "AI output does not contain a SELECT statement."
+
+    prefix = raw[: select_match.start()]
+    suffix_source = raw[select_match.start():]
+    cleaned = clean_sql_response(raw)
+    if not cleaned:
+        return "", False, "AI output could not be converted into SQL."
+
+    prefix_clean = re.sub(r"```(?:sql)?\s*", "", prefix, flags=re.IGNORECASE)
+    prefix_clean = re.sub(r"```", "", prefix_clean)
+    prefix_clean = _PREAMBLE_PATTERNS.sub("", prefix_clean).strip()
+    if prefix_clean:
+        return cleaned, False, "AI output contains unsupported text before SELECT."
+
+    cleaned_with_semicolon = cleaned if cleaned.endswith(";") else f"{cleaned};"
+    cleaned_index = suffix_source.find(cleaned_with_semicolon)
+    trailer = ""
+    if cleaned_index >= 0:
+        trailer = suffix_source[cleaned_index + len(cleaned_with_semicolon):]
+    else:
+        cleaned_index = suffix_source.find(cleaned)
+        if cleaned_index >= 0:
+            trailer = suffix_source[cleaned_index + len(cleaned):]
+
+    trailer_clean = re.sub(r"```(?:sql)?\s*", "", trailer, flags=re.IGNORECASE)
+    trailer_clean = re.sub(r"```", "", trailer_clean).strip()
+    if trailer_clean:
+        if _looks_like_sql_trailer(trailer_clean) or ";" in cleaned.rstrip(";"):
+            return cleaned, False, "AI output contains multiple SQL statements."
+        return cleaned, False, "AI output contains explanation text after the SQL statement."
+
+    inner = cleaned[:-1] if cleaned.endswith(";") else cleaned
+    if ";" in inner:
+        return cleaned, False, "AI output contains multiple SQL statements."
+
+    return cleaned, True, "AI output was safely converted into one SELECT statement."
+
+
 def _strip_string_literals(sql: str) -> str:
     """Mask string literals so identifier parsing ignores their contents."""
     return re.sub(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"", "''", sql)

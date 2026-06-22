@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from sql_pipeline.prompt_builder import build_sql_prompt
 from core.ai_backend_service import call_ai_backend, check_ollama_status as _shared_check_ollama_status
 from utils.logger import get_logger
-from sql_pipeline.sql_validator import clean_sql_response
+from sql_pipeline.sql_validator import clean_sql_response, sanitize_ai_sql_output
 
 
 load_dotenv()
@@ -104,6 +104,20 @@ def _clean_sql_response(raw: str) -> str:
     return clean_sql_response(raw)
 
 
+def _blocked_route_reason(route_recommendation: str | None) -> str | None:
+    route = str(route_recommendation or "").strip().lower()
+    if route in {"needs_clarification", "cannot_plan_safely"}:
+        return route
+    return None
+
+
+def _normalize_ai_sql_output(raw_response: str) -> str:
+    cleaned, safely_extractable, _ = sanitize_ai_sql_output(raw_response)
+    if safely_extractable:
+        return cleaned
+    return str(raw_response or "").strip()
+
+
 def check_ollama_status(api_url: str | None = None, timeout: int = 5) -> tuple[bool, str]:
     """Return whether the local Ollama server is reachable."""
     return _shared_check_ollama_status(api_url=api_url, timeout=timeout)
@@ -155,6 +169,10 @@ def generate_sql(
     route_recommendation: str | None = None,
 ) -> str:
     """Generate a SQL SELECT statement from the provided runtime context."""
+    blocked_route = _blocked_route_reason(route_recommendation)
+    if blocked_route:
+        raise ValueError(f"SQL generation blocked for route '{blocked_route}'.")
+
     messages = build_sql_prompt(
         user_question,
         knowledge_base,
@@ -174,7 +192,7 @@ def generate_sql(
         route_recommendation=route_recommendation,
     )
     raw_response = _call_ai_backend(messages, backend or "local")
-    return _clean_sql_response(raw_response)
+    return _normalize_ai_sql_output(raw_response)
 
 
 def generate_sql_with_retry(
@@ -200,6 +218,10 @@ def generate_sql_with_retry(
     route_recommendation: str | None = None,
 ) -> str:
     """Retry AI SQL generation once after a failed first attempt."""
+    blocked_route = _blocked_route_reason(route_recommendation)
+    if blocked_route:
+        raise ValueError(f"SQL generation blocked for route '{blocked_route}'.")
+
     base_messages = build_sql_prompt(
         user_question,
         knowledge_base,
@@ -270,4 +292,4 @@ def generate_sql_with_retry(
     ]
 
     raw_response = _call_ai_backend(messages, backend or "local")
-    return _clean_sql_response(raw_response)
+    return _normalize_ai_sql_output(raw_response)

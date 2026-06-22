@@ -12,6 +12,7 @@ from utils.sql_validator import (
     add_limit_if_missing,
     clean_sql_response,
     extract_requested_limit,
+    sanitize_ai_sql_output,
 )
 
 
@@ -43,6 +44,30 @@ class TestCleanSqlResponse:
 
     def test_returns_empty_when_no_select_exists(self):
         assert clean_sql_response("No valid query available.") == "No valid query available."
+
+
+class TestSanitizeAiSqlOutput:
+    def test_clean_select_passes(self):
+        cleaned, safe, reason = sanitize_ai_sql_output("SELECT id FROM alpha_records;")
+        assert cleaned == "SELECT id FROM alpha_records;"
+        assert safe is True
+
+    def test_markdown_sql_is_safely_cleaned(self):
+        cleaned, safe, reason = sanitize_ai_sql_output("```sql\nSELECT id FROM alpha_records;\n```")
+        assert cleaned == "SELECT id FROM alpha_records;"
+        assert safe is True
+
+    def test_explanation_text_after_sql_is_not_safe(self):
+        cleaned, safe, reason = sanitize_ai_sql_output("SELECT id FROM alpha_records;\nThis query lists rows.")
+        assert cleaned == "SELECT id FROM alpha_records;"
+        assert safe is False
+        assert "explanation text" in reason.lower()
+
+    def test_multiple_statements_are_not_safe(self):
+        cleaned, safe, reason = sanitize_ai_sql_output("SELECT id FROM alpha_records; DELETE FROM alpha_records;")
+        assert cleaned == "SELECT id FROM alpha_records;"
+        assert safe is False
+        assert "multiple sql statements" in reason.lower()
 
 
 # ---------------------------------------------------------------------------
