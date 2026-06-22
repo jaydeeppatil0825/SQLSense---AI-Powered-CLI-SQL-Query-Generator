@@ -1961,7 +1961,7 @@ def _derive_complex_query_shape(
     intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
     table_count = len([entry for entry in selected_tables if entry.get("table")])
     has_join = bool(join_paths) or table_count > 1
-    has_grouping = bool(plan.get("grouping") or dimension_candidates or (intent or {}).get("needs_grouping"))
+    has_grouping = bool(plan.get("grouping") or plan.get("dimension") or (intent or {}).get("needs_grouping"))
     has_filters = bool(filters)
     has_formula = bool(formula_evidence)
     has_measure = bool(measure_candidates)

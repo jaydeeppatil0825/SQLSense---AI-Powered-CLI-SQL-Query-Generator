@@ -42,7 +42,8 @@ def retrieve_context(
     query_terms = _query_terms(normalized_question, intent)
 
     glossary = business_glossary or {}
-    matched_tables = _match_tables(query_terms, knowledge_base)
+    kb_table_matches = _match_tables(query_terms, knowledge_base)
+    matched_tables = list(kb_table_matches)
     matched_columns = _match_columns(query_terms, knowledge_base)
     matched_glossary_terms = _match_glossary_terms(query_terms, glossary)
     glossary_table_boosts, glossary_column_boosts = _glossary_mappings(matched_glossary_terms)
@@ -58,6 +59,29 @@ def retrieve_context(
         glossary_column_boosts,
         vector_context.get("matched_columns", []),
     )
+
+    strong_primary_table = _strong_direct_primary_table_match(
+        normalized_question,
+        intent,
+        query_terms,
+        kb_table_matches,
+    )
+    if strong_primary_table:
+        matched_tables = [
+            entry for entry in matched_tables
+            if str(entry.get("table") or "").strip() == strong_primary_table
+        ]
+        matched_columns = [
+            entry for entry in matched_columns
+            if str(entry.get("table") or "").strip() == strong_primary_table
+        ]
+        matched_glossary_terms = [
+            entry for entry in matched_glossary_terms
+            if any(
+                str(mapping.get("table") or "").strip() == strong_primary_table
+                for mapping in (entry.get("mapped_columns") or [])
+            )
+        ]
 
     matched_relationships = _match_relationships(
         knowledge_base,
@@ -109,6 +133,70 @@ def retrieve_context(
         "retrieval_sources": retrieval_sources,
         "confidence": confidence,
     }
+
+
+def _is_simple_single_table_question(intent: Dict[str, Any], normalized_question: str) -> bool:
+    intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
+    requested_metrics = list((intent or {}).get("requested_metrics") or [])
+    requested_filters = list((intent or {}).get("requested_filters") or [])
+    needs_grouping = bool((intent or {}).get("needs_grouping"))
+    needs_join = (intent or {}).get("needs_join")
+
+    return (
+        intent_type in {"list", "count", "sorted_list"}
+        and not requested_metrics
+        and not requested_filters
+        and not needs_grouping
+        and not needs_join
+        and " by " not in normalized_question
+        and " per " not in normalized_question
+        and not re.search(r"\b[a-z0-9_ ]+\s+wise\b", normalized_question)
+    )
+
+
+def _strong_direct_primary_table_match(
+    normalized_question: str,
+    intent: Dict[str, Any],
+    query_terms: list[str],
+    kb_table_matches: list[Dict[str, Any]],
+) -> str | None:
+    if not _is_simple_single_table_question(intent, normalized_question):
+        return None
+    if not kb_table_matches:
+        return None
+
+    direct_matches = []
+    for entry in kb_table_matches:
+        table_name = str(entry.get("table") or "").strip()
+        if not table_name:
+            continue
+        identifier_score = 0.0
+        identifier_evidence: list[str] = []
+        for term in query_terms:
+            score, evidence = _score_match(term, table_name, _humanize(table_name))
+            if score > identifier_score:
+                identifier_score = score
+                identifier_evidence = evidence
+        if identifier_score < 0.84:
+            continue
+        if not set(identifier_evidence) & {"exact_phrase", "exact_token_match", "all_term_tokens_present"}:
+            continue
+        direct_matches.append({**entry, "score": identifier_score})
+
+    if not direct_matches:
+        return None
+
+    direct_matches.sort(key=lambda item: (-float(item.get("score") or 0.0), str(item.get("table") or "")))
+    top = direct_matches[0]
+    second_score = float(direct_matches[1].get("score") or 0.0) if len(direct_matches) > 1 else 0.0
+    top_table = str(top.get("table") or "").strip()
+    top_score = float(top.get("score") or 0.0)
+
+    if len(direct_matches) == 1:
+        return top_table
+    if top_score >= second_score + 0.15:
+        return top_table
+    return None
 
 
 def _normalize_text(value: str) -> str:
@@ -684,6 +772,8 @@ def _candidate_columns(
 ) -> list[Dict[str, Any]]:
     candidates = []
     requested_terms = [_humanize(term) for term in requested_terms if _humanize(term)]
+    if require_filter and not requested_terms:
+        return []
     for entry in matched_columns:
         if require_measure and not bool(entry.get("is_measure")):
             continue

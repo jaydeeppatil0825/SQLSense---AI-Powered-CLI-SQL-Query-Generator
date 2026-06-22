@@ -324,6 +324,73 @@ def _set_route(query_context: dict[str, Any], route_used: str, route_reason: str
     query_context["route_reason"] = route_reason
 
 
+def _prune_to_primary_table(query_context: dict[str, Any]) -> dict[str, Any]:
+    selected_tables = list(query_context.get("selected_tables") or [])
+    if not selected_tables:
+        return query_context
+
+    primary_entry = dict(selected_tables[0])
+    primary_table = str(primary_entry.get("table") or "").strip()
+    if not primary_table:
+        return query_context
+
+    primary_columns = [
+        dict(column_entry)
+        for column_entry in list(primary_entry.get("selected_columns") or [])
+        if str(column_entry.get("column") or "").strip()
+    ]
+    primary_entry["selected_columns"] = primary_columns
+
+    query_context["selected_tables"] = [primary_entry]
+    query_context["selected_table_names"] = [primary_table]
+    query_context["selected_columns"] = [
+        {"table": primary_table, **column_entry}
+        for column_entry in primary_columns
+    ]
+    query_context["join_paths"] = []
+    query_context["complex_sql_plan"] = None
+
+    if isinstance(query_context.get("selected_knowledge_base"), dict):
+        selected_kb = query_context["selected_knowledge_base"]
+        if primary_table in selected_kb:
+            query_context["selected_knowledge_base"] = {primary_table: selected_kb[primary_table]}
+
+    if isinstance(query_context.get("measure_candidates"), list):
+        query_context["measure_candidates"] = [
+            entry for entry in query_context["measure_candidates"]
+            if str(entry.get("table") or "").strip() == primary_table
+        ]
+    if isinstance(query_context.get("dimension_candidates"), list):
+        query_context["dimension_candidates"] = [
+            entry for entry in query_context["dimension_candidates"]
+            if str(entry.get("table") or "").strip() == primary_table
+        ]
+    if isinstance(query_context.get("filter_candidates"), list):
+        query_context["filter_candidates"] = [
+            entry for entry in query_context["filter_candidates"]
+            if str(entry.get("table") or "").strip() == primary_table
+        ]
+    return query_context
+
+
+def _apply_simple_query_guard(query_context: dict[str, Any]) -> tuple[bool, str]:
+    plan = query_context.get("plan") or {}
+    intent = str(plan.get("intent") or "").strip().lower()
+    if intent not in {"list", "count"}:
+        return False, "intent is not simple list/count"
+    if plan.get("dimension") or plan.get("grouping") or plan.get("date_range"):
+        return False, "query requires grouping or date-aware handling"
+    if len(query_context.get("selected_tables") or []) < 1:
+        return False, "no selected tables available"
+    if not _has_clear_primary_table(query_context):
+        return False, "planner did not isolate one clear primary table"
+    if _has_unresolved_simple_terms(query_context):
+        return False, "simple query still has unresolved terms"
+
+    _prune_to_primary_table(query_context)
+    return True, "simple single-table list/count query pruned to primary runtime table"
+
+
 def _pipeline_context_matches_question(
     pipeline_context: Optional[dict[str, Any]],
     rewritten_question: str,
@@ -1200,6 +1267,13 @@ class QuestionService:
             )
         query_context = _merge_pipeline_metadata(query_context, pipeline_context)
         self.last_query_context = query_context
+        logger.info(
+            "[PIPELINE RESULT] route=%s selected_tables=%s join_paths=%s complex_sql_plan=%s",
+            query_context.get("route_recommendation"),
+            [entry.get("table") for entry in (query_context.get("selected_tables") or [])],
+            len(query_context.get("join_paths") or []),
+            bool(query_context.get("complex_sql_plan")),
+        )
         route_recommendation = _route_recommendation(query_context)
         if isinstance(pipeline_context, dict) and route_recommendation in {"needs_clarification", "cannot_plan_safely"}:
             route_reason = (
@@ -1221,6 +1295,12 @@ class QuestionService:
         query_plan = query_context.get("plan")
         intent_payload = query_context.get("intent") or (pipeline_context or {}).get("intent") or {}
         retrieved_context_payload = query_context.get("retrieved_context") or (pipeline_context or {}).get("retrieved_context") or {}
+        simple_guard_ok, simple_guard_reason = _apply_simple_query_guard(query_context)
+        logger.info("[SIMPLE GUARD DECISION] enabled=%s reason=%s", simple_guard_ok, simple_guard_reason)
+        if simple_guard_ok:
+            scoped_knowledge_base = query_context.get("selected_knowledge_base", knowledge_base)
+            full_knowledge_base = query_context.get("knowledge_base", knowledge_base)
+            query_plan = query_context.get("plan")
         prefer_rule_based, route_reason = _should_try_rule_based_from_pipeline(query_context)
         ai_failure_reason: str | None = None
         ai_rejected_sql: str | None = None
@@ -1388,6 +1468,13 @@ class QuestionService:
         if not prefer_rule_based or ai_failure_reason is not None or last_rejected_sql is not None or _get_simple_sql() is None:
             logger.info("Using AI as the primary SQL generator for this question")
             try:
+                logger.info(
+                    "[SQL CONTEXT BEFORE AI] selected_tables=%s selected_columns=%s join_paths=%s complex_sql_plan=%s",
+                    [entry.get("table") for entry in (query_context.get("selected_tables") or [])],
+                    [f"{entry.get('table')}.{entry.get('column')}" for entry in (query_context.get("selected_columns") or [])[:12]],
+                    len(_possible_join_paths(query_context)),
+                    query_context.get("complex_sql_plan"),
+                )
                 base_generate_kwargs = {
                     "backend": ai_backend,
                     "normalized_question": str(query_context.get("normalized_question") or rewritten_question),
@@ -1406,6 +1493,7 @@ class QuestionService:
                     "evidence_sources": _evidence_sources_payload(query_context),
                     "route_recommendation": route_recommendation or None,
                 }
+                logger.info("[AI CALLED] phase=initial backend=%s", ai_backend)
                 raw_sql = _call_with_optional_kwargs(
                     generate_sql,
                     rewritten_question,
@@ -1464,6 +1552,7 @@ class QuestionService:
                     "evidence_sources": _evidence_sources_payload(query_context),
                     "route_recommendation": route_recommendation or None,
                 }
+                logger.info("[AI CALLED] phase=retry backend=%s", ai_backend)
                 retry_raw = _call_with_optional_kwargs(
                     generate_sql_with_retry,
                     optional_kwargs={

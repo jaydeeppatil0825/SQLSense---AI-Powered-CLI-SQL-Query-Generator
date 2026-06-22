@@ -53,6 +53,8 @@ _LIMIT_RE = re.compile(r"\blimit\s+(\d+)\b", re.IGNORECASE)
 _LATEST_RE = re.compile(r"\b(?:latest|recent|newest|oldest)\b", re.IGNORECASE)
 _SORTED_BY_RE = re.compile(r"\b(?:sorted|ordered)\s+by\s+(.+)$", re.IGNORECASE)
 _BY_RE = re.compile(r"\s+by\s+", re.IGNORECASE)
+_PER_RE = re.compile(r"\s+per\s+", re.IGNORECASE)
+_WISE_RE = re.compile(r"\b[a-z0-9_ ]+\s+wise\b", re.IGNORECASE)
 _FROM_RE = re.compile(r"\s+from\s+(.+)$", re.IGNORECASE)
 _IN_RE = re.compile(r"\s+in\s+(.+)$", re.IGNORECASE)
 _WHERE_RE = re.compile(r"\s+where\s+(.+)$", re.IGNORECASE)
@@ -104,6 +106,7 @@ def build_intent(question: str, ai_backend: str = "local") -> Dict[str, Any]:
         float(fallback.get("confidence") or 0.0),
         float(merged.get("confidence") or 0.0),
     )
+    merged = _normalize_simple_target_entity_usage(merged, normalized_question)
     merged["source"] = "ai" if ai_intent.get("source") == "ai" else fallback.get("source", "fallback")
     return merged
 
@@ -210,7 +213,7 @@ def _sanitize_intent(payload: Dict[str, Any], question: str) -> Dict[str, Any]:
         "raw_business_terms": _clean_list(payload.get("raw_business_terms")),
         "confidence": _coerce_confidence(payload.get("confidence")),
     }
-    return sanitized
+    return _normalize_simple_target_entity_usage(sanitized, question)
 
 
 def _build_fallback_intent(question: str) -> Dict[str, Any]:
@@ -319,7 +322,7 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     elif requested_filters or requested_sort:
         confidence = 0.64
 
-    return {
+    return _normalize_simple_target_entity_usage({
         "user_goal": user_goal,
         "intent_type": intent_type,
         "business_operation": business_operation,
@@ -334,7 +337,62 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         "raw_business_terms": raw_business_terms,
         "confidence": confidence,
         "source": "fallback",
-    }
+    }, normalized_question)
+
+
+def _has_explicit_grouping_marker(question: str) -> bool:
+    return bool(
+        _BY_RE.search(question)
+        or _PER_RE.search(question)
+        or _WISE_RE.search(question)
+    )
+
+
+def _normalize_simple_target_entity_usage(intent: Dict[str, Any], question: str) -> Dict[str, Any]:
+    """Keep simple list/count target entities in raw_business_terms, not grouping dimensions."""
+    normalized = dict(intent or {})
+    intent_type = str(normalized.get("intent_type") or "").strip().lower()
+    requested_metrics = list(normalized.get("requested_metrics") or [])
+    requested_sort = dict(normalized.get("requested_sort") or {})
+
+    if intent_type == "unknown":
+        if _COUNT_RE.search(question):
+            normalized["intent_type"] = "count"
+            normalized["business_operation"] = "count"
+        elif _TOP_RE.search(question) or _FIRST_RE.search(question):
+            normalized["intent_type"] = "ranking"
+            normalized["business_operation"] = "rank"
+        elif _LATEST_RE.search(question) or requested_sort:
+            normalized["intent_type"] = "sorted_list"
+            normalized["business_operation"] = "sort"
+        else:
+            normalized["intent_type"] = "list"
+            normalized["business_operation"] = "browse"
+        intent_type = str(normalized.get("intent_type") or "").strip().lower()
+
+    if intent_type == "count":
+        normalized["requested_metrics"] = []
+        requested_metrics = []
+
+    if (
+        intent_type in {"list", "count", "sorted_list"}
+        and not _has_explicit_grouping_marker(question)
+        and not requested_metrics
+    ):
+        normalized["requested_dimensions"] = []
+        normalized["needs_grouping"] = False
+        normalized["needs_join"] = False
+        if intent_type == "count":
+            normalized["business_operation"] = "count"
+            normalized["needs_aggregation"] = True
+        elif intent_type == "sorted_list":
+            normalized["business_operation"] = "sort"
+            normalized["needs_aggregation"] = False
+        else:
+            normalized["business_operation"] = "browse"
+            normalized["needs_aggregation"] = False
+
+    return normalized
 
 
 def _build_user_goal(

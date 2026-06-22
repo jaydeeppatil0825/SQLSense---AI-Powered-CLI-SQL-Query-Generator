@@ -15,10 +15,11 @@ def test_fallback_intent_builder_handles_simple_browse_query():
 
     assert intent["intent_type"] == "list"
     assert intent["business_operation"] == "browse"
-    assert intent["requested_dimensions"] == ["accounts"]
+    assert intent["requested_dimensions"] == []
     assert intent["requested_metrics"] == []
     assert intent["needs_grouping"] is False
     assert intent["needs_aggregation"] is False
+    assert "accounts" in intent["raw_business_terms"]
 
 
 def test_fallback_intent_builder_handles_count_query():
@@ -26,9 +27,11 @@ def test_fallback_intent_builder_handles_count_query():
 
     assert intent["intent_type"] == "count"
     assert intent["business_operation"] == "count"
-    assert intent["requested_dimensions"] == ["accounts"]
+    assert intent["requested_dimensions"] == []
+    assert intent["requested_metrics"] == []
     assert intent["needs_aggregation"] is True
     assert intent["limit"] is None
+    assert "accounts" in intent["raw_business_terms"]
 
 
 def test_fallback_intent_builder_handles_ranking_query():
