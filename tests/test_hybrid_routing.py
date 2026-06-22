@@ -198,6 +198,8 @@ def _context(
     grouping=None,
     filters=None,
     date_range=None,
+    route_recommendation=None,
+    join_paths=None,
 ):
     selected_tables = []
     selected_columns = []
@@ -245,9 +247,11 @@ def _context(
         "selected_knowledge_base": selected_kb,
         "warnings": [],
         "confidence": confidence,
+        "route_recommendation": route_recommendation,
         "knowledge_base": GENERIC_KB,
         "vector_results": {"table_names": list(selected_table_names), "columns": [], "glossary_terms": [], "relationships": []},
         "vector_used": False,
+        "join_paths": list(join_paths or []),
     }
 
 
@@ -426,6 +430,56 @@ def test_count_query_uses_rule_based(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "rule-based"
 
 
+def test_show_all_clients_can_be_rule_based(monkeypatch):
+    kb = {
+        "clients": {
+            "columns": [
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "client_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["client_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+    service = QuestionService()
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple client listing")),
+    )
+
+    success, message, sql, error = service.process_question("show all clients", kb, ai_backend="local")
+
+    assert success is True
+    assert "FROM clients" in sql
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+
+
+def test_count_clients_can_be_rule_based(monkeypatch):
+    kb = {
+        "clients": {
+            "columns": [
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "client_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["client_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+    service = QuestionService()
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple client count")),
+    )
+
+    success, message, sql, error = service.process_question("count clients", kb, ai_backend="local")
+
+    assert success is True
+    assert "COUNT(*)" in sql
+    assert service.get_last_query_context()["route_used"] == "rule-based"
+
+
 def test_simple_limit_query_uses_rule_based(monkeypatch):
     service = QuestionService()
     context = _context(["alpha_records"], intent="list")
@@ -441,8 +495,9 @@ def test_simple_limit_query_uses_rule_based(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "rule-based"
 
 
-def test_simple_aggregate_query_uses_rule_based(monkeypatch):
+def test_simple_aggregate_query_uses_ai(monkeypatch):
     service = QuestionService()
+    ai_called = {"value": False}
     monkeypatch.setattr(
         "core.question_service.build_query_context",
         lambda *args, **kwargs: _context(
@@ -450,22 +505,27 @@ def test_simple_aggregate_query_uses_rule_based(monkeypatch):
             intent="total",
             metric="money",
             date_range={"start": "2026-06-01", "end_exclusive": "2026-07-01"},
+            route_recommendation="ai_sql_required",
         ),
     )
     monkeypatch.setattr(
         "core.question_service.generate_simple_sql",
-        lambda *args, **kwargs: (
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for aggregate questions")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: ai_called.__setitem__("value", True) or (
             "SELECT SUM(amount_total) AS total_amount_total "
             "FROM alpha_records WHERE created_on >= '2026-06-01' AND created_on < '2026-07-01';"
         ),
     )
-    monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called")))
 
     success, message, sql, error = service.process_question("show total this month", GENERIC_KB, ai_backend="local")
 
     assert success is True
+    assert ai_called["value"] is True
     assert "SUM(amount_total)" in sql
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "ai"
 
 
 def test_low_confidence_simple_looking_query_goes_to_ai(monkeypatch):
@@ -533,6 +593,265 @@ def test_complex_join_query_goes_to_ai(monkeypatch):
     assert success is True
     assert ai_called["value"] is True
     assert "JOIN beta_events" in sql
+    assert service.get_last_query_context()["route_used"] == "ai"
+
+
+def test_top_5_clients_by_deal_value_uses_ai(monkeypatch):
+    kb = {
+        "clients": {
+            "columns": [
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "client_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["client_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "deals": {
+            "columns": [
+                {"name": "deal_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "deal_value", "type": "DECIMAL(12,2)", "nullable": False, "semantic_type": "money"},
+            ],
+            "primary_keys": ["deal_id"],
+            "foreign_keys": [{"column": "client_id", "referenced_table": "clients", "referenced_column": "client_id"}],
+            "relationships": [],
+        },
+    }
+    service = QuestionService()
+    ai_called = {"value": False}
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for ranking questions")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: ai_called.__setitem__("value", True) or (
+            "SELECT c.client_name, SUM(d.deal_value) AS total_deal_value "
+            "FROM clients c JOIN deals d ON c.client_id = d.client_id "
+            "GROUP BY c.client_name ORDER BY total_deal_value DESC LIMIT 5;"
+        ),
+    )
+
+    success, message, sql, error = service.process_question("top 5 clients by deal value", kb, ai_backend="local")
+
+    assert success is True
+    assert ai_called["value"] is True
+    assert "JOIN deals" in sql
+    assert "GROUP BY" in sql
+    assert service.get_last_query_context()["route_used"] == "ai"
+
+
+def test_deal_value_by_client_uses_ai(monkeypatch):
+    kb = {
+        "clients": {
+            "columns": [
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "client_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["client_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "deals": {
+            "columns": [
+                {"name": "deal_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "deal_value", "type": "DECIMAL(12,2)", "nullable": False, "semantic_type": "money"},
+            ],
+            "primary_keys": ["deal_id"],
+            "foreign_keys": [{"column": "client_id", "referenced_table": "clients", "referenced_column": "client_id"}],
+            "relationships": [],
+        },
+    }
+    service = QuestionService()
+    ai_called = {"value": False}
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for grouped aggregate questions")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: ai_called.__setitem__("value", True) or (
+            "SELECT c.client_name, SUM(d.deal_value) AS total_deal_value "
+            "FROM clients c JOIN deals d ON c.client_id = d.client_id GROUP BY c.client_name;"
+        ),
+    )
+
+    success, message, sql, error = service.process_question("deal value by client", kb, ai_backend="local")
+
+    assert success is True
+    assert ai_called["value"] is True
+    assert "GROUP BY" in sql
+    assert service.get_last_query_context()["route_used"] == "ai"
+
+
+def test_inventory_by_storage_site_uses_ai(monkeypatch):
+    kb = {
+        "storage_sites": {
+            "columns": [
+                {"name": "storage_site_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "site_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["storage_site_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "inventory_positions": {
+            "columns": [
+                {"name": "position_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "storage_site_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "units_on_hand", "type": "DECIMAL(12,2)", "nullable": False, "semantic_type": "quantity"},
+            ],
+            "primary_keys": ["position_id"],
+            "foreign_keys": [{"column": "storage_site_id", "referenced_table": "storage_sites", "referenced_column": "storage_site_id"}],
+            "relationships": [],
+        },
+    }
+    service = QuestionService()
+    ai_called = {"value": False}
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for grouped inventory questions")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: ai_called.__setitem__("value", True) or (
+            "SELECT s.site_name, SUM(i.units_on_hand) AS total_units_on_hand "
+            "FROM storage_sites s JOIN inventory_positions i ON s.storage_site_id = i.storage_site_id "
+            "GROUP BY s.site_name;"
+        ),
+    )
+
+    success, message, sql, error = service.process_question("inventory by storage site", kb, ai_backend="local")
+
+    assert success is True
+    assert ai_called["value"] is True
+    assert "JOIN inventory_positions" in sql
+    assert service.get_last_query_context()["route_used"] == "ai"
+
+
+def test_billed_value_by_client_uses_ai(monkeypatch):
+    kb = {
+        "clients": {
+            "columns": [
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "client_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["client_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "deals": {
+            "columns": [
+                {"name": "deal_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            ],
+            "primary_keys": ["deal_id"],
+            "foreign_keys": [{"column": "client_id", "referenced_table": "clients", "referenced_column": "client_id"}],
+            "relationships": [],
+        },
+        "billing_notes": {
+            "columns": [
+                {"name": "billing_note_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "deal_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "nullable": False, "semantic_type": "money"},
+            ],
+            "primary_keys": ["billing_note_id"],
+            "foreign_keys": [{"column": "deal_id", "referenced_table": "deals", "referenced_column": "deal_id"}],
+            "relationships": [],
+        },
+    }
+    service = QuestionService()
+    ai_called = {"value": False}
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for billed value by client")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: ai_called.__setitem__("value", True) or (
+            "SELECT c.client_name, SUM(b.billed_value) AS total_billed_value "
+            "FROM clients c JOIN deals d ON c.client_id = d.client_id "
+            "JOIN billing_notes b ON d.deal_id = b.deal_id "
+            "GROUP BY c.client_name;"
+        ),
+    )
+
+    success, message, sql, error = service.process_question("billed value by client", kb, ai_backend="local")
+
+    assert success is True
+    assert ai_called["value"] is True
+    assert "JOIN billing_notes" in sql
+    assert "GROUP BY" in sql
+    assert service.get_last_query_context()["route_used"] == "ai"
+
+
+def test_pending_billed_amount_by_client_does_not_invent_formula(monkeypatch):
+    kb = {
+        "clients": {
+            "columns": [
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "client_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["client_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "deals": {
+            "columns": [
+                {"name": "deal_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "client_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            ],
+            "primary_keys": ["deal_id"],
+            "foreign_keys": [{"column": "client_id", "referenced_table": "clients", "referenced_column": "client_id"}],
+            "relationships": [],
+        },
+        "billing_notes": {
+            "columns": [
+                {"name": "billing_note_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "deal_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "nullable": False, "semantic_type": "money"},
+                {"name": "settled_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "money"},
+            ],
+            "primary_keys": ["billing_note_id"],
+            "foreign_keys": [{"column": "deal_id", "referenced_table": "deals", "referenced_column": "deal_id"}],
+            "relationships": [],
+        },
+    }
+    service = QuestionService()
+    captured = {"formula_evidence": None, "retry_formula_evidence": None}
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for formula-style questions")),
+    )
+
+    def fake_generate_sql(*args, **kwargs):
+        captured["formula_evidence"] = kwargs.get("formula_evidence")
+        return (
+            "SELECT c.client_name, b.billed_value "
+            "FROM clients c JOIN deals d ON c.client_id = d.client_id "
+            "JOIN billing_notes b ON d.deal_id = b.deal_id;"
+        )
+
+    def fake_generate_sql_with_retry(**kwargs):
+        captured["retry_formula_evidence"] = kwargs.get("formula_evidence")
+        return (
+            "SELECT c.client_name, b.billed_value "
+            "FROM clients c JOIN deals d ON c.client_id = d.client_id "
+            "JOIN billing_notes b ON d.deal_id = b.deal_id;"
+        )
+
+    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
+    monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_generate_sql_with_retry)
+
+    success, message, sql, error = service.process_question("pending billed amount by client", kb, ai_backend="local")
+
+    assert success is True
+    assert captured["formula_evidence"] == []
+    assert captured["retry_formula_evidence"] is None
+    assert "SUM(" not in sql
+    assert "-" not in sql
     assert service.get_last_query_context()["route_used"] == "ai"
 
 
@@ -1202,7 +1521,7 @@ def test_simple_sample_value_filter_routes_rule_based_without_ai(monkeypatch):
     assert service.get_last_query_context()["selected_table_names"][0] == "accounts"
 
 
-def test_simple_top_n_browse_routes_rule_based_without_ai(monkeypatch):
+def test_top_n_browse_routes_to_ai(monkeypatch):
     kb = {
         "accounts": {
             "columns": [
@@ -1216,19 +1535,25 @@ def test_simple_top_n_browse_routes_rule_based_without_ai(monkeypatch):
     }
     service = QuestionService()
 
+    ai_called = {"value": False}
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for ranking questions")),
+    )
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple top-N browse questions")),
+        lambda *args, **kwargs: ai_called.__setitem__("value", True) or "SELECT account_id, account_label FROM accounts ORDER BY account_label DESC LIMIT 5;",
     )
 
     success, message, sql, error = service.process_question("show top 5 accounts", kb, ai_backend="local")
 
     assert success is True
-    assert sql == "SELECT account_id, account_label FROM accounts LIMIT 5;"
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert ai_called["value"] is True
+    assert "LIMIT 5" in sql
+    assert service.get_last_query_context()["route_used"] == "ai"
 
 
-def test_single_table_total_routes_rule_based_without_ai(monkeypatch):
+def test_single_table_total_routes_to_ai(monkeypatch):
     kb = {
         "operating_costs": {
             "columns": [
@@ -1243,16 +1568,22 @@ def test_single_table_total_routes_rule_based_without_ai(monkeypatch):
     }
     service = QuestionService()
 
+    ai_called = {"value": False}
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for aggregate questions")),
+    )
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for clear single-table totals")),
+        lambda *args, **kwargs: ai_called.__setitem__("value", True) or "SELECT SUM(spent_value) AS total_spent_value FROM operating_costs;",
     )
 
     success, message, sql, error = service.process_question("show total operating cost", kb, ai_backend="local")
 
     assert success is True
+    assert ai_called["value"] is True
     assert sql == "SELECT SUM(spent_value) AS total_spent_value FROM operating_costs;"
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "ai"
 
 
 def test_top_vector_table_beats_generic_glossary_aliases_for_simple_list():

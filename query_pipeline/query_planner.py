@@ -1823,6 +1823,10 @@ def _compute_route_recommendation(
     selected_tables: list[dict[str, Any]],
 ) -> str:
     """Compute route recommendation based on evidence strength."""
+    intent = str(plan.get("intent") or "").strip().lower()
+    has_grouping = bool(plan.get("grouping") or plan.get("dimension"))
+    has_formula_gap = bool(missing_evidence.get("missing_formula_evidence"))
+
     # Cannot plan safely if critical evidence is missing
     if missing_evidence.get("missing_join_path") and len(selected_tables) > 1:
         return "cannot_plan_safely"
@@ -1834,12 +1838,26 @@ def _compute_route_recommendation(
     if confidence < 0.5:
         return "needs_clarification"
     
-    # Simple rule OK for strong evidence with single table
-    if confidence >= 0.7 and len(selected_tables) == 1:
+    # Rule-based SQL is reserved for strong single-table list/count shapes only.
+    if (
+        confidence >= 0.7
+        and len(selected_tables) == 1
+        and intent in {"list", "count"}
+        and not has_grouping
+        and not has_formula_gap
+        and not missing_evidence.get("missing_metric")
+        and not missing_evidence.get("missing_dimension")
+    ):
         return "simple_rule_ok"
     
-    # AI SQL required for multi-table joins or missing metrics
-    if len(selected_tables) > 1 or missing_evidence.get("missing_metric"):
+    # Everything more complex than simple list/count should use AI.
+    if (
+        len(selected_tables) > 1
+        or has_grouping
+        or has_formula_gap
+        or missing_evidence.get("missing_metric")
+        or intent not in {"list", "count"}
+    ):
         return "ai_sql_required"
     
     # For moderate confidence with single table, default to ai_sql_required

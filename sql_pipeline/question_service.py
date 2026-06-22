@@ -254,8 +254,8 @@ def _should_try_rule_based_first(query_context: dict[str, Any]) -> tuple[bool, s
     logger.debug(f"[DEBUG ROUTING] Dimension: {plan.get('dimension')}")
     logger.debug(f"[DEBUG ROUTING] Grouping: {plan.get('grouping')}")
 
-    if intent not in {"list", "count", "total", "average"}:
-        logger.debug(f"[DEBUG ROUTING] Rule-based skipped: intent '{intent}' needs richer reasoning")
+    if intent not in {"list", "count"}:
+        logger.debug(f"[DEBUG ROUTING] Rule-based skipped: intent '{intent}' is routed to AI for complex SQL generation")
         return False, f"intent '{intent}' needs richer reasoning"
     if plan.get("dimension") or plan.get("grouping"):
         logger.debug(f"[DEBUG ROUTING] Rule-based skipped: question asks for grouped or dimensional output")
