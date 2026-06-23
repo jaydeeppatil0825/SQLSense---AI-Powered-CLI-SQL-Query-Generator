@@ -98,7 +98,7 @@ def _find_glossary_matches(question: str, glossary: dict | None) -> list[tuple[s
         if normalized_term and normalized_term in normalized_question:
             matches.append((term, term_data))
             continue
-        aliases = term_data.get("business_terms", []) or []
+        aliases = term_data.get("primary_terms", []) or term_data.get("business_terms", []) or []
         if any(set(_tokenize(alias)) <= question_terms for alias in aliases if _tokenize(alias)):
             matches.append((term, term_data))
     return matches

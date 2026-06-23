@@ -463,10 +463,11 @@ def _match_columns(query_terms: list[str], knowledge_base: Dict[str, Any]) -> li
 def _match_glossary_terms(query_terms: list[str], glossary: Dict[str, Any]) -> list[Dict[str, Any]]:
     matches = []
     for term, entry in glossary.items():
+        primary_terms = list(entry.get("primary_terms", []) or entry.get("business_terms", []) or [])
         search_texts = [
             term,
             entry.get("description", ""),
-            *list(entry.get("business_terms", []) or []),
+            *primary_terms,
         ]
         best_score = 0.0
         matched_terms = []
@@ -485,7 +486,9 @@ def _match_glossary_terms(query_terms: list[str], glossary: Dict[str, Any]) -> l
                 "term": term,
                 "score": round(best_score, 4),
                 "matched_terms": _unique(matched_terms),
+                "mapped_tables": list(entry.get("mapped_tables", []) or []),
                 "mapped_columns": list(entry.get("mapped_columns", []) or []),
+                "related_tables": list(entry.get("related_tables", []) or []),
                 "evidence_sources": _unique(["dynamic_glossary", *evidence_sources]),
                 "source": "glossary",
             }

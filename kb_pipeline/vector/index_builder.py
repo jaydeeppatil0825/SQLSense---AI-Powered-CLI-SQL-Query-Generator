@@ -307,7 +307,8 @@ class VectorIndexBuilder:
         description = term_data.get("description", "")
         mapped_columns = term_data.get("mapped_columns", [])
         example_questions = term_data.get("example_questions", [])
-        business_terms = term_data.get("business_terms", [])
+        primary_terms = term_data.get("primary_terms", []) or term_data.get("business_terms", [])
+        related_terms = term_data.get("related_terms", [])
         
         # Build searchable text
         text_parts = [
@@ -315,8 +316,10 @@ class VectorIndexBuilder:
             f"Description: {description}",
         ]
         
-        if business_terms:
-            text_parts.append(f"Also known as: {', '.join(business_terms)}")
+        if primary_terms:
+            text_parts.append(f"Primary terms: {', '.join(primary_terms)}")
+        if related_terms:
+            text_parts.append(f"Relationship context: {', '.join(related_terms)}")
         
         if mapped_columns:
             column_mappings = [f"{m.get('table', '')}.{m.get('column', '')}" for m in mapped_columns]
@@ -339,7 +342,9 @@ class VectorIndexBuilder:
             "term": term,
             "description": description,
             "table_names": table_names,
-            "business_terms": business_terms,
+            "business_terms": list(primary_terms),
+            "primary_terms": list(primary_terms),
+            "related_terms": list(related_terms),
             "mapped_columns": mapped_columns,
             "example_questions": example_questions[:3],
         }

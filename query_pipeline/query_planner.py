@@ -724,9 +724,10 @@ def _glossary_matches(question: str, glossary: dict | None) -> list[tuple[str, d
     for term, term_data in glossary.items():
         normalized_term = _normalize(term)
         term_tokens = set(_tokenize(term))
+        primary_terms = list(term_data.get("primary_terms", []) or term_data.get("business_terms", []) or [])
         alias_tokens = {
             token
-            for alias in term_data.get("business_terms", [])
+            for alias in primary_terms
             for token in _tokenize(alias)
         }
         if normalized_term and normalized_term in normalized_question:
@@ -751,7 +752,7 @@ def _glossary_alias_hits_question(question: str, term: str, term_data: dict[str,
     if term_tokens and term_tokens <= question_terms:
         return True
 
-    for alias in term_data.get("business_terms", []) or []:
+    for alias in (term_data.get("primary_terms", []) or term_data.get("business_terms", []) or []):
         normalized_alias = _normalize(alias)
         alias_tokens = set(_tokenize(alias))
         if normalized_alias and normalized_alias in normalized_question:

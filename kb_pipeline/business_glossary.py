@@ -67,6 +67,10 @@ def _mapping_key(mapping: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def _table_key(table_name: str) -> str:
+    return str(table_name or "").strip()
+
+
 def _preferred_column_order(column: dict[str, Any]) -> tuple[int, str]:
     semantic = str(column_ai_metadata(column).get("ai_semantic_type", "") or column.get("semantic_type", "")).lower()
     name = str(column.get("name", ""))
@@ -101,15 +105,21 @@ def _generic_description_for_column(table_name: str, column: dict[str, Any]) -> 
     return f"Schema column from {_humanize(table_name)}: {_humanize(column.get('name', 'column'))}."
 
 
-def _relationship_terms(table_name: str, table_data: dict[str, Any]) -> list[str]:
+def _relationship_context(table_name: str, table_data: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
     related_terms: list[str] = []
+    related_tables: list[str] = []
+    relationship_sources: list[str] = []
     for foreign_key in table_data.get("foreign_keys", []):
-        related_table = _humanize(foreign_key.get("referenced_table", ""))
+        referenced_table = str(foreign_key.get("referenced_table", "")).strip()
+        related_table = _humanize(referenced_table)
         if related_table:
             related_terms.append(related_table)
             singular = _singularize(related_table)
             if singular and singular != related_table:
                 related_terms.append(singular)
+        if referenced_table:
+            related_tables.append(referenced_table)
+            relationship_sources.append("foreign_key")
 
     for relationship in table_data.get("relationships", []):
         from_table = str(relationship.get("from_table", "")).strip()
@@ -126,8 +136,16 @@ def _relationship_terms(table_name: str, table_data: dict[str, Any]) -> list[str
             singular = _singularize(related_table)
             if singular and singular != related_table:
                 related_terms.append(singular)
+        related_identifier = to_table if from_table == table_name else from_table
+        if related_identifier:
+            related_tables.append(related_identifier)
+            relationship_sources.append(str(relationship.get("source", "")).strip() or "relationship")
 
-    return _unique_preserve_order(related_terms)
+    return (
+        _unique_preserve_order(related_terms),
+        _unique_preserve_order(related_tables),
+        _unique_preserve_order(relationship_sources),
+    )
 
 
 def _schema_terms_for_table(table_name: str) -> list[str]:
@@ -164,15 +182,64 @@ def _entry_sources(table_data: dict[str, Any], *, includes_ai: bool, includes_re
     return sources
 
 
+def _primary_terms_from_entry(term: str, primary_terms: list[str] | None = None) -> list[str]:
+    return _unique_preserve_order([_humanize(term), *(primary_terms or [])])
+
+
+def _mapping_priority(*, mapping_kind: str, structural_facts: dict[str, Any] | None = None) -> int:
+    if mapping_kind == "table":
+        return 0
+    facts = structural_facts or {}
+    if facts.get("is_primary_key") and not facts.get("is_foreign_key"):
+        return 1
+    if not facts.get("is_foreign_key") and not facts.get("is_id"):
+        return 2
+    if facts.get("is_foreign_key"):
+        return 4
+    if facts.get("is_id"):
+        return 5
+    return 3
+
+
+def _strip_internal_fields(glossary: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    cleaned: dict[str, dict[str, Any]] = {}
+    for term, entry in glossary.items():
+        primary_terms = _unique_preserve_order(list(entry.get("primary_terms", []) or []))
+        related_terms = _unique_preserve_order(list(entry.get("related_terms", []) or []))
+        mapped_tables = _unique_preserve_order(list(entry.get("mapped_tables", []) or []))
+        mapped_columns = list(entry.get("mapped_columns", []) or [])
+        related_tables = _unique_preserve_order(list(entry.get("related_tables", []) or []))
+        cleaned[term] = {
+            "description": entry.get("description", ""),
+            "mapped_tables": mapped_tables,
+            "mapped_columns": mapped_columns,
+            "related_tables": related_tables,
+            "example_questions": _unique_preserve_order(list(entry.get("example_questions", []) or []))[:4],
+            "primary_terms": primary_terms,
+            "related_terms": related_terms,
+            "business_terms": list(primary_terms),
+            "sources": _unique_preserve_order(list(entry.get("sources", []) or [])),
+            "relationship_sources": _unique_preserve_order(list(entry.get("relationship_sources", []) or [])),
+        }
+    return cleaned
+
+
 def _add_entry(
     glossary: dict[str, dict[str, Any]],
     term: str,
     *,
     description: str,
+    mapped_tables: list[str] | None = None,
     mappings: list[dict[str, Any]] | None = None,
     example_questions: list[str] | None = None,
-    business_terms: list[str] | None = None,
+    primary_terms: list[str] | None = None,
+    related_terms: list[str] | None = None,
+    related_tables: list[str] | None = None,
     sources: list[str] | None = None,
+    relationship_sources: list[str] | None = None,
+    mapping_kind: str = "column",
+    structural_facts: dict[str, Any] | None = None,
+    allow_mapping_merge: bool = True,
 ) -> None:
     normalized_term = _normalize(term)
     if not normalized_term:
@@ -182,36 +249,82 @@ def _add_entry(
         normalized_term,
         {
             "description": description,
+            "mapped_tables": [],
             "mapped_columns": [],
+            "related_tables": [],
             "example_questions": [],
+            "primary_terms": [],
+            "related_terms": [],
             "business_terms": [],
             "sources": [],
+            "relationship_sources": [],
+            "__mapping_priority": 999,
         },
     )
 
-    if description and (
+    new_priority = _mapping_priority(
+        mapping_kind=mapping_kind,
+        structural_facts=structural_facts,
+    )
+    current_priority = int(entry.get("__mapping_priority", 999))
+    should_refresh_single_mapping = (
+        allow_mapping_merge
+        or not mappings
+        or not entry.get("mapped_columns")
+        or new_priority < current_priority
+    )
+
+    if description and should_refresh_single_mapping and (
         not entry.get("description")
         or entry["description"].startswith("Schema ")
     ):
         entry["description"] = description
 
-    existing_keys = {_mapping_key(mapping) for mapping in entry.get("mapped_columns", [])}
-    for mapping in mappings or []:
-        key = _mapping_key(mapping)
-        if key in existing_keys:
-            continue
-        existing_keys.add(key)
-        entry["mapped_columns"].append(mapping)
+    if allow_mapping_merge:
+        entry["mapped_tables"] = _unique_preserve_order(
+            list(entry.get("mapped_tables", [])) + list(mapped_tables or [])
+        )
+        entry["related_tables"] = _unique_preserve_order(
+            list(entry.get("related_tables", [])) + list(related_tables or [])
+        )
+        existing_keys = {_mapping_key(mapping) for mapping in entry.get("mapped_columns", [])}
+        for mapping in mappings or []:
+            key = _mapping_key(mapping)
+            if key in existing_keys:
+                continue
+            existing_keys.add(key)
+            entry["mapped_columns"].append(mapping)
+    elif mappings:
+        if should_refresh_single_mapping:
+            entry["mapped_columns"] = list(mappings)
+            entry["mapped_tables"] = _unique_preserve_order(list(mapped_tables or []))
+            entry["related_tables"] = _unique_preserve_order(list(related_tables or []))
+            entry["relationship_sources"] = _unique_preserve_order(list(relationship_sources or []))
+            entry["__mapping_priority"] = new_priority
 
     entry["example_questions"] = _unique_preserve_order(
         list(entry.get("example_questions", [])) + list(example_questions or [])
     )[:4]
-    entry["business_terms"] = _unique_preserve_order(
-        list(entry.get("business_terms", [])) + [normalized_term] + list(business_terms or [])
+    entry["primary_terms"] = _unique_preserve_order(
+        list(entry.get("primary_terms", []))
+        + _primary_terms_from_entry(term, list(primary_terms or []))
     )[:8]
+    if allow_mapping_merge:
+        entry["related_terms"] = _unique_preserve_order(
+            list(entry.get("related_terms", [])) + list(related_terms or [])
+        )[:8]
+    elif should_refresh_single_mapping:
+        entry["related_terms"] = _unique_preserve_order(list(related_terms or []))[:8]
+    entry["business_terms"] = list(entry["primary_terms"])
     entry["sources"] = _unique_preserve_order(
         list(entry.get("sources", [])) + list(sources or [])
     )
+    if allow_mapping_merge:
+        entry["relationship_sources"] = _unique_preserve_order(
+            list(entry.get("relationship_sources", [])) + list(relationship_sources or [])
+        )
+    elif should_refresh_single_mapping:
+        entry["relationship_sources"] = _unique_preserve_order(list(relationship_sources or []))
 
 
 def get_default_business_glossary() -> Dict[str, Any]:
@@ -245,7 +358,7 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
             or _generic_description_for_table(table_name)
         )
         table_mappings = _representative_mappings(table_name, table_data)
-        relationship_terms = _relationship_terms(table_name, table_data)
+        relationship_terms, related_tables, relationship_sources = _relationship_context(table_name, table_data)
         table_ai_terms = _clean_ai_terms(table_data.get("business_terms", []))
         table_terms = _unique_preserve_order(
             _schema_terms_for_table(table_name) + table_ai_terms
@@ -261,10 +374,16 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                 glossary,
                 term,
                 description=table_description,
+                mapped_tables=[table_name],
                 mappings=table_mappings,
                 example_questions=list(table_data.get("possible_business_questions", [])),
-                business_terms=_unique_preserve_order(table_terms + relationship_terms),
+                primary_terms=table_terms,
+                related_terms=relationship_terms,
+                related_tables=related_tables,
                 sources=table_sources,
+                relationship_sources=relationship_sources,
+                mapping_kind="table",
+                allow_mapping_merge=True,
             )
 
         for column in table_data.get("columns", []):
@@ -292,21 +411,30 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                 includes_relationships=bool(relationship_terms),
             )
             structural_facts = column_structural_facts(column)
-            related_terms = relationship_terms if structural_facts.get("is_foreign_key") or structural_facts.get("is_id") else []
+            column_related_terms = relationship_terms if structural_facts.get("is_foreign_key") else []
+            column_related_tables = related_tables if structural_facts.get("is_foreign_key") else []
+            column_relationship_sources = relationship_sources if structural_facts.get("is_foreign_key") else []
 
             for term in column_terms:
                 _add_entry(
                     glossary,
                     term,
                     description=column_description,
+                    mapped_tables=[table_name],
                     mappings=[mapping],
                     example_questions=[],
-                    business_terms=_unique_preserve_order(column_terms + related_terms + [human_table]),
+                    primary_terms=column_terms,
+                    related_terms=column_related_terms,
+                    related_tables=column_related_tables,
                     sources=column_sources,
+                    relationship_sources=column_relationship_sources,
+                    mapping_kind="column",
+                    structural_facts=structural_facts,
+                    allow_mapping_merge=False,
                 )
 
     logger.info(f"Generated glossary with {len(glossary)} terms")
-    return glossary
+    return _strip_internal_fields(glossary)
 
 
 def save_business_glossary(glossary: Dict[str, Any], output_path: str = "semantic/business_glossary.json") -> None:
@@ -379,8 +507,26 @@ def search_business_glossary(search_term: str, glossary: Dict[str, Any] | None =
                 matches[term] = term_data
                 continue
 
-            for business_term in term_data.get("business_terms", []):
+            for business_term in (
+                term_data.get("primary_terms", [])
+                or term_data.get("business_terms", [])
+                or []
+            ):
                 if isinstance(business_term, str) and search_lower in business_term.lower():
+                    matches[term] = term_data
+                    break
+            if term in matches:
+                continue
+
+            for related_term in term_data.get("related_terms", []):
+                if isinstance(related_term, str) and search_lower in related_term.lower():
+                    matches[term] = term_data
+                    break
+            if term in matches:
+                continue
+
+            for table_name in term_data.get("mapped_tables", []):
+                if isinstance(table_name, str) and search_lower in table_name.lower():
                     matches[term] = term_data
                     break
             if term in matches:
@@ -393,6 +539,13 @@ def search_business_glossary(search_term: str, glossary: Dict[str, Any] | None =
                     break
                 column = mapping.get("column", "")
                 if isinstance(column, str) and search_lower in column.lower():
+                    matches[term] = term_data
+                    break
+            if term in matches:
+                continue
+
+            for related_table in term_data.get("related_tables", []):
+                if isinstance(related_table, str) and search_lower in related_table.lower():
                     matches[term] = term_data
                     break
             if term in matches:

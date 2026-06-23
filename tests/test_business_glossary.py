@@ -39,6 +39,9 @@ def test_generate_business_glossary_from_schema_facts_only():
     assert glossary["total due"]["mapped_columns"][0]["table"] == "invoice_headers"
     assert glossary["total due"]["mapped_columns"][0]["column"] == "total_due"
     assert glossary["total due"]["sources"] == ["schema_identifier"]
+    assert glossary["total due"]["primary_terms"] == ["total due"]
+    assert glossary["total due"]["business_terms"] == ["total due"]
+    assert glossary["total due"]["related_terms"] == []
     assert "tax" not in glossary
     assert "gst" not in glossary
     assert "vat" not in glossary
@@ -67,6 +70,7 @@ def test_generate_business_glossary_from_ai_metadata_only_when_present():
     assert "amount due current" in glossary
     assert glossary["payables open"]["mapped_columns"][0]["table"] == "invoice_headers"
     assert "ai_semantic_metadata" in glossary["payables open"]["sources"]
+    assert glossary["payables open"]["business_terms"] == glossary["payables open"]["primary_terms"]
 
 
 def test_generate_business_glossary_uses_relationship_context_without_inventing_aliases():
@@ -88,9 +92,38 @@ def test_generate_business_glossary_uses_relationship_context_without_inventing_
 
     assert "stock positions" in glossary
     assert "relationship_context" in glossary["stock positions"]["sources"]
-    assert "items" in glossary["item id"]["business_terms"]
-    assert "storage point" in glossary["storage id"]["business_terms"]
+    assert "items" in glossary["item id"]["related_terms"]
+    assert "storage point" in glossary["storage id"]["related_terms"]
+    assert "items" not in glossary["item id"]["business_terms"]
+    assert "storage point" not in glossary["storage id"]["business_terms"]
     assert "pending stock positions" not in glossary
+
+
+def test_generate_business_glossary_separates_primary_and_related_terms():
+    knowledge_base = {
+        "bills": {
+            "business_description": "Bill details",
+            "foreign_keys": [
+                {"column": "partner_id", "referenced_table": "partners", "referenced_column": "partner_id"},
+            ],
+            "relationships": [],
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "partner_id", "type": "INTEGER", "semantic_type": "id", "is_foreign_key": True},
+            ],
+        }
+    }
+
+    glossary = generate_business_glossary(knowledge_base, use_ai_enrichment=False)
+
+    assert glossary["bills"]["primary_terms"] == ["bills", "bill"]
+    assert glossary["bills"]["business_terms"] == ["bills", "bill"]
+    assert glossary["bills"]["related_terms"] == ["partners", "partner"]
+    assert glossary["bills"]["mapped_tables"] == ["bills"]
+    assert glossary["bills"]["related_tables"] == ["partners"]
+    assert "foreign_key" in glossary["bills"]["relationship_sources"]
+    assert glossary["bill id"]["primary_terms"] == ["bill id"]
+    assert glossary["bill id"]["related_terms"] == []
 
 
 def test_save_and_load_business_glossary():
