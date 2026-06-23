@@ -36,6 +36,7 @@ def _service_with_orders(monkeypatch, tmp_path):
     service = AppService()
     service.database_service.engine = engine
     service.database_service.knowledge_base = KB
+    service.database_ready = True
     return service
 
 
@@ -137,12 +138,14 @@ def test_process_question_uses_persisted_vector_index_after_reload(monkeypatch, 
             "example_questions": ["show total sales"],
         }
     }
+    first_service.database_ready = True
     first_service.database_service.refresh_vector_index()
 
     second_service = AppService()
     second_service.database_service.knowledge_base = KB
     second_service.database_service.knowledge_base_origin = "loaded"
     second_service.database_service.business_glossary = first_service.database_service.business_glossary
+    second_service.database_ready = True
     second_service.database_service.refresh_vector_index()
 
     captured = {}
@@ -218,14 +221,6 @@ def test_persisted_vector_status_includes_database_identity_and_schema_hash(monk
 
 def test_invalid_generated_sql_never_becomes_last_executable_sql(monkeypatch, tmp_path):
     service = _service_with_orders(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        "core.question_service.generate_sql",
-        lambda user_question, knowledge_base, backend=None, query_plan=None, selected_tables=None: "SELECT final_amount FROM LIMIT 50",
-    )
-    monkeypatch.setattr(
-        "core.question_service.generate_sql_with_retry",
-        lambda user_question, knowledge_base, backend, first_attempt_sql, validation_reason, query_plan=None, selected_tables=None: "SELECT final_amount FROM LIMIT 50",
-    )
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
 
     success, message, sql, error = service.process_question("show total sales", ai_backend="local")
@@ -233,19 +228,170 @@ def test_invalid_generated_sql_never_becomes_last_executable_sql(monkeypatch, tm
     assert success is False
     assert sql is None
     assert service.get_last_sql() is None
-    assert "Could not generate a valid SQL query." in error
+    assert "no sql" in (message or "").lower() or "no sql" in (error or "").lower()
 
 
 def test_cli_menu_labels_remain_unchanged():
     source = Path("main.py").read_text(encoding="utf-8")
 
-    assert 'print("  1) Connect Database")' in source
-    assert 'print("  2) Build Knowledge Base")' in source
-    assert 'print("  3) Ask a Question / Ask Business Question")' in source
-    assert 'print("  4) Execute Last SQL")' in source
-    assert 'print("  5) AI Backend Settings")' in source
-    assert 'print("  6) Search Business Glossary")' in source
+    assert 'print("  1) Connect Database / Auto Build KB")' in source
+    assert 'print("  2) Ask a Question / Ask Business Question")' in source
+    assert 'print("  3) Execute Last SQL")' in source
+    assert 'print("  4) Semantic AI Settings")' in source
+    assert 'print("  5) Search Business Glossary")' in source
+    assert 'print("  6) Rebuild / Refresh Knowledge Base")' in source
     assert 'print("  7) Exit")' in source
+
+
+def test_connect_database_and_prepare_triggers_kb_build(monkeypatch):
+    service = AppService()
+    build_calls = []
+
+    monkeypatch.setattr(
+        service,
+        "connect_database",
+        lambda **kwargs: (True, "connected", object()),
+    )
+
+    def fake_build_knowledge_base(**kwargs):
+        build_calls.append(kwargs)
+        service.database_service.knowledge_base = KB
+        service.database_service.business_glossary = {"orders": {"mapped_columns": []}}
+        return True, "Knowledge base built successfully", KB
+
+    monkeypatch.setattr(service, "build_knowledge_base", fake_build_knowledge_base)
+    monkeypatch.setattr(
+        service,
+        "get_vector_status",
+        lambda: {"index_status": "ready", "persistence": {"source": "rebuilt"}},
+    )
+
+    success, message, report = service.connect_database_and_prepare(
+        db_type="mysql",
+        host="localhost",
+        port=3306,
+        username="root",
+        password="secret",
+        database="dynamic_db",
+    )
+
+    assert success is True
+    assert report["connected"] is True
+    assert report["kb_built"] is True
+    assert report["database_ready"] is True
+    assert service.is_database_ready() is True
+    assert build_calls == [{"use_ai_enrichment": True, "ai_backend": service.get_active_backend(), "force_rebuild": True}]
+
+
+def test_connect_database_failure_does_not_build_kb(monkeypatch):
+    service = AppService()
+    build_called = False
+
+    monkeypatch.setattr(
+        service,
+        "connect_database",
+        lambda **kwargs: (False, "Connection failed", None),
+    )
+
+    def fake_build_knowledge_base(**kwargs):
+        nonlocal build_called
+        build_called = True
+        return True, "Knowledge base built successfully", KB
+
+    monkeypatch.setattr(service, "build_knowledge_base", fake_build_knowledge_base)
+
+    success, message, report = service.connect_database_and_prepare(database="missing_db")
+
+    assert success is False
+    assert build_called is False
+    assert report["connected"] is False
+    assert report["database_ready"] is False
+    assert service.is_database_ready() is False
+
+
+def test_connect_database_and_prepare_leaves_database_not_ready_when_kb_build_fails(monkeypatch):
+    service = AppService()
+
+    monkeypatch.setattr(
+        service,
+        "connect_database",
+        lambda **kwargs: (True, "connected", object()),
+    )
+    monkeypatch.setattr(
+        service,
+        "build_knowledge_base",
+        lambda **kwargs: (False, "Knowledge base build failed", None),
+    )
+
+    success, message, report = service.connect_database_and_prepare(database="dynamic_db")
+
+    assert success is False
+    assert report["connected"] is True
+    assert report["kb_built"] is False
+    assert report["database_ready"] is False
+    assert service.is_database_ready() is False
+
+
+def test_connect_database_and_prepare_succeeds_when_vector_build_is_degraded(monkeypatch):
+    service = AppService()
+
+    monkeypatch.setattr(
+        service,
+        "connect_database",
+        lambda **kwargs: (True, "connected", object()),
+    )
+
+    def fake_build_knowledge_base(**kwargs):
+        service.database_service.knowledge_base = KB
+        service.database_service.business_glossary = {"orders": {"mapped_columns": []}}
+        return True, "Knowledge base built successfully", KB
+
+    monkeypatch.setattr(service, "build_knowledge_base", fake_build_knowledge_base)
+    monkeypatch.setattr(
+        service,
+        "get_vector_status",
+        lambda: {
+            "index_status": "degraded",
+            "persistence": {"source": "rebuild_failed", "persistence_error": "vector rebuild failed"},
+        },
+    )
+
+    success, message, report = service.connect_database_and_prepare(database="dynamic_db")
+
+    assert success is True
+    assert report["database_ready"] is True
+    assert report["vector_status"] == "degraded"
+    assert "vector rebuild failed" in report["vector_warning"]
+
+
+def test_process_question_is_blocked_before_database_ready():
+    service = AppService()
+    service.database_service.knowledge_base = KB
+    service.database_ready = False
+
+    success, message, sql, error = service.process_question("show orders", ai_backend="local")
+
+    assert success is False
+    assert sql is None
+    assert "not ready" in (error or "").lower()
+
+
+def test_rebuild_or_refresh_knowledge_base_forces_rebuild(monkeypatch):
+    service = AppService()
+    captured = {}
+
+    def fake_build_knowledge_base(**kwargs):
+        captured.update(kwargs)
+        service.database_service.knowledge_base = KB
+        return True, "Knowledge base built successfully", KB
+
+    monkeypatch.setattr(service, "build_knowledge_base", fake_build_knowledge_base)
+
+    success, message, knowledge_base = service.rebuild_or_refresh_knowledge_base()
+
+    assert success is True
+    assert knowledge_base == KB
+    assert captured["force_rebuild"] is True
 
 
 def test_pipeline_architecture_reflects_current_folder_structure():

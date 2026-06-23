@@ -419,6 +419,7 @@ class DatabaseService:
         self,
         use_ai_enrichment: bool = False,
         ai_backend: str = "local",
+        force_rebuild: bool = False,
     ) -> tuple[bool, str, Optional[Dict[str, Any]]]:
         """
         Build knowledge base from connected database.
@@ -426,12 +427,22 @@ class DatabaseService:
         Args:
             use_ai_enrichment: Whether to use AI for semantic enrichment
             ai_backend: AI backend to use for enrichment
+            force_rebuild: Whether to discard cached KB/glossary/vector state and rebuild fresh
         
         Returns:
             (success, message, knowledge_base)
         """
         if not self.engine:
             return False, "No database connection. Connect a database first.", None
+
+        if force_rebuild:
+            self._reset_active_database_context(
+                clear_connection=False,
+                clear_cached_assets=True,
+                stale_reason="knowledge base rebuild requested",
+                index_status="not_built",
+                source="rebuild_requested",
+            )
         
         try:
             knowledge_base = build_knowledge_base(self.engine)
@@ -569,6 +580,7 @@ class DatabaseService:
             logger.info("Business glossary saved")
         except Exception as e:
             logger.error(f"Failed to generate business glossary: {e}")
+            self.business_glossary = {}
         
         self.knowledge_base = final_knowledge_base
         self.knowledge_base_origin = "built"

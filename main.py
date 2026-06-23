@@ -5,12 +5,12 @@ CLI entry point for the AI SQL Query Generator.
 
 Menu flow
 ---------
-  1) Connect Database      — collect credentials, test connection, store engine
-  2) Build Knowledge Base  — schema → profile → semantic mapping → save JSON
-  3) Ask a Question        — NL question → AI → validated SQL → store in session
-  4) Execute Last SQL      — run stored SQL, display results as a table
-  5) AI Backend Settings   — view local Ollama/Llama3 status
-  6) Search Business Glossary
+  1) Connect Database / Auto Build KB
+  2) Ask a Question        — deterministic intent → KB/planner → validated SQL
+  3) Execute Last SQL      — run stored SQL, display results as a table
+  4) Semantic AI Settings  — view KB enrichment backend status
+  5) Search Business Glossary
+  6) Rebuild / Refresh Knowledge Base
   7) Exit
 
 All exceptions are caught at the boundary of each handler so the user
@@ -145,12 +145,12 @@ def display_menu(state: SessionState) -> None:
             preview = preview[:48] + "…"
         print(f"  Last SQL : {preview}")
     print("-" * 52)
-    print("  1) Connect Database")
-    print("  2) Build Knowledge Base")
-    print("  3) Ask a Question / Ask Business Question")
-    print("  4) Execute Last SQL")
-    print("  5) AI Backend Settings")
-    print("  6) Search Business Glossary")
+    print("  1) Connect Database / Auto Build KB")
+    print("  2) Ask a Question / Ask Business Question")
+    print("  3) Execute Last SQL")
+    print("  4) Semantic AI Settings")
+    print("  5) Search Business Glossary")
+    print("  6) Rebuild / Refresh Knowledge Base")
     print("  7) Exit")
     print("=" * 52)
 
@@ -179,14 +179,33 @@ def read_menu_choice() -> int | None:
 
 # ── Option handlers ───────────────────────────────────────────────────────────
 
+def _print_database_prepare_report(state: SessionState, report: dict[str, object]) -> None:
+    """Print database preparation progress/results after connect or rebuild."""
+    print("\n  Preparation status:")
+    print(f"  - connecting database: {'done' if report.get('connected') else 'failed'}")
+    print(f"  - building KB: {'done' if report.get('kb_built') else 'failed'}")
+    print(f"  - AI enrichment: {report.get('ai_enrichment_status')} ({report.get('ai_enrichment_message')})")
+    print(f"  - glossary generated: {'yes' if report.get('glossary_generated') else 'no'}")
+    vector_status = state.app_service.get_vector_status()
+    print(f"  - vector built/skipped: {vector_status.get('index_status')}")
+    persistence = vector_status.get("persistence", {})
+    if report.get("vector_warning"):
+        print(f"  - vector note: {report.get('vector_warning')}")
+    elif persistence.get("stale_reason"):
+        print(f"  - vector note: {persistence.get('stale_reason')}")
+    if persistence.get("source"):
+        print(f"  - vector source: {persistence.get('source')}")
+    print(f"  - database ready: {'yes' if report.get('database_ready') else 'no'}")
+
+
 def handle_connect_database(state: SessionState) -> None:
     """
-    Phase 1 — Connect Database.
-    Collects connection details interactively, tests the connection with
-    SELECT 1, and stores the engine in SessionState on success.
+    Phase 1 — Connect Database / Auto Build KB.
+    Collects connection details, connects once, and immediately prepares KB,
+    glossary, and vector state for questioning.
     Password is collected via getpass and never written to any file.
     """
-    logger.info("User chose option 1: Connect Database")
+    logger.info("User chose option 1: Connect Database / Auto Build KB")
     print(f"\n  Supported database type: mysql")
     print("  PostgreSQL and SQLite are planned for future phases.\n")
 
@@ -202,14 +221,18 @@ def handle_connect_database(state: SessionState) -> None:
         if not sqlite_path:
             print("  SQLite file path cannot be empty.")
             return
-        success, message, engine = state.app_service.connect_database(
+        print("\n  Connecting database...")
+        print("  Building knowledge base...")
+        success, message, report = state.app_service.connect_database_and_prepare(
             db_type="sqlite",
             sqlite_path=sqlite_path,
+            use_ai_enrichment=True,
         )
+        _print_database_prepare_report(state, report)
         if not success:
-            print(f"  Connection failed: {message}")
+            print(f"  Preparation failed: {message}")
             return
-        print(f"  Connected to SQLite: {sqlite_path}")
+        print("  Database ready.")
         return
 
     # ── MySQL / PostgreSQL ───────────────────────────────────────────────────
@@ -235,67 +258,53 @@ def handle_connect_database(state: SessionState) -> None:
         return
 
     print(f"\n  Connecting to {db_type}://{username}@{host}:{port}/{database} …")
-    success, message, engine = state.app_service.connect_database(
+    print("  Building knowledge base...")
+    success, message, report = state.app_service.connect_database_and_prepare(
         db_type=db_type,
         host=host,
         port=port,
         username=username,
         password=password,
         database=database,
+        use_ai_enrichment=True,
     )
+    _print_database_prepare_report(state, report)
     if not success:
-        logger.error(f"Database connection failed: {message}")
-        print(f"  Connection failed: {message}")
+        logger.error(f"Database connect/prepare failed: {message}")
+        print(f"  Preparation failed: {message}")
         return
 
-    logger.info(f"Successfully connected to database: {db_type}://{username}@{host}:{port}/{database}")
+    logger.info(f"Successfully connected and prepared database: {db_type}://{username}@{host}:{port}/{database}")
     print(f"  Successfully connected to {_db_label(state)}.")
+    print("  Database ready.")
 
 
-def handle_build_knowledge_base(state: SessionState) -> None:
+def handle_rebuild_or_refresh_knowledge_base(state: SessionState) -> None:
     """
-    Phase 2 — Build Knowledge Base.
-    Uses the connected engine to extract schema, profile data, apply
-    semantic mapping, and save to semantic/knowledge_base.json.
-    Optionally enriches with AI and generates business glossary.
-    Prints a progress message after each step.
-    Never writes the file if any step fails.
+    Force rebuild of KB/glossary/vector assets for the active database.
     """
-    logger.info("User chose option 2: Build Knowledge Base")
+    logger.info("User chose option 6: Rebuild / Refresh Knowledge Base")
     if not state.app_service.is_database_connected():
         print("  No database connection. Please run option 1 first.")
         return
 
-    # Ask about AI semantic enrichment
-    try:
-        answer = _input("\n  Run AI semantic enrichment? (y/n): ").lower()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        answer = "n"
-
-    use_ai_enrichment = (answer == "y")
-    ai_backend = "local"
-
     print("\n  Building knowledge base…")
-    success, message, knowledge_base = state.app_service.build_knowledge_base(
-        use_ai_enrichment=use_ai_enrichment,
-        ai_backend=ai_backend,
+    success, message, knowledge_base = state.app_service.rebuild_or_refresh_knowledge_base(
+        use_ai_enrichment=True,
+        ai_backend=state.app_service.get_active_backend(),
     )
     if not success:
         logger.error(f"Knowledge base build failed: {message}")
         print(f"  Knowledge base build failed: {message}")
         return
 
-    if use_ai_enrichment:
-        enrichment_status, enrichment_message = state.app_service.get_last_ai_enrichment_result()
-        if enrichment_status == "completed":
-            print("  [OK] AI enrichment completed successfully")
-        elif enrichment_status == "partial":
-            print(f"  [OK] {enrichment_message}")
-        else:
-            print(f"  [OK] AI enrichment skipped/fallback used ({enrichment_message})")
+    enrichment_status, enrichment_message = state.app_service.get_last_ai_enrichment_result()
+    if enrichment_status == "completed":
+        print("  [OK] AI enrichment completed successfully")
+    elif enrichment_status == "partial":
+        print(f"  [OK] {enrichment_message}")
     else:
-        print("  [OK] AI enrichment skipped/fallback used")
+        print(f"  [OK] AI enrichment skipped/fallback used ({enrichment_message})")
 
     build_summary = state.app_service.get_last_build_summary()
     if build_summary:
@@ -345,6 +354,7 @@ def handle_build_knowledge_base(state: SessionState) -> None:
         print(f"  - persistence note: {persistence_status.get('persistence_error')}")
     if embedding_status.get("init_error"):
         print(f"  - backend note: {embedding_status.get('init_error')}")
+    print("  Database ready.")
     print("  Returning to main menu.")
 
 
@@ -362,11 +372,15 @@ def handle_ask_question(state: SessionState) -> None:
     6. Display the SQL.
     7. Save conversation session.
     """
-    logger.info("User chose option 3: Ask a Question")
+    logger.info("User chose option 2: Ask a Question")
     
     # ── Load knowledge base ───────────────────────────────────────────────
     if not state.app_service.is_database_connected():
-        print("  No database connection. Please run option 1 first, then build the knowledge base.")
+        print("  No database connection. Please run option 1 first.")
+        return
+
+    if not state.app_service.is_database_ready():
+        print("  Database is not ready. Connect a database and let SQLSense prepare the knowledge base first.")
         return
 
     success, message, knowledge_base = state.app_service.load_knowledge_base()
@@ -632,7 +646,7 @@ def handle_execute_last_sql(state: SessionState) -> None:
        — always runs, even if chart was skipped or failed
     ---------------------------------------------------------------
     """
-    logger.info("User chose option 4: Execute Last SQL")
+    logger.info("User chose option 3: Execute Last SQL")
     
     # ── Guard 1: need a SQL query ─────────────────────────────────────────
     sql = state.app_service.get_last_sql()
@@ -714,10 +728,10 @@ def handle_execute_last_sql(state: SessionState) -> None:
 
 def handle_ai_backend_settings(state: SessionState) -> None:
     """
-    AI Backend Settings submenu.
-    Shows and configures the active AI backend.
+    Semantic AI Settings submenu.
+    Shows and configures the KB enrichment backend only.
     """
-    logger.info("User chose option 5: AI Backend Settings")
+    logger.info("User chose option 4: Semantic AI Settings")
     last_test_success: bool | None = None
     last_test_message: str | None = None
 
@@ -730,7 +744,7 @@ def handle_ai_backend_settings(state: SessionState) -> None:
 
         print()
         print("=" * 52)
-        print("  AI Backend Settings")
+        print("  Semantic AI Settings")
         print("=" * 52)
         print(f"  Current backend: {backend_name}")
         print(f"  Model: {config.get('model', 'unknown')}")
@@ -772,7 +786,7 @@ def handle_ai_backend_settings(state: SessionState) -> None:
             last_test_success, last_test_message = state.app_service.test_backend_connection()
             continue
         elif choice == "5":
-            logger.info("User returned from AI Backend Settings")
+            logger.info("User returned from Semantic AI Settings")
             return
 
 
@@ -892,7 +906,7 @@ def handle_search_business_glossary(state: SessionState) -> None:
     Allows users to search for business terms and see their mappings
     to database tables and columns.
     """
-    logger.info("User chose option 6: Search Business Glossary")
+    logger.info("User chose option 5: Search Business Glossary")
     
     # Load the glossary using core service
     success, message, glossary = state.app_service.load_business_glossary()
@@ -949,27 +963,27 @@ def handle_choice(choice: int, state: SessionState) -> None:
     Catches all unexpected exceptions so no raw traceback ever reaches the user.
     
     Menu (CLI-only mode):
-      1) Connect Database
-      2) Build Knowledge Base
-      3) Ask a Question
-      4) Execute Last SQL
-      5) AI Backend Settings
-      6) Search Business Glossary
+      1) Connect Database / Auto Build KB
+      2) Ask a Question
+      3) Execute Last SQL
+      4) Semantic AI Settings
+      5) Search Business Glossary
+      6) Rebuild / Refresh Knowledge Base
       7) Exit
     """
     try:
         if choice == 1:
             handle_connect_database(state)
         elif choice == 2:
-            handle_build_knowledge_base(state)
-        elif choice == 3:
             handle_ask_question(state)
-        elif choice == 4:
+        elif choice == 3:
             handle_execute_last_sql(state)
-        elif choice == 5:
+        elif choice == 4:
             handle_ai_backend_settings(state)
-        elif choice == 6:
+        elif choice == 5:
             handle_search_business_glossary(state)
+        elif choice == 6:
+            handle_rebuild_or_refresh_knowledge_base(state)
         elif choice == 7:
             logger.info("User chose option 7: Exit")
             # End conversation session before exit

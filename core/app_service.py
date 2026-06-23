@@ -33,6 +33,18 @@ class AppService:
         self.chart_service = ChartService()
         self.insight_service = InsightService()
         self.ai_backend_service = get_ai_backend_service()
+        self.database_ready: bool = False
+        self.last_prepare_report: Dict[str, Any] = {}
+
+    def _reset_runtime_state(self) -> None:
+        """Clear question/execution state so a new database never reuses stale runtime context."""
+        self.last_pipeline_result = None
+        self.question_service.reset_conversation()
+        self.result_service.reset()
+        self.chart_service.reset()
+        self.insight_service.reset()
+        self.database_ready = False
+        self.last_prepare_report = {}
     
     # Database operations
     def connect_database(
@@ -64,12 +76,110 @@ class AppService:
         self,
         use_ai_enrichment: bool = False,
         ai_backend: str = "local",
+        force_rebuild: bool = False,
     ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
         """Build knowledge base."""
-        return self.database_service.build_knowledge_base(
+        success, message, knowledge_base = self.database_service.build_knowledge_base(
             use_ai_enrichment=use_ai_enrichment,
             ai_backend=ai_backend,
+            force_rebuild=force_rebuild,
         )
+        self.database_ready = bool(success and knowledge_base)
+        return success, message, knowledge_base
+
+    def connect_database_and_prepare(
+        self,
+        db_type: str = "mysql",
+        host: str = "localhost",
+        port: Optional[int] = None,
+        username: str = "",
+        password: str = "",
+        database: str = "",
+        sqlite_path: str = "",
+        use_ai_enrichment: bool = True,
+        ai_backend: Optional[str] = None,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Connect to the selected database and prepare KB/glossary/vector state in one flow.
+
+        Returns:
+            (success, message, report)
+        """
+        self._reset_runtime_state()
+        backend = ai_backend or self.ai_backend_service.get_active_backend()
+
+        report: Dict[str, Any] = {
+            "connected": False,
+            "kb_built": False,
+            "glossary_generated": False,
+            "vector_status": "not_built",
+            "vector_warning": "",
+            "ai_enrichment_status": "skipped",
+            "ai_enrichment_message": "AI enrichment skipped.",
+            "database_ready": False,
+        }
+
+        success, message, engine = self.connect_database(
+            db_type=db_type,
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            database=database,
+            sqlite_path=sqlite_path,
+        )
+        if not success:
+            self.last_prepare_report = report
+            return False, message, report
+
+        report["connected"] = engine is not None
+
+        success, message, knowledge_base = self.build_knowledge_base(
+            use_ai_enrichment=use_ai_enrichment,
+            ai_backend=backend,
+            force_rebuild=True,
+        )
+        report["kb_built"] = bool(success and knowledge_base)
+        ai_status, ai_message = self.get_last_ai_enrichment_result()
+        report["ai_enrichment_status"] = ai_status
+        report["ai_enrichment_message"] = ai_message
+
+        if not success or not knowledge_base:
+            self.database_ready = False
+            report["database_ready"] = False
+            self.last_prepare_report = report
+            return False, message, report
+
+        glossary = self.database_service.get_business_glossary()
+        report["glossary_generated"] = isinstance(glossary, dict)
+
+        vector_status = self.get_vector_status()
+        report["vector_status"] = str(vector_status.get("index_status") or "not_built")
+        persistence = vector_status.get("persistence", {})
+        if report["vector_status"] != "ready":
+            reason = str(persistence.get("persistence_error") or persistence.get("stale_reason") or "vector index unavailable")
+            report["vector_warning"] = reason
+
+        self.database_ready = True
+        report["database_ready"] = True
+        self.last_prepare_report = report
+        return True, "Database connected and knowledge assets prepared successfully", report
+
+    def rebuild_or_refresh_knowledge_base(
+        self,
+        use_ai_enrichment: bool = True,
+        ai_backend: Optional[str] = None,
+    ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+        """Force a fresh KB/glossary/vector rebuild for the active database."""
+        backend = ai_backend or self.ai_backend_service.get_active_backend()
+        self.database_ready = False
+        success, message, knowledge_base = self.build_knowledge_base(
+            use_ai_enrichment=use_ai_enrichment,
+            ai_backend=backend,
+            force_rebuild=True,
+        )
+        self.database_ready = bool(success and knowledge_base)
+        return success, message, knowledge_base
     
     def load_knowledge_base(self) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
         """Load knowledge base."""
@@ -122,6 +232,8 @@ class AppService:
         ai_backend: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         """Process question and generate SQL."""
+        if not self.database_ready:
+            return False, "Database is not ready", None, "Database is not ready. Connect a database and let SQLSense prepare the knowledge base first."
         knowledge_base = self.database_service.get_knowledge_base()
         if not knowledge_base:
             return False, "Knowledge base not loaded", None, None
@@ -176,6 +288,14 @@ class AppService:
     def get_last_pipeline_result(self):
         """Get the latest structured query-pipeline result."""
         return self.last_pipeline_result
+
+    def is_database_ready(self) -> bool:
+        """Return whether the active database is connected and its KB assets are ready."""
+        return bool(self.database_ready and self.database_service.get_knowledge_base())
+
+    def get_last_prepare_report(self) -> Dict[str, Any]:
+        """Return the latest database connect/prepare workflow report for CLI status messages."""
+        return dict(self.last_prepare_report)
     
     # SQL execution
     def execute_sql(
@@ -346,6 +466,7 @@ class AppService:
         success, message, kb = self.build_knowledge_base(
             use_ai_enrichment=use_ai_enrichment,
             ai_backend=self.get_active_backend(),
+            force_rebuild=True,
         )
         if not success:
             return False, f"Knowledge base build failed: {message}"
@@ -357,6 +478,7 @@ class AppService:
         
         # Reset conversation
         self.reset_conversation()
+        self.database_ready = True
         
         return True, "Database initialized successfully"
     

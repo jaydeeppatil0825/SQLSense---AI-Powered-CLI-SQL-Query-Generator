@@ -10,7 +10,7 @@ def test_main_menu_shows_backend_settings(capsys):
 
     output = capsys.readouterr().out
     assert "Ask a Question / Ask Business Question" in output
-    assert "AI Backend Settings" in output
+    assert "Semantic AI Settings" in output
     assert "Backend  :" in output
 
 
