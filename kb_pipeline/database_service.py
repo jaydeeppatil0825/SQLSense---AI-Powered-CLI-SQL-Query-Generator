@@ -29,6 +29,7 @@ from kb_pipeline.ai_semantic_enricher import (
 from utils.file_utils import load_json, save_json
 from utils.logger import get_logger
 from kb_pipeline.vector.embedding_service import EmbeddingService
+from kb_pipeline.vector.chroma_store import ChromaStore, HybridVectorRetriever
 from kb_pipeline.vector.index_builder import VectorIndexBuilder
 from kb_pipeline.vector.persistence import VectorIndexPersistence
 from kb_pipeline.vector.retriever import VectorRetriever
@@ -55,7 +56,9 @@ class DatabaseService:
         self.embedding_service = EmbeddingService()
         self.vector_index_builder = VectorIndexBuilder(self.embedding_service)
         self.vector_index_storage = VectorIndexPersistence()
-        self.vector_retriever: Optional[VectorRetriever] = None
+        self.chroma_store = ChromaStore(self.embedding_service)
+        self.vector_retriever: Optional[Any] = None
+        self.vector_fallback_retriever: Optional[VectorRetriever] = None
         self.vector_index_status: str = "not_built"
         self.vector_index_details: Dict[str, Any] = self._make_vector_index_details(
             source="none",
@@ -85,6 +88,7 @@ class DatabaseService:
             self.last_build_summary = {}
 
         self.vector_retriever = None
+        self.vector_fallback_retriever = None
         self.vector_index_status = index_status
         self.vector_index_details = self._make_vector_index_details(
             source=source,
@@ -745,6 +749,10 @@ class DatabaseService:
             "embedding_backend": self.embedding_service.get_backend_name(),
             "embedding_model": self.embedding_service.get_model_name(),
             "embedding_dimension": self.embedding_service.get_dimension(),
+            "retrieval_backend": "fallback",
+            "chroma_ready": False,
+            "chroma_collection": "",
+            "chroma_error": "",
         }
         details.update(overrides)
         return details
@@ -817,15 +825,28 @@ class DatabaseService:
         )
         if not loaded:
             self.vector_retriever = None
+            self.vector_fallback_retriever = None
             self.vector_index_status = "not_built"
             self.vector_index_details = self._make_vector_index_details(**details)
             return
 
-        retriever = VectorRetriever(self.embedding_service)
-        retriever.add_documents(documents)
-        self.vector_retriever = retriever
+        fallback_retriever = VectorRetriever(self.embedding_service)
+        fallback_retriever.add_documents(documents)
+        self.vector_fallback_retriever = fallback_retriever
+
+        chroma_loaded, _, chroma_details = self.chroma_store.load_current_collection(self._vector_source_context())
+        if chroma_loaded:
+            self.vector_retriever = HybridVectorRetriever(self.chroma_store, fallback_retriever)
+        else:
+            self.vector_retriever = fallback_retriever
         self.vector_index_status = "ready"
-        self.vector_index_details = self._make_vector_index_details(**details)
+        self.vector_index_details = self._make_vector_index_details(
+            **details,
+            retrieval_backend="chroma" if chroma_loaded else "fallback",
+            chroma_ready=bool(chroma_loaded),
+            chroma_collection=str(chroma_details.get("collection_name", "") or ""),
+            chroma_error=str(chroma_details.get("error", "") or ""),
+        )
 
     def refresh_vector_index(self) -> None:
         """
@@ -836,6 +857,7 @@ class DatabaseService:
         """
         if not self.knowledge_base:
             self.vector_retriever = None
+            self.vector_fallback_retriever = None
             self.vector_index_status = "not_built"
             self.vector_index_details = self._make_vector_index_details(
                 source="none",
@@ -864,6 +886,7 @@ class DatabaseService:
             }
         ):
             self.vector_retriever = None
+            self.vector_fallback_retriever = None
             self.vector_index_status = "stale"
             stale_details = dict(inspection)
             stale_details["source"] = "stale"
@@ -879,11 +902,31 @@ class DatabaseService:
                 source_context=self._vector_source_context(),
             )
             if loaded:
-                retriever = VectorRetriever(self.embedding_service)
-                retriever.add_documents(documents)
-                self.vector_retriever = retriever
+                fallback_retriever = VectorRetriever(self.embedding_service)
+                fallback_retriever.add_documents(documents)
+                self.vector_fallback_retriever = fallback_retriever
+                chroma_loaded, _, chroma_details = self.chroma_store.load_current_collection(self._vector_source_context())
+                if not chroma_loaded:
+                    try:
+                        chroma_loaded, _, chroma_details = self.chroma_store.build_or_refresh_chroma_index(
+                            documents,
+                            self._vector_source_context(),
+                        )
+                    except Exception as exc:
+                        chroma_loaded = False
+                        chroma_details = {"error": str(exc)}
+                if chroma_loaded:
+                    self.vector_retriever = HybridVectorRetriever(self.chroma_store, fallback_retriever)
+                else:
+                    self.vector_retriever = fallback_retriever
                 self.vector_index_status = "ready"
-                self.vector_index_details = self._make_vector_index_details(**load_details)
+                self.vector_index_details = self._make_vector_index_details(
+                    **load_details,
+                    retrieval_backend="chroma" if chroma_loaded else "fallback",
+                    chroma_ready=bool(chroma_loaded),
+                    chroma_collection=str(chroma_details.get("collection_name", "") or ""),
+                    chroma_error=str(chroma_details.get("error", "") or ""),
+                )
                 logger.info(message)
                 return
 
@@ -892,13 +935,14 @@ class DatabaseService:
 
         try:
             documents = self._build_vector_documents()
-            retriever = VectorRetriever(self.embedding_service)
-            retriever.add_documents(documents)
-            self.vector_retriever = retriever
+            fallback_retriever = VectorRetriever(self.embedding_service)
+            fallback_retriever.add_documents(documents)
+            self.vector_fallback_retriever = fallback_retriever
             self.vector_index_status = "ready"
         except Exception as exc:
             logger.error(f"Vector index rebuild failed: {exc}")
             self.vector_retriever = None
+            self.vector_fallback_retriever = None
             self.vector_index_status = "degraded"
             failure_details = dict(inspection)
             failure_details.update(
@@ -920,6 +964,26 @@ class DatabaseService:
         )
         if not saved:
             logger.warning(message)
+
+        chroma_ready = False
+        chroma_details: Dict[str, Any] = {}
+        chroma_message = ""
+        try:
+            chroma_ready, chroma_message, chroma_details = self.chroma_store.build_or_refresh_chroma_index(
+                documents,
+                self._vector_source_context(),
+            )
+        except Exception as exc:
+            chroma_ready = False
+            chroma_message = str(exc)
+            chroma_details = {"error": str(exc)}
+            logger.warning(f"Chroma index refresh failed; using fallback vector retriever: {exc}")
+
+        self.vector_retriever = (
+            HybridVectorRetriever(self.chroma_store, self.vector_fallback_retriever)
+            if self.vector_fallback_retriever
+            else (self.chroma_store if chroma_ready else None)
+        )
         final_stale_reason = rebuild_reason or save_details.get("stale_reason", "")
         rebuilt_details = dict(save_details)
         rebuilt_details.update(
@@ -932,6 +996,10 @@ class DatabaseService:
                 "is_fresh": True,
                 "stale_reason": final_stale_reason,
                 "document_count": len(documents),
+                "retrieval_backend": "chroma" if chroma_ready else "fallback",
+                "chroma_ready": bool(chroma_ready),
+                "chroma_collection": str(chroma_details.get("collection_name", "") or ""),
+                "chroma_error": "" if chroma_ready else str(chroma_details.get("error", "") or chroma_message or ""),
             }
         )
         self.vector_index_details = self._make_vector_index_details(**rebuilt_details)
@@ -954,6 +1022,7 @@ class DatabaseService:
             "embedding": self.get_embedding_status(),
             "retriever": retriever_status,
             "persistence": dict(self.vector_index_details),
+            "chroma": self.chroma_store.get_status(),
         }
 
     def get_last_ai_enrichment_result(self) -> tuple[str, str]:

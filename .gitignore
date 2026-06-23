@@ -25,6 +25,7 @@ htmlcov/
 semantic/knowledge_base.json
 semantic/business_glossary.json
 vector_store/index/
+vector_store/chroma/
 
 # Generated output files
 output/

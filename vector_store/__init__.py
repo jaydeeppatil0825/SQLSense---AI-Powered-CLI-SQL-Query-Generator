@@ -11,5 +11,13 @@ from kb_pipeline.vector.index_builder import VectorIndexBuilder
 from kb_pipeline.vector.retriever import VectorRetriever
 from kb_pipeline.vector.embedding_service import EmbeddingService
 from kb_pipeline.vector.persistence import VectorIndexPersistence
+from kb_pipeline.vector.chroma_store import ChromaStore, HybridVectorRetriever
 
-__all__ = ["VectorIndexBuilder", "VectorRetriever", "EmbeddingService", "VectorIndexPersistence"]
+__all__ = [
+    "VectorIndexBuilder",
+    "VectorRetriever",
+    "EmbeddingService",
+    "VectorIndexPersistence",
+    "ChromaStore",
+    "HybridVectorRetriever",
+]
