@@ -173,6 +173,71 @@ def _clean_ai_terms(values: list[str]) -> list[str]:
     return _unique_preserve_order(cleaned)
 
 
+def _term_source_confidence(
+    term: str,
+    *,
+    schema_terms: list[str],
+    ai_terms: list[str],
+    ai_confidence: float,
+    target_type: str,
+) -> float:
+    normalized_term = _normalize(term)
+    schema_normalized = {_normalize(item) for item in schema_terms}
+    ai_normalized = {_normalize(item) for item in ai_terms}
+    if normalized_term in schema_normalized:
+        return 0.99 if target_type == "table" else 0.95
+    if normalized_term in ai_normalized:
+        return round(min(max(ai_confidence or 0.8, 0.6), 0.94), 2)
+    return 0.75
+
+
+def _validated_primary_terms(
+    terms: list[str],
+    *,
+    related_terms: list[str],
+    related_tables: list[str],
+    fallback_terms: list[str],
+) -> list[str]:
+    related_blocklist = {
+        _normalize(item)
+        for item in (
+            list(related_terms or [])
+            + [_humanize(table) for table in (related_tables or [])]
+            + [_singularize(table) for table in [_humanize(value) for value in (related_tables or [])]]
+        )
+        if _normalize(item)
+    }
+    cleaned: list[str] = []
+    for term in terms:
+        readable = _humanize(term)
+        normalized = _normalize(readable)
+        if not readable or not normalized:
+            continue
+        if normalized in related_blocklist:
+            continue
+        cleaned.append(readable)
+    cleaned = _unique_preserve_order(cleaned)
+    if cleaned:
+        return cleaned
+    return _unique_preserve_order([_humanize(term) for term in fallback_terms if _humanize(term)])
+
+
+def _normalized_mapped_tables(
+    mapped_tables: list[str] | None,
+    mapped_columns: list[dict[str, Any]] | None,
+) -> list[str]:
+    tables = list(mapped_tables or [])
+    for mapping in mapped_columns or []:
+        table_name = str(mapping.get("table", "")).strip()
+        if table_name:
+            tables.append(table_name)
+    return _unique_preserve_order(tables)
+
+
+def _normalized_related_tables(related_tables: list[str] | None) -> list[str]:
+    return _unique_preserve_order([str(item).strip() for item in (related_tables or []) if str(item).strip()])
+
+
 def _entry_sources(table_data: dict[str, Any], *, includes_ai: bool, includes_relationships: bool) -> list[str]:
     sources = ["schema_identifier"]
     if includes_ai:
@@ -204,13 +269,27 @@ def _mapping_priority(*, mapping_kind: str, structural_facts: dict[str, Any] | N
 def _strip_internal_fields(glossary: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     cleaned: dict[str, dict[str, Any]] = {}
     for term, entry in glossary.items():
-        primary_terms = _unique_preserve_order(list(entry.get("primary_terms", []) or []))
-        related_terms = _unique_preserve_order(list(entry.get("related_terms", []) or []))
-        mapped_tables = _unique_preserve_order(list(entry.get("mapped_tables", []) or []))
+        target_type = str(entry.get("target_type", "") or "column").strip().lower()
+        if target_type not in {"table", "column"}:
+            target_type = "column"
+        usage_scope = str(entry.get("usage_scope", "") or "primary_match").strip().lower()
+        if usage_scope not in {"primary_match", "table_lookup", "column_lookup"}:
+            usage_scope = "table_lookup" if target_type == "table" else "column_lookup"
         mapped_columns = list(entry.get("mapped_columns", []) or [])
-        related_tables = _unique_preserve_order(list(entry.get("related_tables", []) or []))
+        mapped_tables = _normalized_mapped_tables(list(entry.get("mapped_tables", []) or []), mapped_columns)
+        related_tables = _normalized_related_tables(list(entry.get("related_tables", []) or []))
+        related_terms = _unique_preserve_order(list(entry.get("related_terms", []) or []))
+        primary_terms = _validated_primary_terms(
+            list(entry.get("primary_terms", []) or entry.get("business_terms", []) or []),
+            related_terms=related_terms,
+            related_tables=related_tables,
+            fallback_terms=[term],
+        )
+        confidence = float(entry.get("confidence", 0.0) or 0.0)
+        confidence = round(min(max(confidence, 0.0), 1.0), 2) if confidence else 0.75
         cleaned[term] = {
             "description": entry.get("description", ""),
+            "target_type": target_type,
             "mapped_tables": mapped_tables,
             "mapped_columns": mapped_columns,
             "related_tables": related_tables,
@@ -218,6 +297,8 @@ def _strip_internal_fields(glossary: dict[str, dict[str, Any]]) -> dict[str, dic
             "primary_terms": primary_terms,
             "related_terms": related_terms,
             "business_terms": list(primary_terms),
+            "usage_scope": usage_scope,
+            "confidence": confidence,
             "sources": _unique_preserve_order(list(entry.get("sources", []) or [])),
             "relationship_sources": _unique_preserve_order(list(entry.get("relationship_sources", []) or [])),
         }
@@ -240,6 +321,8 @@ def _add_entry(
     mapping_kind: str = "column",
     structural_facts: dict[str, Any] | None = None,
     allow_mapping_merge: bool = True,
+    usage_scope: str | None = None,
+    confidence: float | None = None,
 ) -> None:
     normalized_term = _normalize(term)
     if not normalized_term:
@@ -249,6 +332,7 @@ def _add_entry(
         normalized_term,
         {
             "description": description,
+            "target_type": "table" if mapping_kind == "table" else "column",
             "mapped_tables": [],
             "mapped_columns": [],
             "related_tables": [],
@@ -256,6 +340,8 @@ def _add_entry(
             "primary_terms": [],
             "related_terms": [],
             "business_terms": [],
+            "usage_scope": usage_scope or ("table_lookup" if mapping_kind == "table" else "column_lookup"),
+            "confidence": round(min(max(float(confidence or 0.0), 0.0), 1.0), 2) if confidence is not None else 0.75,
             "sources": [],
             "relationship_sources": [],
             "__mapping_priority": 999,
@@ -316,6 +402,8 @@ def _add_entry(
     elif should_refresh_single_mapping:
         entry["related_terms"] = _unique_preserve_order(list(related_terms or []))[:8]
     entry["business_terms"] = list(entry["primary_terms"])
+    if confidence is not None:
+        entry["confidence"] = max(float(entry.get("confidence", 0.0) or 0.0), round(min(max(float(confidence), 0.0), 1.0), 2))
     entry["sources"] = _unique_preserve_order(
         list(entry.get("sources", [])) + list(sources or [])
     )
@@ -360,8 +448,16 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
         table_mappings = _representative_mappings(table_name, table_data)
         relationship_terms, related_tables, relationship_sources = _relationship_context(table_name, table_data)
         table_ai_terms = _clean_ai_terms(table_data.get("business_terms", []))
+        table_ai_metadata = table_data.get("ai_metadata", {}) if isinstance(table_data.get("ai_metadata"), dict) else {}
+        table_ai_confidence = float(table_ai_metadata.get("confidence", 0.0) or 0.0)
         table_terms = _unique_preserve_order(
             _schema_terms_for_table(table_name) + table_ai_terms
+        )
+        validated_table_terms = _validated_primary_terms(
+            table_terms,
+            related_terms=relationship_terms,
+            related_tables=related_tables,
+            fallback_terms=_schema_terms_for_table(table_name),
         )
         table_sources = _entry_sources(
             table_data,
@@ -369,7 +465,7 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
             includes_relationships=bool(relationship_terms),
         )
 
-        for term in table_terms:
+        for term in validated_table_terms:
             _add_entry(
                 glossary,
                 term,
@@ -377,13 +473,21 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                 mapped_tables=[table_name],
                 mappings=table_mappings,
                 example_questions=list(table_data.get("possible_business_questions", [])),
-                primary_terms=table_terms,
+                primary_terms=validated_table_terms,
                 related_terms=relationship_terms,
                 related_tables=related_tables,
                 sources=table_sources,
                 relationship_sources=relationship_sources,
                 mapping_kind="table",
                 allow_mapping_merge=True,
+                usage_scope="table_lookup",
+                confidence=_term_source_confidence(
+                    term,
+                    schema_terms=_schema_terms_for_table(table_name),
+                    ai_terms=table_ai_terms,
+                    ai_confidence=table_ai_confidence,
+                    target_type="table",
+                ),
             )
 
         for column in table_data.get("columns", []):
@@ -402,6 +506,8 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                 "confidence": "high" if column_business_terms(column) else "medium",
             }
             column_ai_terms = _clean_ai_terms(column_business_terms(column))
+            column_ai_meta = column_ai_metadata(column)
+            column_ai_confidence = float(column_ai_meta.get("confidence", 0.0) or 0.0)
             column_terms = _unique_preserve_order(
                 _schema_terms_for_column(column_name) + column_ai_terms
             )
@@ -414,8 +520,14 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
             column_related_terms = relationship_terms if structural_facts.get("is_foreign_key") else []
             column_related_tables = related_tables if structural_facts.get("is_foreign_key") else []
             column_relationship_sources = relationship_sources if structural_facts.get("is_foreign_key") else []
+            validated_column_terms = _validated_primary_terms(
+                column_terms,
+                related_terms=column_related_terms,
+                related_tables=column_related_tables,
+                fallback_terms=_schema_terms_for_column(column_name),
+            )
 
-            for term in column_terms:
+            for term in validated_column_terms:
                 _add_entry(
                     glossary,
                     term,
@@ -423,7 +535,7 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                     mapped_tables=[table_name],
                     mappings=[mapping],
                     example_questions=[],
-                    primary_terms=column_terms,
+                    primary_terms=validated_column_terms,
                     related_terms=column_related_terms,
                     related_tables=column_related_tables,
                     sources=column_sources,
@@ -431,6 +543,14 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                     mapping_kind="column",
                     structural_facts=structural_facts,
                     allow_mapping_merge=False,
+                    usage_scope="column_lookup",
+                    confidence=_term_source_confidence(
+                        term,
+                        schema_terms=_schema_terms_for_column(column_name),
+                        ai_terms=column_ai_terms,
+                        ai_confidence=column_ai_confidence,
+                        target_type="column",
+                    ),
                 )
 
     logger.info(f"Generated glossary with {len(glossary)} terms")
@@ -459,7 +579,9 @@ def load_business_glossary(glossary_path: str = "semantic/business_glossary.json
     try:
         glossary = load_json(glossary_path)
         logger.info(f"Business glossary loaded from {glossary_path}")
-        return glossary if isinstance(glossary, dict) and glossary else get_default_business_glossary()
+        if isinstance(glossary, dict) and glossary:
+            return _strip_internal_fields(glossary)
+        return get_default_business_glossary()
     except FileNotFoundError:
         logger.warning(f"Business glossary not found at {glossary_path}")
         return get_default_business_glossary()

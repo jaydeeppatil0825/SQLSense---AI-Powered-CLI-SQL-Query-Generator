@@ -1,21 +1,21 @@
 """
 core/insight_service.py
 =======================
-Insight service for insights generation.
+Runtime insight service boundary.
 
-This service handles CLI insight generation from query results.
+AI is allowed only during KB semantic enrichment. Runtime insight generation
+stays disabled so the CLI remains deterministic after KB build.
 """
 
 from typing import Optional, List, Dict, Any
 
-from insights.insight_generator import generate_insights
 from utils.logger import get_logger
 
 logger = get_logger()
 
 
 class InsightService:
-    """Service for insights generation."""
+    """Service for runtime insight handling."""
     
     def __init__(self):
         self.last_insights: Optional[List[str]] = None
@@ -30,39 +30,29 @@ class InsightService:
         ai_backend: str = "local",
     ) -> tuple[bool, str, Optional[List[str]]]:
         """
-        Generate insights from query results.
+        Runtime insight generation is disabled.
         
         Args:
             user_question: Original user question
             sql: SQL that was executed
             rows: Query results
             knowledge_base: Knowledge base for context
-            ai_backend: AI backend to use
+            ai_backend: Kept for backward compatibility; not used.
         
         Returns:
             (success, message, insights)
         """
         if not rows:
             return False, "No data to analyze", None
-        
-        try:
-            insights = generate_insights(
-                user_question=user_question,
-                sql=sql,
-                rows=rows,
-                knowledge_base=knowledge_base,
-                backend=ai_backend,
-            )
-            logger.info(f"Generated {len(insights)} insights")
-            
-            # Store insights
-            self.last_insights = insights
-            self.last_insights_skipped = False
-            
-            return True, "Insights generated successfully", insights
-        except Exception as e:
-            logger.error(f"Insight generation failed: {e}")
-            return False, f"Insight generation failed: {e}", None
+
+        self.last_insights = None
+        self.last_insights_skipped = True
+        logger.info("Runtime insight generation skipped because AI is restricted to KB enrichment.")
+        return (
+            False,
+            "Runtime insight generation is disabled. AI is used only during KB semantic enrichment.",
+            None,
+        )
     
     def get_last_insights(self) -> Optional[List[str]]:
         """Get last generated insights."""

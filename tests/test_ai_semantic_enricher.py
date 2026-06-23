@@ -122,7 +122,8 @@ def test_candidate_prompt_contains_schema_and_profile_evidence(monkeypatch):
     assert "nearby=['storage_id', 'checked_on']" in candidate_prompt or "nearby=['item_id', 'storage_id', 'checked_on']" in candidate_prompt
     assert "stock_positions.item_id -> items.item_id" in candidate_prompt
     assert "Do not copy names, labels, cities, dates, amounts, or codes from rows." in captured_messages[0][1]["content"]
-    assert enriched["stock_positions"]["columns"][3]["semantic_type"] == "quantity"
+    assert enriched["stock_positions"]["columns"][3]["semantic_type"] == "numeric_candidate"
+    assert enriched["stock_positions"]["columns"][3]["ai_metadata"]["ai_semantic_type"] == "quantity"
 
 
 def test_enrichment_applies_final_semantic_meaning_to_candidates_only(monkeypatch):
@@ -182,13 +183,18 @@ def test_enrichment_applies_final_semantic_meaning_to_candidates_only(monkeypatc
     refund_value = enriched["refund_logs"]["columns"][1]
     reason_text = enriched["refund_logs"]["columns"][2]
 
-    assert refund_value["semantic_type"] == "money"
-    assert refund_value["is_measure"] is True
-    assert refund_value["business_description"] == "Refund amount"
-    assert "numeric values and context indicate money" in refund_value["reason"]
-    assert reason_text["semantic_type"] == "text"
-    assert reason_text["is_dimension"] is True
-    assert reason_text["business_description"] == "Refund reason"
+    assert refund_value["semantic_type"] == "numeric_candidate"
+    assert refund_value["ai_metadata"]["ai_semantic_type"] == "money"
+    assert refund_value["planner_roles"]["measure_candidate"] is True
+    assert refund_value["ai_metadata"]["business_description"] == "Refund amount"
+    assert "numeric values and context indicate money" in refund_value["ai_metadata"]["reason"]
+    assert reason_text["semantic_type"] == "text_candidate"
+    assert reason_text["ai_metadata"]["ai_semantic_type"] == "text"
+    assert reason_text["planner_roles"]["dimension_candidate"] is True
+    assert reason_text["ai_metadata"]["business_description"] == "Refund reason"
+    refund_logs_ai = enriched["refund_logs"].get("ai_metadata")
+    assert refund_logs_ai
+    assert refund_logs_ai["table_description"] == "Refund events"
 
 
 def test_reason_like_text_fields_normalize_name_to_text(monkeypatch):
@@ -230,8 +236,9 @@ def test_reason_like_text_fields_normalize_name_to_text(monkeypatch):
     enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
     reason_text = enriched["refund_logs"]["columns"][0]
 
-    assert reason_text["semantic_type"] == "text"
-    assert reason_text["is_dimension"] is True
+    assert reason_text["semantic_type"] == "text_candidate"
+    assert reason_text["ai_metadata"]["ai_semantic_type"] == "text"
+    assert reason_text["planner_roles"]["dimension_candidate"] is True
 
 
 def test_structural_facts_override_ai_semantic_changes(monkeypatch):
@@ -300,7 +307,62 @@ def test_structural_facts_override_ai_semantic_changes(monkeypatch):
     assert item_id["semantic_type"] == "id"
     assert checked_on["semantic_type"] == "date"
     assert checked_on["is_date"] is True
-    assert units_available["semantic_type"] == "quantity"
+    assert units_available["semantic_type"] == "numeric_candidate"
+    assert units_available["ai_metadata"]["ai_semantic_type"] == "quantity"
+
+
+def test_ai_enrichment_stores_table_and_planner_role_metadata(monkeypatch):
+    knowledge_base = {
+        "stock_positions": {
+            "table_name": "stock_positions",
+            "primary_keys": ["stock_id"],
+            "foreign_keys": [],
+            "columns": [
+                {"name": "stock_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "units_available", "type": "INTEGER", "semantic_type": "numeric_candidate"},
+            ],
+        }
+    }
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        if "q" in response_format.get("required", []):
+            return json.dumps({"d": "Stock records", "p": "Tracks stock positions", "cf": 0.88, "r": "table context is clear", "q": []})
+        return json.dumps(
+            {
+                "c": {
+                    "units_available": {
+                        "d": "Available units",
+                        "b": ["available units"],
+                        "s": "quantity",
+                        "cf": 0.91,
+                        "r": "values indicate quantities",
+                        "me": True,
+                        "di": False,
+                        "dt": False,
+                        "pr": {
+                            "measure_candidate": True,
+                            "dimension_candidate": False,
+                            "filter_candidate": False,
+                            "join_candidate": False,
+                            "date_candidate": False,
+                            "sort_candidate": True,
+                        },
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
+
+    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
+    table_ai = enriched["stock_positions"]["ai_metadata"]
+    units_available = enriched["stock_positions"]["columns"][1]
+
+    assert table_ai["table_description"] == "Stock records"
+    assert table_ai["confidence"] == 0.88
+    assert table_ai["reason"] == "table context is clear"
+    assert units_available["ai_metadata"]["ai_semantic_type"] == "quantity"
+    assert units_available["planner_roles"]["measure_candidate"] is True
 
 
 def test_enrich_knowledge_base_allows_partial_table_fallback(monkeypatch):
@@ -349,8 +411,10 @@ def test_enrich_knowledge_base_allows_partial_table_fallback(monkeypatch):
     enriched_tables, fallback_tables = get_last_enrichment_report()
 
     assert calls == ["orders", "orders", "customers"]
-    assert enriched["orders"]["columns"][0]["semantic_type"] == "money"
-    assert "business_description" not in enriched["customers"]
+    assert enriched["orders"]["columns"][0]["semantic_type"] == "numeric_candidate"
+    assert enriched["orders"]["columns"][0]["ai_metadata"]["ai_semantic_type"] == "money"
+    assert "business_description" not in enriched["customers"]["columns"][0]
+    assert "ai_metadata" not in enriched["customers"]["columns"][0]
     assert enriched_tables == ["orders"]
     assert fallback_tables == {"customers": "Local AI timed out"}
 
@@ -484,13 +548,13 @@ def test_ai_sample_value_echoes_are_replaced_with_neutral_metadata(monkeypatch):
 
     account_label = enriched["accounts"]["columns"][0]
     item_label = enriched["stock_positions"]["columns"][1]
-    assert account_label["business_description"] != "Nova Traders"
-    assert "Nova Traders" not in account_label["business_terms"]
-    assert "Prime Retail" not in account_label["business_terms"]
-    assert "BlueLine Stores" not in account_label["business_terms"]
-    assert "account label" in account_label["business_terms"]
-    assert item_label["business_description"] != "Office Chair"
-    assert "Office Chair" not in item_label["business_terms"]
+    assert account_label["ai_metadata"]["business_description"] != "Nova Traders"
+    assert "Nova Traders" not in account_label["ai_metadata"]["business_terms"]
+    assert "Prime Retail" not in account_label["ai_metadata"]["business_terms"]
+    assert "BlueLine Stores" not in account_label["ai_metadata"]["business_terms"]
+    assert "account label" in account_label["ai_metadata"]["business_terms"]
+    assert item_label["ai_metadata"]["business_description"] != "Office Chair"
+    assert "Office Chair" not in item_label["ai_metadata"]["business_terms"]
 
 
 def test_ai_identifier_like_metadata_is_rewritten_into_useful_terms(monkeypatch):
@@ -617,16 +681,16 @@ def test_ai_identifier_like_metadata_is_rewritten_into_useful_terms(monkeypatch)
     units_available = enriched["stock_positions"]["columns"][3]
 
     assert enriched["stock_positions"]["business_purpose"] == "Stores stock position records linked to item and storage point."
-    assert deal_value["business_description"] == "Description for deal value field."
-    assert deal_value["business_terms"] == ["deal value"]
-    assert deal_value["reason"] == "Candidate evidence: numeric-like type or numeric-style column meaning."
-    assert deal_value["is_measure"] is True
+    assert deal_value["ai_metadata"]["business_description"] == "Description for deal value field."
+    assert deal_value["ai_metadata"]["business_terms"] == ["deal value"]
+    assert deal_value["ai_metadata"]["reason"] == "Candidate evidence: numeric-like type or numeric-style column meaning."
+    assert deal_value["planner_roles"]["measure_candidate"] is True
 
-    assert account_label["business_description"] == "Description for account label field."
-    assert account_label["business_terms"] == ["account label"]
-    assert account_label["is_dimension"] is True
+    assert account_label["ai_metadata"]["business_description"] == "Description for account label field."
+    assert account_label["ai_metadata"]["business_terms"] == ["account label"]
+    assert account_label["planner_roles"]["dimension_candidate"] is True
 
-    assert units_available["business_description"] == "Description for units available field."
-    assert units_available["business_terms"] == ["units available"]
-    assert units_available["reason"] == "Candidate evidence: numeric-like type or numeric-style column meaning."
-    assert units_available["is_measure"] is True
+    assert units_available["ai_metadata"]["business_description"] == "Description for units available field."
+    assert units_available["ai_metadata"]["business_terms"] == ["units available"]
+    assert units_available["ai_metadata"]["reason"] == "Candidate evidence: numeric-like type or numeric-style column meaning."
+    assert units_available["planner_roles"]["measure_candidate"] is True

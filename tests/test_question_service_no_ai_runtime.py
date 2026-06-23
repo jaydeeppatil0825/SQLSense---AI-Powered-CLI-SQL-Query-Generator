@@ -6,7 +6,11 @@ Test to protect Phase 2 changes - ensures QuestionService does not import or cal
 
 from pathlib import Path
 
+import pytest
+
+from core.insight_service import InsightService
 from sql_pipeline.question_service import QuestionService
+from sql_pipeline.sql_generator import _call_ai_backend, generate_sql, generate_sql_with_retry
 
 
 RELATIONSHIP_KB = {
@@ -101,3 +105,30 @@ def test_count_client_singular_uses_rule_based_without_joins():
     assert context["selected_table_names"] == ["clients"]
     assert context["join_paths"] == []
     assert context["route_used"] == "rule-based"
+
+
+def test_runtime_ai_sql_helpers_are_blocked():
+    with pytest.raises(RuntimeError):
+        _call_ai_backend([], backend="local")
+    with pytest.raises(RuntimeError):
+        generate_sql()
+    with pytest.raises(RuntimeError):
+        generate_sql_with_retry()
+
+
+def test_runtime_insight_generation_is_disabled():
+    service = InsightService()
+
+    success, message, insights = service.generate_insights(
+        user_question="show all client",
+        sql="SELECT client_id, client_name FROM clients;",
+        rows=[{"client_id": 1, "client_name": "Alpha"}],
+        knowledge_base=RELATIONSHIP_KB,
+        ai_backend="local",
+    )
+
+    assert success is False
+    assert insights is None
+    assert "disabled" in message.lower()
+    assert service.get_last_insights() is None
+    assert service.get_last_insights_skipped() is True

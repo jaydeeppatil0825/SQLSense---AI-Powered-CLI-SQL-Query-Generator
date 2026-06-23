@@ -39,6 +39,9 @@ def test_generate_business_glossary_from_schema_facts_only():
     assert glossary["total due"]["mapped_columns"][0]["table"] == "invoice_headers"
     assert glossary["total due"]["mapped_columns"][0]["column"] == "total_due"
     assert glossary["total due"]["sources"] == ["schema_identifier"]
+    assert glossary["total due"]["target_type"] == "column"
+    assert glossary["total due"]["usage_scope"] == "column_lookup"
+    assert isinstance(glossary["total due"]["confidence"], float)
     assert glossary["total due"]["primary_terms"] == ["total due"]
     assert glossary["total due"]["business_terms"] == ["total due"]
     assert glossary["total due"]["related_terms"] == []
@@ -122,6 +125,9 @@ def test_generate_business_glossary_separates_primary_and_related_terms():
     assert glossary["bills"]["mapped_tables"] == ["bills"]
     assert glossary["bills"]["related_tables"] == ["partners"]
     assert "foreign_key" in glossary["bills"]["relationship_sources"]
+    assert glossary["bills"]["target_type"] == "table"
+    assert glossary["bills"]["usage_scope"] == "table_lookup"
+    assert isinstance(glossary["bills"]["confidence"], float)
     assert glossary["bill id"]["primary_terms"] == ["bill id"]
     assert glossary["bill id"]["related_terms"] == []
 
@@ -130,10 +136,18 @@ def test_save_and_load_business_glossary():
     glossary = {
         "invoice headers": {
             "description": "Schema table: invoice headers.",
+            "target_type": "table",
+            "mapped_tables": ["invoice_headers"],
             "mapped_columns": [{"table": "invoice_headers", "column": "total_due", "confidence": "high"}],
             "example_questions": [],
+            "primary_terms": ["invoice headers"],
+            "related_terms": [],
+            "related_tables": [],
             "business_terms": ["invoice headers"],
+            "usage_scope": "table_lookup",
+            "confidence": 0.99,
             "sources": ["schema_identifier"],
+            "relationship_sources": [],
         }
     }
 
@@ -141,7 +155,13 @@ def test_save_and_load_business_glossary():
         glossary_path = Path(tmpdir) / "business_glossary.json"
         save_business_glossary(glossary, str(glossary_path))
         loaded_glossary = load_business_glossary(str(glossary_path))
-        assert loaded_glossary == glossary
+        assert loaded_glossary["invoice headers"]["primary_terms"] == ["invoice headers"]
+        assert loaded_glossary["invoice headers"]["business_terms"] == ["invoice headers"]
+        assert loaded_glossary["invoice headers"]["related_terms"] == []
+        assert loaded_glossary["invoice headers"]["mapped_tables"] == ["invoice_headers"]
+        assert loaded_glossary["invoice headers"]["target_type"] == "table"
+        assert loaded_glossary["invoice headers"]["usage_scope"] == "table_lookup"
+        assert isinstance(loaded_glossary["invoice headers"]["confidence"], float)
 
 
 def test_search_business_glossary():

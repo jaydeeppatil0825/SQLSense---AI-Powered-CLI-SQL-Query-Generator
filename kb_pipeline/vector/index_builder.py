@@ -309,11 +309,16 @@ class VectorIndexBuilder:
         example_questions = term_data.get("example_questions", [])
         primary_terms = term_data.get("primary_terms", []) or term_data.get("business_terms", [])
         related_terms = term_data.get("related_terms", [])
+        target_type = str(term_data.get("target_type", "") or "column")
+        usage_scope = str(term_data.get("usage_scope", "") or "primary_match")
+        confidence = float(term_data.get("confidence", 0.0) or 0.0)
         
         # Build searchable text
         text_parts = [
             f"Business term: {term}",
             f"Description: {description}",
+            f"Target type: {target_type}",
+            f"Usage scope: {usage_scope}",
         ]
         
         if primary_terms:
@@ -345,6 +350,9 @@ class VectorIndexBuilder:
             "business_terms": list(primary_terms),
             "primary_terms": list(primary_terms),
             "related_terms": list(related_terms),
+            "target_type": target_type,
+            "usage_scope": usage_scope,
+            "confidence": confidence,
             "mapped_columns": mapped_columns,
             "example_questions": example_questions[:3],
         }

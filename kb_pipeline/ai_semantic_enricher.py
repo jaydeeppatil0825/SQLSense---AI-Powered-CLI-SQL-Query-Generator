@@ -50,6 +50,8 @@ _TABLE_JSON_FORMAT = {
     "properties": {
         "d": {"type": "string"},
         "p": {"type": "string"},
+        "cf": {"type": "number"},
+        "r": {"type": "string"},
         "q": {
             "type": "array",
             "items": {"type": "string"},
@@ -79,6 +81,17 @@ _COLUMN_JSON_FORMAT = {
                     "me": {"type": "boolean"},
                     "di": {"type": "boolean"},
                     "dt": {"type": "boolean"},
+                    "pr": {
+                        "type": "object",
+                        "properties": {
+                            "measure_candidate": {"type": "boolean"},
+                            "dimension_candidate": {"type": "boolean"},
+                            "filter_candidate": {"type": "boolean"},
+                            "join_candidate": {"type": "boolean"},
+                            "date_candidate": {"type": "boolean"},
+                            "sort_candidate": {"type": "boolean"},
+                        },
+                    },
                 },
                 "required": ["d", "b", "s", "cf", "r", "me", "di", "dt"],
             },
@@ -631,7 +644,7 @@ def _column_batch_prompt(table_name: str, table_data: dict, columns: list[dict])
     return (
         "\n".join(lines)
         + "\n\nReturn JSON in exactly this shape:\n"
-        + '{"c":{"column_name":{"d":"...","b":["..."],"s":"quantity","cf":0.84,"r":"sample values and nearby columns indicate units","me":true,"di":false,"dt":false}}}\n'
+        + '{"c":{"column_name":{"d":"...","b":["..."],"s":"quantity","cf":0.84,"r":"sample values and nearby columns indicate units","me":true,"di":false,"dt":false,"pr":{"measure_candidate":true,"dimension_candidate":false,"filter_candidate":false,"join_candidate":false,"date_candidate":false,"sort_candidate":true}}}}\n'
         + "Only include columns from this table."
     )
 
@@ -642,8 +655,11 @@ def _parse_table_summary(response: str) -> dict:
     data = json.loads(cleaned)
     if {"d", "p", "q"} <= data.keys():
         return {
+            "table_description": str(data.get("d", data.get("table_description", ""))).strip(),
             "business_description": str(data.get("d", data.get("table_description", ""))).strip(),
             "business_purpose": str(data.get("p", data.get("table_purpose", ""))).strip(),
+            "confidence": float(data.get("cf", 0.0) or 0.0),
+            "reason": str(data.get("r", "")).strip(),
             "possible_business_questions": [
                 str(item).strip()
                 for item in data.get("q", data.get("possible_business_questions", []))
@@ -674,6 +690,7 @@ def _parse_column_enrichment(response: str) -> dict:
                 "is_measure": bool(col_info.get("me", col_info.get("is_measure", False))),
                 "is_dimension": bool(col_info.get("di", col_info.get("is_dimension", False))),
                 "is_date": bool(col_info.get("dt", col_info.get("is_date", False))),
+                "planner_roles": dict(col_info.get("pr", {})) if isinstance(col_info.get("pr", {}), dict) else {},
             }
             for col_name, col_info in data["c"].items()
             if isinstance(col_info, dict)
@@ -687,11 +704,12 @@ def _parse_column_enrichment(response: str) -> dict:
 def _apply_table_enrichment(table_name: str, table_data: dict, enrichment: dict) -> None:
     """Apply enrichment data to one table in-place."""
     fallback_purpose = build_rule_based_business_purpose(table_name)
-    table_data["business_description"] = _sanitize_table_description(
-        enrichment.get("business_description", ""),
+    table_description = _sanitize_table_description(
+        enrichment.get("table_description", enrichment.get("business_description", "")),
         table_name,
         table_data,
     )
+    table_data["business_description"] = table_description
     table_data["business_purpose"] = _sanitize_table_purpose(
         enrichment.get("business_purpose", ""),
         table_name,
@@ -706,6 +724,14 @@ def _apply_table_enrichment(table_name: str, table_data: dict, enrichment: dict)
         table_data,
         table_data["business_purpose"],
     )
+    table_data["ai_metadata"] = {
+        "table_description": table_description,
+        "business_purpose": table_data["business_purpose"],
+        "possible_business_questions": list(table_data["possible_business_questions"]),
+        "confidence": min(max(float(enrichment.get("confidence", 0.0) or 0.0), 0.0), 1.0),
+        "reason": sanitize_short_text(enrichment.get("reason", ""), fallback=""),
+        "accepted": bool(table_description or table_data["business_purpose"]),
+    }
 
 
 def _normalize_ai_semantic_type(value: str, fallback: str) -> str:
@@ -774,6 +800,16 @@ def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
         core_semantic_type = column_core_semantic_type(col)
         semantic_type = _normalize_ai_semantic_type(col_info.get("semantic_type", core_semantic_type), core_semantic_type)
         semantic_type = _finalize_candidate_semantic_type(col, col_info, semantic_type)
+        planner_roles = dict(col_info.get("planner_roles", {})) if isinstance(col_info.get("planner_roles", {}), dict) else {}
+        if not planner_roles:
+            planner_roles = {
+                "measure_candidate": bool(col_info.get("is_measure", False)),
+                "dimension_candidate": bool(col_info.get("is_dimension", False)),
+                "filter_candidate": bool(col_info.get("is_dimension", False) or col_info.get("is_date", False)),
+                "join_candidate": False,
+                "date_candidate": bool(col_info.get("is_date", False)),
+                "sort_candidate": bool(col_info.get("is_measure", False) or col_info.get("is_dimension", False) or col_info.get("is_date", False)),
+            }
         col["business_description"] = _sanitize_column_description(col_info.get("business_description", ""), col, semantic_type)
         col["business_terms"] = _sanitize_business_terms(list(col_info.get("business_terms", [])), col, semantic_type)
         col["semantic_type"] = core_semantic_type if core_semantic_type in CORE_SEMANTIC_TYPES else "unknown"
@@ -783,6 +819,7 @@ def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
         col["is_measure"] = semantic_type in {"money", "quantity", "percentage"} and bool(col_info.get("is_measure", False))
         col["is_dimension"] = semantic_type in {"status", "name", "text", "code", "reference"} or bool(col_info.get("is_dimension", False))
         col["is_date"] = bool(col_info.get("is_date", False) or semantic_type == "date")
+        col["planner_roles"] = planner_roles
         col["ai_metadata"] = {
             "ai_semantic_type": semantic_type,
             "confidence": min(max(float(col_info.get("confidence", 0.0) or 0.0), 0.0), 1.0),
@@ -790,6 +827,7 @@ def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
             "business_description": col["business_description"],
             "business_terms": list(col["business_terms"]),
             "accepted": bool(semantic_type and semantic_type != core_semantic_type),
+            "planner_roles": dict(planner_roles),
             "is_measure": bool(col["is_measure"]),
             "is_dimension": bool(col["is_dimension"]),
             "is_date": bool(col["is_date"]),

@@ -19,6 +19,10 @@ import re
 
 from query_pipeline.query_planner import build_query_context
 from sql_pipeline.simple_query_generator import generate_simple_sql
+from sql_pipeline.sql_generator import (
+    generate_sql as _blocked_generate_sql,
+    generate_sql_with_retry as _blocked_generate_sql_with_retry,
+)
 from query_pipeline.question_normalizer import normalize_question, is_too_ambiguous
 from sql_pipeline.sql_validator import validate_sql, validate_sql_structure, add_limit_if_missing, extract_requested_limit
 from query_pipeline.conversation.followup_detector import detect_follow_up
@@ -35,6 +39,11 @@ from kb_pipeline.schema_facts import (
 from kb_pipeline.vector.retriever import VectorRetriever
 
 logger = get_logger()
+
+# Backward-compatible module exports for older tests and wrappers.
+# Runtime SQL generation does not call these helpers anymore.
+generate_sql = _blocked_generate_sql
+generate_sql_with_retry = _blocked_generate_sql_with_retry
 
 _UNSAFE_NL_RE = re.compile(
     r"\b(delete|drop|update|insert|alter|truncate|create|remove|destroy)\b",
