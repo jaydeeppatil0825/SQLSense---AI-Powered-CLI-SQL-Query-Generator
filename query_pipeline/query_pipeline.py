@@ -65,8 +65,10 @@ class QueryPipeline:
         vector_retriever: Optional[Any] = None,
         ai_backend: str = "local",
     ) -> QueryPipelineResult:
+        # ai_backend is accepted only for backward compatibility.
+        # Query pipeline must not call AI at runtime.
         normalized_question, _ = normalize_question(question)
-        intent = build_intent(normalized_question, ai_backend=ai_backend)
+        intent = build_intent(normalized_question)
         retrieved_context = retrieve_context(
             normalized_question,
             intent,

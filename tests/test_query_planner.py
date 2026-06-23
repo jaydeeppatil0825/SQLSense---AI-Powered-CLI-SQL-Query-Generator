@@ -99,6 +99,54 @@ def test_query_planner_returns_low_confidence_when_business_context_is_weak():
     assert context["plan"]["metric"] is None
 
 
+def test_query_planner_prefers_unique_direct_singular_table_match_for_simple_browse():
+    knowledge_base = {
+        "clients": {
+            "columns": [
+                {"name": "client_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "client_name", "type": "VARCHAR(100)", "semantic_type": "text_candidate"},
+            ],
+            "primary_keys": ["client_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "agreements": {
+            "columns": [
+                {"name": "agreement_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "client_id", "type": "INTEGER", "semantic_type": "id"},
+            ],
+            "primary_keys": ["agreement_id"],
+            "foreign_keys": [
+                {"column": "client_id", "referenced_table": "clients", "referenced_column": "client_id"},
+            ],
+            "relationships": [],
+        },
+        "invoices": {
+            "columns": [
+                {"name": "invoice_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "client_id", "type": "INTEGER", "semantic_type": "id"},
+            ],
+            "primary_keys": ["invoice_id"],
+            "foreign_keys": [
+                {"column": "client_id", "referenced_table": "clients", "referenced_column": "client_id"},
+            ],
+            "relationships": [],
+        },
+    }
+
+    context = build_query_context(
+        "show all client",
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=False,
+    )
+
+    assert context["selected_table_names"] == ["clients"]
+    assert context["join_paths"] == []
+    assert context["route_recommendation"] == "simple_rule_ok"
+    assert context["complex_sql_plan"] is None
+
+
 def test_query_planner_does_not_use_module_field_for_scoring():
     knowledge_base = {
         "alpha_records": {

@@ -134,168 +134,19 @@ def _call_ollama(messages: list[dict], response_format: dict | str | None = None
     )
 
 
-def _call_ai_backend(
-    messages: list[dict],
-    backend: str,
-    response_format: dict | str | None = None,
-) -> str:
-    """Dispatch messages to the chosen backend and return the raw response."""
-    return call_ai_backend(
-        messages,
-        backend=backend,
-        response_format=response_format,
-        temperature=0,
-        max_tokens=2048,
+def _call_ai_backend(*args, **kwargs):
+    raise RuntimeError(
+        "Runtime AI backend calls are disabled outside KB semantic enrichment."
     )
 
 
-def generate_sql(
-    user_question: str,
-    knowledge_base: dict,
-    backend: str | None = None,
-    normalized_question: str | None = None,
-    intent: dict | None = None,
-    retrieved_context: dict | None = None,
-    query_plan: dict | None = None,
-    selected_tables: list[dict] | None = None,
-    selected_columns: list[dict] | None = None,
-    measure_candidates: list[dict] | None = None,
-    dimension_candidates: list[dict] | None = None,
-    filter_candidates: list[dict] | None = None,
-    business_glossary: dict | None = None,
-    join_paths: list[dict] | None = None,
-    formula_evidence: list[dict] | None = None,
-    complex_sql_plan: dict | None = None,
-    evidence_sources: list[str] | None = None,
-    route_recommendation: str | None = None,
-) -> str:
-    """Generate a SQL SELECT statement from the provided runtime context."""
-    blocked_route = _blocked_route_reason(route_recommendation)
-    if blocked_route:
-        raise ValueError(f"SQL generation blocked for route '{blocked_route}'.")
-
-    messages = build_sql_prompt(
-        user_question,
-        knowledge_base,
-        normalized_question=normalized_question,
-        intent=intent,
-        retrieved_context=retrieved_context,
-        query_plan=query_plan,
-        selected_tables=selected_tables,
-        selected_columns=selected_columns,
-        measure_candidates=measure_candidates,
-        dimension_candidates=dimension_candidates,
-        filter_candidates=filter_candidates,
-        business_glossary=business_glossary,
-        join_paths=join_paths,
-        formula_evidence=formula_evidence,
-        complex_sql_plan=complex_sql_plan,
-        evidence_sources=evidence_sources,
-        route_recommendation=route_recommendation,
-    )
-    raw_response = _call_ai_backend(messages, backend or "local")
-    return _normalize_ai_sql_output(raw_response)
-
-
-def generate_sql_with_retry(
-    user_question: str,
-    knowledge_base: dict,
-    backend: str,
-    first_attempt_sql: str,
-    validation_reason: str,
-    normalized_question: str | None = None,
-    intent: dict | None = None,
-    retrieved_context: dict | None = None,
-    query_plan: dict | None = None,
-    selected_tables: list[dict] | None = None,
-    selected_columns: list[dict] | None = None,
-    measure_candidates: list[dict] | None = None,
-    dimension_candidates: list[dict] | None = None,
-    filter_candidates: list[dict] | None = None,
-    business_glossary: dict | None = None,
-    validation_context: dict | None = None,
-    join_paths: list[dict] | None = None,
-    formula_evidence: list[dict] | None = None,
-    complex_sql_plan: dict | None = None,
-    evidence_sources: list[str] | None = None,
-    route_recommendation: str | None = None,
-) -> str:
-    """Retry AI SQL generation once after a failed first attempt."""
-    blocked_route = _blocked_route_reason(route_recommendation)
-    if blocked_route:
-        raise ValueError(f"SQL generation blocked for route '{blocked_route}'.")
-
-    base_messages = build_sql_prompt(
-        user_question,
-        knowledge_base,
-        normalized_question=normalized_question,
-        intent=intent,
-        retrieved_context=retrieved_context,
-        query_plan=query_plan,
-        selected_tables=selected_tables,
-        selected_columns=selected_columns,
-        measure_candidates=measure_candidates,
-        dimension_candidates=dimension_candidates,
-        filter_candidates=filter_candidates,
-        business_glossary=business_glossary,
-        join_paths=join_paths,
-        formula_evidence=formula_evidence,
-        complex_sql_plan=complex_sql_plan,
-        evidence_sources=evidence_sources,
-        route_recommendation=route_recommendation,
+def generate_sql(*args, **kwargs):
+    raise RuntimeError(
+        "AI SQL generation is disabled. Runtime SQL must be generated deterministically."
     )
 
-    correction_system = (
-        "You are correcting a previously invalid MySQL SELECT statement. "
-        "Follow the structured plan, selected tables, selected columns, glossary, and relationships below exactly. "
-        "Return ONLY one corrected executable SELECT statement. "
-        "No explanation. No markdown. No comments. No extra text.\n\n"
-        f"{base_messages[0]['content']}"
+
+def generate_sql_with_retry(*args, **kwargs):
+    raise RuntimeError(
+        "AI SQL retry is disabled. Invalid SQL must not be repaired by AI."
     )
-
-    selected_column_entries = validation_context.get("selected_columns", []) if validation_context else []
-    join_conditions = validation_context.get("join_conditions", []) if validation_context else []
-    join_skeletons = validation_context.get("join_skeletons", []) if validation_context else []
-    measure_entries = validation_context.get("measure_candidates", []) if validation_context else []
-    dimension_entries = validation_context.get("dimension_candidates", []) if validation_context else []
-    filter_entries = validation_context.get("filter_candidates", []) if validation_context else []
-    formula_entries = validation_context.get("formula_evidence", formula_evidence or []) if validation_context else (formula_evidence or [])
-    complex_plan = validation_context.get("complex_sql_plan", complex_sql_plan or {}) if validation_context else (complex_sql_plan or {})
-    source_entries = validation_context.get("evidence_sources", evidence_sources or []) if validation_context else (evidence_sources or [])
-
-    correction_user = (
-        f"Original question: {user_question}\n\n"
-        f"Rejected SQL:\n{first_attempt_sql}\n\n"
-        f"Validation failure: {validation_reason}\n\n"
-        f"Runtime schema and retrieval context:\n{validation_context or {}}\n\n"
-        f"Complex SQL plan: {complex_plan}\n"
-        "Required tables: " + ", ".join([t.get("table", "") for t in (selected_tables or [])]) + "\n"
-        "Required columns: " + ", ".join([f"{c.get('table', '')}.{c.get('column', '')}" for c in selected_column_entries]) + "\n"
-        "Measure candidates: " + ", ".join([f"{c.get('table', '')}.{c.get('column', '')}" for c in measure_entries]) + "\n"
-        "Dimension candidates: " + ", ".join([f"{c.get('table', '')}.{c.get('column', '')}" for c in dimension_entries]) + "\n"
-        "Filter candidates: " + ", ".join([f"{c.get('table', '')}.{c.get('column', '')}" for c in filter_entries if c.get('table') and c.get('column')]) + "\n"
-        "Relationship/join paths: " + str(join_paths or []) + "\n"
-        "Join predicates to use: " + ", ".join(join_conditions) + "\n"
-        "FROM/JOIN candidates to use: " + " | ".join(join_skeletons) + "\n\n"
-        "Formula evidence: " + str(formula_entries) + "\n"
-        "Evidence sources: " + ", ".join(str(entry) for entry in source_entries) + "\n\n"
-        "Correct the SQL so it follows the plan, selected tables, selected relationships, glossary context, and safety rules. "
-        "Use only allowed tables and columns from the schema context. "
-        "If the query needs multiple tables, your SQL must use one of the provided FROM/JOIN candidates as the starting structure. "
-        "If no formula evidence is provided, do not invent a derived expression. "
-        "Qualify columns with table aliases when more than one table is used. "
-        "The first non-whitespace characters must be SELECT. "
-        "The SQL must include a valid FROM table name before any WHERE, GROUP BY, ORDER BY, or LIMIT clause. "
-        "Every JOIN must include a real table and an ON predicate using existing columns on both sides. "
-        "Every non-aggregate selected expression must appear in GROUP BY. "
-        "ORDER BY must use a selected alias or valid schema column. "
-        "Output complete SQL only, with valid FROM and JOIN clauses, no ellipsis, no placeholder FROM, no incomplete JOIN."
-    )
-
-    messages = [
-        {"role": "system", "content": correction_system},
-        {"role": "user", "content": correction_user},
-    ]
-
-    raw_response = _call_ai_backend(messages, backend or "local")
-    return _normalize_ai_sql_output(raw_response)

@@ -19,7 +19,6 @@ import re
 
 from query_pipeline.query_planner import build_query_context
 from sql_pipeline.simple_query_generator import generate_simple_sql
-from sql_pipeline.sql_generator import generate_sql, generate_sql_with_retry
 from query_pipeline.question_normalizer import normalize_question, is_too_ambiguous
 from sql_pipeline.sql_validator import validate_sql, validate_sql_structure, add_limit_if_missing, extract_requested_limit
 from query_pipeline.conversation.followup_detector import detect_follow_up
@@ -1290,382 +1289,134 @@ class QuestionService:
                 "simple table-browse question matched multiple tables with similar confidence",
             )
             return False, _clarification_message(query_context), None, None
-        scoped_knowledge_base = query_context.get("selected_knowledge_base", knowledge_base)
-        full_knowledge_base = query_context.get("knowledge_base", knowledge_base)
-        query_plan = query_context.get("plan")
-        intent_payload = query_context.get("intent") or (pipeline_context or {}).get("intent") or {}
-        retrieved_context_payload = query_context.get("retrieved_context") or (pipeline_context or {}).get("retrieved_context") or {}
-        simple_guard_ok, simple_guard_reason = _apply_simple_query_guard(query_context)
-        logger.info("[SIMPLE GUARD DECISION] enabled=%s reason=%s", simple_guard_ok, simple_guard_reason)
-        if simple_guard_ok:
-            scoped_knowledge_base = query_context.get("selected_knowledge_base", knowledge_base)
-            full_knowledge_base = query_context.get("knowledge_base", knowledge_base)
-            query_plan = query_context.get("plan")
-        prefer_rule_based, route_reason = _should_try_rule_based_from_pipeline(query_context)
-        ai_failure_reason: str | None = None
-        ai_rejected_sql: str | None = None
-        last_rejected_sql: str | None = None
-        retry_context = _build_validation_retry_context(query_context)
-        simple_sql_cache: str | None = None
-        simple_sql_loaded = False
-        repair_sql_cache: str | None = None
-        repair_sql_loaded = False
-        requested_limit = extract_requested_limit(rewritten_question)
+        # Safe context normalization (Phase 2 Step 4)
+        query_context = query_context or {}
+        intent = query_context.get("intent") or {}
+        plan = query_context.get("plan") or {}
+        retrieved_context = query_context.get("retrieved_context") or {}
+        route_recommendation = query_context.get("route_recommendation") or {}
+        complex_sql_plan = query_context.get("complex_sql_plan") or {}
+        if not isinstance(intent, dict):
+            intent = {"intent_type": str(intent or plan.get("intent") or "").strip().lower()}
 
-        def _validate_candidate_sql(candidate_sql: str, *, source_label: str) -> Tuple[bool, Optional[str], Optional[str]]:
-            nonlocal last_rejected_sql
-            _attach_generation_feedback(query_context, candidate_sql)
-            safety_ok, safety_reason = validate_sql(candidate_sql)
-            struct_ok, struct_reason = validate_sql_structure(candidate_sql, knowledge_base)
-            business_ok, business_reason = _validate_business_sql_fit(candidate_sql, query_context)
-
-            if safety_ok and struct_ok and business_ok:
-                logger.info(f"{source_label} SQL attempt passed validation")
-                self.conversation_memory.add_turn(
-                    user_question=question,
-                    is_follow_up=is_follow_up,
-                    rewritten_question=rewritten_question,
-                    generated_sql=candidate_sql,
-                )
-                return True, None, None
-
-            fail_reason = safety_reason if not safety_ok else struct_reason if not struct_ok else business_reason
-            last_rejected_sql = candidate_sql
-            return False, fail_reason, source_label
-
-        def _apply_explicit_limit_if_safe(candidate_sql: str | None) -> str | None:
-            if not candidate_sql:
-                return candidate_sql
-            if not requested_limit:
-                return candidate_sql
-            if re.search(r"\bLIMIT\b", candidate_sql, re.IGNORECASE):
-                return candidate_sql
-
-            safety_ok, _ = validate_sql(candidate_sql)
-            struct_ok, _ = validate_sql_structure(candidate_sql, knowledge_base)
-            if not safety_ok or not struct_ok:
-                return candidate_sql
-            return add_limit_if_missing(candidate_sql, limit=requested_limit)
-
-        def _call_with_optional_kwargs(func, /, *args, optional_kwargs: dict[str, Any], removable_kwargs: tuple[str, ...]):
-            try:
-                signature = inspect.signature(func)
-            except (TypeError, ValueError):
-                signature = None
-
-            active_kwargs = dict(optional_kwargs)
-            if signature is not None:
-                parameters = signature.parameters.values()
-                accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters)
-                if not accepts_kwargs:
-                    supported_names = {
-                        param.name
-                        for param in signature.parameters.values()
-                        if param.kind in (
-                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                            inspect.Parameter.KEYWORD_ONLY,
-                        )
-                    }
-                    active_kwargs = {
-                        name: value
-                        for name, value in active_kwargs.items()
-                        if name in supported_names
-                    }
-            while True:
-                try:
-                    return func(*args, **active_kwargs)
-                except TypeError as exc:
-                    exc_text = str(exc)
-                    removed = False
-                    for name in removable_kwargs:
-                        if name in active_kwargs and name in exc_text:
-                            active_kwargs.pop(name, None)
-                            removed = True
-                    if removed:
-                        continue
-                    raise
-
-        def _get_simple_sql() -> str | None:
-            nonlocal simple_sql_cache, simple_sql_loaded
-            if simple_sql_loaded:
-                return simple_sql_cache
-
-            simple_sql_loaded = True
-            simple_sql_cache = _call_with_optional_kwargs(
-                generate_simple_sql,
-                rewritten_question,
-                scoped_knowledge_base,
-                optional_kwargs={
-                    "query_plan": query_plan,
-                    "business_glossary": business_glossary,
-                    "selected_tables": query_context.get("selected_tables"),
-                    "vector_results": query_context.get("vector_results"),
-                },
-                removable_kwargs=("query_plan", "business_glossary", "selected_tables", "vector_results"),
-            )
-            if simple_sql_cache is None and scoped_knowledge_base is not full_knowledge_base:
-                simple_sql_cache = _call_with_optional_kwargs(
-                    generate_simple_sql,
-                    rewritten_question,
-                    full_knowledge_base,
-                    optional_kwargs={
-                        "query_plan": query_plan,
-                        "business_glossary": business_glossary,
-                        "selected_tables": query_context.get("selected_tables"),
-                        "vector_results": query_context.get("vector_results"),
-                    },
-                    removable_kwargs=("query_plan", "business_glossary", "selected_tables", "vector_results"),
-                )
-            if simple_sql_cache:
-                simple_sql_cache = _apply_explicit_limit_if_safe(simple_sql_cache.strip())
-            return simple_sql_cache
-
-        def _get_join_repair_sql() -> str | None:
-            nonlocal repair_sql_cache, repair_sql_loaded
-            if repair_sql_loaded:
-                return repair_sql_cache
-
-            repair_sql_loaded = True
-            repair_sql_cache = _build_joined_aggregate_repair_sql(query_context, full_knowledge_base)
-            if repair_sql_cache:
-                repair_sql_cache = _apply_explicit_limit_if_safe(repair_sql_cache.strip())
-            return repair_sql_cache
-
-        def _try_deterministic_join_repair(
-            *,
-            failure_reason: str | None,
-            route_reason: str,
-        ) -> tuple[bool, str | None, str | None]:
-            if not _is_repairable_structural_failure(failure_reason):
-                return False, None, None
-
-            repair_sql = _get_join_repair_sql()
-            if not repair_sql:
-                return False, None, None
-
-            repair_ok, repair_reason, _ = _validate_candidate_sql(
-                repair_sql,
-                source_label="Deterministic join repair",
-            )
-            if not repair_ok:
-                return False, None, repair_reason
-
-            _set_route(query_context, "deterministic-repair", route_reason)
-            return True, repair_sql, None
-
-        if prefer_rule_based:
-            logger.info(f"Using rule-based SQL generator first: {route_reason}")
-            simple_sql = _get_simple_sql()
-            if simple_sql:
-                simple_ok, simple_reason, _ = _validate_candidate_sql(simple_sql, source_label="Rule-based")
-                if simple_ok:
-                    _set_route(query_context, "rule-based", route_reason)
-                    return True, "SQL generated successfully (rule-based)", simple_sql, None
-                logger.warning(f"Rule-based SQL did not meet validation requirements: {simple_reason}. Escalating to AI...")
-            else:
-                logger.info("Rule-based route was selected first, but no deterministic SQL pattern matched. Escalating to AI...")
-
-        if not prefer_rule_based or ai_failure_reason is not None or last_rejected_sql is not None or _get_simple_sql() is None:
-            logger.info("Using AI as the primary SQL generator for this question")
-            try:
-                logger.info(
-                    "[SQL CONTEXT BEFORE AI] selected_tables=%s selected_columns=%s join_paths=%s complex_sql_plan=%s",
-                    [entry.get("table") for entry in (query_context.get("selected_tables") or [])],
-                    [f"{entry.get('table')}.{entry.get('column')}" for entry in (query_context.get("selected_columns") or [])[:12]],
-                    len(_possible_join_paths(query_context)),
-                    query_context.get("complex_sql_plan"),
-                )
-                base_generate_kwargs = {
-                    "backend": ai_backend,
-                    "normalized_question": str(query_context.get("normalized_question") or rewritten_question),
-                    "intent": intent_payload,
-                    "retrieved_context": retrieved_context_payload,
-                    "query_plan": query_plan,
-                    "selected_tables": query_context.get("selected_tables"),
-                    "selected_columns": query_context.get("selected_columns"),
-                    "measure_candidates": query_context.get("measure_candidates"),
-                    "dimension_candidates": query_context.get("dimension_candidates"),
-                    "filter_candidates": query_context.get("filter_candidates") or query_context.get("filters") or [],
-                    "business_glossary": business_glossary,
-                    "join_paths": _possible_join_paths(query_context),
-                    "formula_evidence": _formula_evidence_payload(query_context),
-                    "complex_sql_plan": dict(query_context.get("complex_sql_plan") or {}),
-                    "evidence_sources": _evidence_sources_payload(query_context),
-                    "route_recommendation": route_recommendation or None,
-                }
-                logger.info("[AI CALLED] phase=initial backend=%s", ai_backend)
-                raw_sql = _call_with_optional_kwargs(
-                    generate_sql,
-                    rewritten_question,
-                    scoped_knowledge_base,
-                    optional_kwargs=base_generate_kwargs,
-                    removable_kwargs=(
-                        "backend",
-                        "normalized_question",
-                        "intent",
-                        "retrieved_context",
-                        "query_plan",
-                        "selected_tables",
-                        "selected_columns",
-                        "measure_candidates",
-                        "dimension_candidates",
-                        "filter_candidates",
-                        "business_glossary",
-                        "join_paths",
-                        "formula_evidence",
-                        "complex_sql_plan",
-                        "evidence_sources",
-                        "route_recommendation",
-                    ),
-                )
-                logger.info(f"SQL generated by AI: {raw_sql[:100]}...")
-                candidate_sql = _apply_explicit_limit_if_safe(raw_sql.strip())
-                ai_ok, ai_reason, _ = _validate_candidate_sql(candidate_sql, source_label="AI")
-                if ai_ok:
-                    _set_route(query_context, "ai", "AI was selected for a complex or low-confidence question")
-                    return True, "SQL generated successfully (AI)", candidate_sql, None
-
-                repair_success, repair_sql, repair_reason = _try_deterministic_join_repair(
-                    failure_reason=ai_reason,
-                    route_reason="AI route produced incomplete SQL, so deterministic join repair was used",
-                )
-                if repair_success and repair_sql:
-                    logger.info("AI SQL was structurally incomplete; using deterministic join repair from runtime schema and join paths")
-                    return True, "SQL generated successfully (deterministic join repair)", repair_sql, None
-
-                logger.warning(f"AI SQL did not meet validation requirements: {ai_reason}. Retrying...")
-                retry_generate_kwargs = {
-                    "normalized_question": str(query_context.get("normalized_question") or rewritten_question),
-                    "intent": intent_payload,
-                    "retrieved_context": retrieved_context_payload,
-                    "query_plan": query_plan,
-                    "selected_tables": query_context.get("selected_tables"),
-                    "selected_columns": query_context.get("selected_columns"),
-                    "measure_candidates": query_context.get("measure_candidates"),
-                    "dimension_candidates": query_context.get("dimension_candidates"),
-                    "filter_candidates": query_context.get("filter_candidates") or query_context.get("filters") or [],
-                    "business_glossary": business_glossary,
-                    "validation_context": retry_context,
-                    "join_paths": _possible_join_paths(query_context),
-                    "formula_evidence": _formula_evidence_payload(query_context),
-                    "complex_sql_plan": dict(query_context.get("complex_sql_plan") or {}),
-                    "evidence_sources": _evidence_sources_payload(query_context),
-                    "route_recommendation": route_recommendation or None,
-                }
-                logger.info("[AI CALLED] phase=retry backend=%s", ai_backend)
-                retry_raw = _call_with_optional_kwargs(
-                    generate_sql_with_retry,
-                    optional_kwargs={
-                        "user_question": rewritten_question,
-                        "knowledge_base": scoped_knowledge_base,
-                        "backend": ai_backend,
-                        "first_attempt_sql": candidate_sql,
-                        "validation_reason": ai_reason or "AI SQL did not satisfy business validation.",
-                        **retry_generate_kwargs,
-                    },
-                    removable_kwargs=(
-                        "backend",
-                        "normalized_question",
-                        "intent",
-                        "retrieved_context",
-                        "query_plan",
-                        "selected_tables",
-                        "selected_columns",
-                        "measure_candidates",
-                        "dimension_candidates",
-                        "filter_candidates",
-                        "business_glossary",
-                        "validation_context",
-                        "join_paths",
-                        "formula_evidence",
-                        "complex_sql_plan",
-                        "evidence_sources",
-                        "route_recommendation",
-                    ),
-                )
-                retry_sql = _apply_explicit_limit_if_safe(retry_raw.strip())
-                retry_ok, retry_reason, _ = _validate_candidate_sql(retry_sql, source_label="AI retry")
-                if retry_ok:
-                    _set_route(query_context, "ai-retry", "AI retry corrected the first invalid SQL attempt")
-                    return True, "SQL generated successfully (AI, corrected)", retry_sql, None
-
-                repair_success, repair_sql, repair_reason = _try_deterministic_join_repair(
-                    failure_reason=retry_reason or ai_reason,
-                    route_reason="AI retry still produced incomplete SQL, so deterministic join repair was used",
-                )
-                if repair_success and repair_sql:
-                    logger.info("AI retry remained structurally incomplete; using deterministic join repair from runtime schema and join paths")
-                    return True, "SQL generated successfully (deterministic join repair)", repair_sql, None
-
-                ai_failure_reason = retry_reason or ai_reason
-                ai_rejected_sql = retry_sql
-                logger.warning(f"AI retry did not meet validation requirements: {ai_failure_reason}")
-            except Exception as e:
-                ai_failure_reason = str(e)
-                logger.error(f"AI SQL generation failed: {e}")
-
-        repair_sql = _get_join_repair_sql()
-        if repair_sql and ai_failure_reason:
-            repair_success, validated_repair_sql, repair_reason = _try_deterministic_join_repair(
-                failure_reason=ai_failure_reason,
-                route_reason="AI route did not produce complete SQL, so a schema/join-path repair was used",
-            )
-            if repair_success and validated_repair_sql:
-                logger.info("Trying deterministic joined-aggregate repair from runtime schema and join paths")
-                return True, "SQL generated successfully (deterministic join repair)", validated_repair_sql, None
-            if repair_reason:
-                logger.warning(f"Deterministic join repair failed validation: {repair_reason}")
-
-        # Rule-based fallback remains available for deterministic guardrails and AI recovery.
-        simple_sql = _get_simple_sql()
-
-        if simple_sql:
-            logger.info("Using rule-based fallback SQL generator")
-            simple_ok, simple_reason, _ = _validate_candidate_sql(simple_sql, source_label="Rule-based fallback")
-            if simple_ok:
-                _set_route(
-                    query_context,
-                    "rule-based",
-                    "AI route did not produce a valid SQL statement, so rule-based SQL was used",
-                )
-                message = "SQL generated successfully (rule-based fallback)"
-                return True, message, simple_sql, None
-            logger.error(f"Fallback SQL failed validation: {simple_reason}")
-            failure_sql = simple_sql
-            failure_reason = simple_reason or "Generated SQL failed validation."
-            if ai_failure_reason:
-                failure_sql = ai_rejected_sql or last_rejected_sql or simple_sql
-                failure_reason = ai_failure_reason
-            _set_route(query_context, "fallback-failed", failure_reason)
-            error_message = _format_generation_failure(
-                rewritten_question,
-                failure_sql,
-                failure_reason,
-                query_context,
-            )
-            return False, f"Generated SQL failed validation: {failure_reason}", None, error_message
-
-        if ai_failure_reason:
-            logger.error(f"SQL generation failed after AI and fallback checks: {ai_failure_reason}")
-            _set_route(query_context, "fallback-failed", ai_failure_reason)
-            error_message = _format_generation_failure(
-                rewritten_question,
-                ai_rejected_sql or last_rejected_sql,
-                ai_failure_reason,
-                query_context,
-            )
-            return False, f"SQL generation failed: {ai_failure_reason}", None, error_message
-
-        logger.error("Could not generate SQL from AI or fallback logic.")
-        _set_route(query_context, "fallback-failed", "no valid SQL could be generated from rule-based or AI paths")
-        error_message = _format_generation_failure(
-            rewritten_question,
-            last_rejected_sql,
-            "Could not generate a valid SQL query.",
-            query_context,
+        # Determine route (Phase 2 Step 5)
+        route = (
+            query_context.get("route")
+            or query_context.get("route_used")
+            or (route_recommendation if isinstance(route_recommendation, str) else route_recommendation.get("route") if isinstance(route_recommendation, dict) else None)
+            or plan.get("route")
         )
-        return False, "Could not generate a valid SQL query for this question.", None, error_message
+        
+        # Simple single-table guard (Phase 2 Bug Fix)
+        # Route simple list/count queries before complex_sql_plan block
+        selected_tables = query_context.get("selected_tables") or []
+        intent_type = intent.get("intent_type", "")
+        is_simple_list_count = (
+            len(selected_tables) == 1
+            and intent_type in {"list", "count"}
+            and not query_context.get("join_paths")
+        )
+        
+        if is_simple_list_count:
+            logger.info(f"Simple single-table list/count detected: intent={intent_type}, table={selected_tables[0].get('table') if selected_tables else 'unknown'}")
+            route = "simple_rule_based"
+        
+        # Block complex queries (Phase 2 Step 6)
+        if complex_sql_plan and not is_simple_list_count:
+            _set_route(query_context, "complex_deterministic_not_ready", "Complex SQL not implemented in Phase 2")
+            return False, (
+                "Complex deterministic SQL generation is not implemented yet. "
+                "The query was planned, but SQL was not generated because AI SQL generation is disabled."
+            ), None, None
+        
+        # Block unsafe/missing evidence
+        if route in {"needs_clarification", "cannot_plan_safely"}:
+            _set_route(query_context, route, "Cannot plan safely from available evidence")
+            return False, "Cannot plan this query safely from available schema evidence.", None, None
+        
+        # Simple query path - use simple_query_generator only (Phase 2 Step 5)
+        if route in {"simple_rule_based", "simple_rule_ok", "rule_based", "simple"}:
+            try:
+                simple_sql = generate_simple_sql(
+                    rewritten_question,
+                    knowledge_base,
+                    query_plan=plan,
+                    business_glossary=business_glossary,
+                    selected_tables=query_context.get("selected_tables"),
+                    vector_results=query_context.get("vector_results"),
+                )
+                if simple_sql:
+                    # Validate SQL
+                    safety_ok, safety_reason = validate_sql(simple_sql)
+                    struct_ok, struct_reason = validate_sql_structure(simple_sql, knowledge_base)
+                    
+                    if safety_ok and struct_ok:
+                        _set_route(query_context, "rule-based", "Simple rule-based SQL generation")
+                        self.conversation_memory.add_turn(
+                            user_question=question,
+                            is_follow_up=is_follow_up,
+                            rewritten_question=rewritten_question,
+                            generated_sql=simple_sql,
+                        )
+                        return True, "SQL generated successfully (rule-based)", simple_sql, None
+                    else:
+                        fail_reason = safety_reason if not safety_ok else struct_reason
+                        return False, f"SQL validation failed: {fail_reason}", None, None
+                else:
+                    return False, "Simple SQL generator returned no SQL for this question.", None, None
+            except Exception as e:
+                logger.error(f"Simple SQL generation failed: {e}")
+                return False, f"Simple SQL generation failed: {str(e)}", None, None
+        
+        # Default: complex query not implemented
+        _set_route(query_context, "complex_deterministic_not_ready", "Complex SQL not implemented in Phase 2")
+        return False, "Complex deterministic SQL generation is not implemented yet. Please try a simpler query.", None, None
     
+    def _build_success_result(
+        self,
+        *,
+        question: str,
+        sql: str,
+        route: str,
+        validation_result: dict | None = None,
+        query_context: dict | None = None,
+        rows: list | None = None,
+    ) -> dict:
+        return {
+            "success": True,
+            "question": question,
+            "generated_sql": sql,
+            "sql": sql,
+            "route": route,
+            "route_used": route,
+            "validation_result": validation_result or {},
+            "query_context": query_context or {},
+            "rows": rows or [],
+            "error": None,
+        }
+
+    def _build_failure_result(
+        self,
+        *,
+        question: str,
+        error: str,
+        route: str = "cannot_plan_safely",
+        validation_result: dict | None = None,
+        query_context: dict | None = None,
+    ) -> dict:
+        return {
+            "success": False,
+            "question": question,
+            "generated_sql": None,
+            "sql": None,
+            "route": route,
+            "route_used": route,
+            "validation_result": validation_result or {},
+            "query_context": query_context or {},
+            "rows": [],
+            "error": error,
+        }
+
     def validate_sql(self, sql: str, knowledge_base: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
         """
         Validate SQL for safety and structure.

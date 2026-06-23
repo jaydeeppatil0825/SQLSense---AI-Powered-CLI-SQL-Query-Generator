@@ -181,6 +181,58 @@ def test_context_retriever_collapses_simple_direct_table_match_before_glossary_e
     assert all(entry["table"] == "partners" for entry in context["matched_columns"])
 
 
+def test_context_retriever_collapses_simple_singular_table_match_before_glossary_expansion():
+    noisy_kb = {
+        "partners": {
+            "business_description": "Stores partner records.",
+            "columns": [{"name": "partner_name", "type": "VARCHAR(100)", "semantic_type": "name", "is_dimension": True}],
+            "primary_keys": ["partner_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "contracts": {
+            "business_description": "Stores contract records linked to partners.",
+            "columns": [{"name": "partner_id", "type": "INTEGER", "semantic_type": "id"}],
+            "primary_keys": ["contract_id"],
+            "foreign_keys": [{"column": "partner_id", "referenced_table": "partners", "referenced_column": "partner_id"}],
+            "relationships": [],
+        },
+        "bills": {
+            "business_description": "Stores bill records linked to partners.",
+            "columns": [{"name": "partner_id", "type": "INTEGER", "semantic_type": "id"}],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [{"column": "partner_id", "referenced_table": "partners", "referenced_column": "partner_id"}],
+            "relationships": [],
+        },
+    }
+    noisy_glossary = {
+        "partners": {
+            "description": "Partner records",
+            "mapped_columns": [
+                {"table": "partners", "column": "partner_name", "confidence": "high"},
+                {"table": "contracts", "column": "partner_id", "confidence": "medium"},
+                {"table": "bills", "column": "partner_id", "confidence": "medium"},
+            ],
+            "business_terms": ["partner"],
+            "sources": ["schema_identifier"],
+        }
+    }
+    intent = {
+        "intent_type": "list",
+        "requested_dimensions": [],
+        "requested_metrics": [],
+        "requested_filters": [],
+        "raw_business_terms": ["partner"],
+        "needs_grouping": False,
+        "needs_join": False,
+    }
+
+    context = retrieve_context("show all partner", intent, noisy_kb, business_glossary=noisy_glossary, vector_retriever=None)
+
+    assert [entry["table"] for entry in context["matched_tables"]] == ["partners"]
+    assert all(entry["table"] == "partners" for entry in context["matched_columns"])
+
+
 def test_context_retriever_exact_runtime_column_names_score_high():
     intent = {
         "requested_dimensions": [],

@@ -826,9 +826,9 @@ def _table_score(
         reasons.append(f"matched {overlap} question term(s) in table metadata")
 
     human_table = _humanize(table_name)
-    if human_table and human_table in _normalize(plan.get("question", "")):
+    if _table_name_matches_question(plan.get("question", ""), table_name):
         score += 1.6
-        reasons.append("table name appears directly in the question")
+        reasons.append("table name matches the question directly")
 
     for semantic_hint in plan.get("semantic_hints", set()):
         if any(resolved_semantic_type(column) == semantic_hint for column in table_data.get("columns", [])):
@@ -1005,6 +1005,14 @@ def _preferred_primary_tables_for_simple_question(
     second_table = scored_tables[1][0] if len(scored_tables) > 1 else None
     second_score = scored_tables[1][1] if len(scored_tables) > 1 else 0.0
     question = str(plan.get("question") or "")
+    direct_match_tables = [
+        table_name
+        for table_name, _, _ in scored_tables
+        if _table_name_matches_question(question, table_name)
+    ]
+    if len(direct_match_tables) == 1:
+        return [direct_match_tables[0]]
+
     has_direct_match = _table_name_matches_question(question, top_table)
     vector_table_names = list((vector_results or {}).get("table_names") or [])
     has_top_vector_match = bool(vector_table_names and vector_table_names[0] == top_table)
@@ -1922,8 +1930,14 @@ def _compute_route_recommendation(
     if confidence < 0.5:
         return "needs_clarification"
 
+    has_single_direct_table_match = bool(
+        len(selected_tables) == 1
+        and "table name matches the question directly"
+        in str((selected_tables[0] or {}).get("reason") or "").lower()
+    )
+
     if (
-        confidence >= 0.7
+        (confidence >= 0.7 or (has_single_direct_table_match and confidence >= 0.55))
         and len(selected_tables) == 1
         and intent in {"list", "count"}
         and not has_grouping

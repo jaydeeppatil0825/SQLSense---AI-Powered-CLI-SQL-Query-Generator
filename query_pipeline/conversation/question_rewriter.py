@@ -1,7 +1,9 @@
 """
 conversation/question_rewriter.py
 ===================================
-Rewrites follow-up questions into standalone questions using AI or rule-based fallback.
+Rewrites follow-up questions into standalone questions using rule-based patterns.
+
+AI-based rewriting is disabled in Phase 1.
 """
 
 from __future__ import annotations
@@ -9,7 +11,6 @@ from __future__ import annotations
 import os
 import re
 
-from sql_pipeline.sql_generator import _call_ai_backend
 from utils.logger import get_logger
 
 
@@ -28,7 +29,7 @@ def rewrite_follow_up_question(
         conversation_memory: The ConversationMemory instance
         knowledge_base: The knowledge base
         business_glossary: Optional business glossary
-        ai_backend: The AI backend to use ("local" or "nvidia")
+        ai_backend: The AI backend to use (kept for backward compatibility, not used)
     
     Returns:
         Rewritten standalone question
@@ -42,93 +43,10 @@ def rewrite_follow_up_question(
         logger.warning("No previous question found, returning original question")
         return user_question
     
-    # Try AI-based rewriting first
-    if ai_backend == "nvidia" or ai_backend == "local":
-        try:
-            rewritten = _rewrite_with_ai(user_question, last_question, ai_backend)
-            if rewritten:
-                logger.info(f"AI rewrite successful: '{user_question}' -> '{rewritten}'")
-                return rewritten
-            else:
-                logger.warning("AI rewrite returned empty, falling back to rule-based")
-        except Exception as exc:
-            logger.warning(f"AI rewrite failed: {exc}, falling back to rule-based")
-    
-    # Fall back to rule-based rewriting
+    # Use rule-based rewriting only (AI disabled in Phase 1)
     rewritten = _rewrite_with_rules(user_question, last_question)
     logger.info(f"Rule-based rewrite: '{user_question}' -> '{rewritten}'")
     return rewritten
-
-
-def _rewrite_with_ai(user_question: str, last_question: str, ai_backend: str) -> str:
-    """
-    Rewrite the question using AI.
-    
-    Args:
-        user_question: The user's follow-up question
-        last_question: The previous question
-        ai_backend: The AI backend to use
-    
-    Returns:
-        Rewritten question or None if AI fails
-    """
-    prompt = f"""You are a SQL question rewriter. Your task is to rewrite follow-up questions into complete standalone questions.
-
-Previous question: {last_question}
-Follow-up question: {user_question}
-
-Rewrite the follow-up question into a complete standalone question that can be understood without context.
-
-Rules:
-- Return ONLY the rewritten question.
-- Do NOT return SQL.
-- Do NOT explain your reasoning.
-- Do NOT use markdown code blocks.
-- Preserve the original business intent.
-- Use previous context only when necessary.
-- If the follow-up asks for a chart or insights, return a special action instead: "action: chart" or "action: insights"
-
-Examples:
-Previous: Show all customers
-Follow-up: Where do they live?
-Rewritten: Show customer names and cities from customers
-
-Previous: Show monthly sales
-Follow-up: Now only for Mumbai
-Rewritten: Show monthly sales for customers in Mumbai
-
-Previous: Show top 5 customers by total sales
-Follow-up: Make it top 10
-Rewritten: Show top 10 customers by total sales
-
-Previous: Show revenue by product category
-Follow-up: Sort highest first
-Rewritten: Show revenue by product category sorted by highest revenue first
-
-Rewritten question:"""
-
-    messages = [{"role": "user", "content": prompt}]
-    response = _call_ai_backend(messages, ai_backend)
-    
-    if not response:
-        return None
-    
-    # Clean the response
-    response = response.strip()
-    
-    # Remove markdown code blocks if present
-    if response.startswith("```"):
-        response = re.sub(r"```(?:json)?\n?", "", response)
-        response = re.sub(r"\n```", "", response)
-    
-    # Remove common prefixes
-    response = re.sub(r"^(Rewritten question:|Question:|Rewritten:)\s*", "", response, flags=re.IGNORECASE)
-    
-    # Check for action responses
-    if response.lower().startswith("action:"):
-        return response
-    
-    return response.strip()
 
 
 def _rewrite_with_rules(user_question: str, last_question: str) -> str:

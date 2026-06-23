@@ -9,11 +9,8 @@ runtime tables, columns, formulas, or business mappings.
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Dict, Optional
-
-from core.ai_backend_service import call_ai_backend
 from utils.logger import get_logger
 from query_pipeline.question_normalizer import normalize_question
 from sql_pipeline.sql_validator import extract_requested_limit
@@ -66,124 +63,20 @@ _STOPWORD_RE = re.compile(
 
 
 def build_intent(question: str, ai_backend: str = "local") -> Dict[str, Any]:
-    """Return structured, schema-agnostic intent for the question."""
+    """
+    Return structured, schema-agnostic intent for the question.
+
+    AI is intentionally not used here.
+    Runtime intent building must remain deterministic.
+    The ai_backend parameter is kept temporarily for backward compatibility.
+    """
     normalized_question, _ = normalize_question(question)
-    fallback = _build_fallback_intent(normalized_question)
-
-    ai_intent = _build_ai_intent(normalized_question, ai_backend=ai_backend)
-    if not ai_intent:
-        return fallback
-
-    merged = dict(fallback)
-    for key, value in ai_intent.items():
-        if key not in merged:
-            continue
-        if value in (None, "", [], {}):
-            continue
-        merged[key] = value
-
-    merged["raw_business_terms"] = _merge_unique(
-        ai_intent.get("raw_business_terms"),
-        fallback.get("raw_business_terms"),
-    )
-    merged["requested_metrics"] = _merge_unique(
-        ai_intent.get("requested_metrics"),
-        fallback.get("requested_metrics"),
-    )
-    merged["requested_dimensions"] = _merge_unique(
-        ai_intent.get("requested_dimensions"),
-        fallback.get("requested_dimensions"),
-    )
-    merged["requested_filters"] = _merge_unique(
-        ai_intent.get("requested_filters"),
-        fallback.get("requested_filters"),
-    )
-    merged["needs_grouping"] = bool(ai_intent.get("needs_grouping")) or bool(fallback.get("needs_grouping"))
-    merged["needs_aggregation"] = bool(ai_intent.get("needs_aggregation")) or bool(fallback.get("needs_aggregation"))
-    merged["needs_join"] = _merge_join_hint(ai_intent.get("needs_join"), fallback.get("needs_join"))
-    merged["limit"] = merged.get("limit") or fallback.get("limit")
-    merged["confidence"] = max(
-        float(fallback.get("confidence") or 0.0),
-        float(merged.get("confidence") or 0.0),
-    )
-    merged = _normalize_simple_target_entity_usage(merged, normalized_question)
-    merged["source"] = "ai" if ai_intent.get("source") == "ai" else fallback.get("source", "fallback")
-    return merged
+    intent = _build_fallback_intent(normalized_question)
+    intent = _normalize_simple_target_entity_usage(intent, normalized_question)
+    intent["source"] = "deterministic"
+    return intent
 
 
-def _build_ai_intent(question: str, *, ai_backend: str) -> Optional[Dict[str, Any]]:
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You analyze natural-language data questions. "
-                "Return JSON only. "
-                "Do not choose database tables, columns, formulas, aliases, or SQL. "
-                "Only describe the request shape and preserve business phrases from the question."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                "Analyze this user question and return JSON with exactly these keys: "
-                "user_goal, intent_type, business_operation, requested_metrics, requested_dimensions, "
-                "requested_filters, requested_sort, limit, needs_grouping, needs_aggregation, needs_join, "
-                "raw_business_terms, confidence. "
-                "Rules: keep business terms from the question, do not map them to schema terms, "
-                "do not invent formulas, do not invent tables or columns, "
-                "use generic values like list/count/ranking/grouped_summary/comparison/filter/sort where suitable. "
-                f"Question: {question}"
-            ),
-        },
-    ]
-
-    try:
-        raw_response = call_ai_backend(
-            messages,
-            backend=ai_backend,
-            temperature=0,
-            max_tokens=500,
-        )
-    except Exception as exc:
-        logger.debug(f"Intent builder AI fallback activated: {exc}")
-        return None
-
-    return _parse_ai_intent_response(raw_response, question)
-
-
-def _parse_ai_intent_response(raw_response: str, question: str) -> Optional[Dict[str, Any]]:
-    text = str(raw_response or "").strip()
-    if not text:
-        return None
-
-    parsed = _extract_json_object(text)
-    if not isinstance(parsed, dict):
-        return None
-
-    normalized_question, _ = normalize_question(question)
-    sanitized = _sanitize_intent(parsed, normalized_question)
-    if not sanitized:
-        return None
-    sanitized["source"] = "ai"
-    return sanitized
-
-
-def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        parsed = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 def _sanitize_intent(payload: Dict[str, Any], question: str) -> Dict[str, Any]:

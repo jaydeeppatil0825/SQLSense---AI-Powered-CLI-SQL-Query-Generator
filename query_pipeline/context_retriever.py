@@ -173,13 +173,18 @@ def _strong_direct_primary_table_match(
         identifier_score = 0.0
         identifier_evidence: list[str] = []
         for term in query_terms:
-            score, evidence = _score_match(term, table_name, _humanize(table_name))
+            score, evidence = _score_identifier_match(term, table_name, _humanize(table_name))
             if score > identifier_score:
                 identifier_score = score
                 identifier_evidence = evidence
         if identifier_score < 0.84:
             continue
-        if not set(identifier_evidence) & {"exact_phrase", "exact_token_match", "all_term_tokens_present"}:
+        if not set(identifier_evidence) & {
+            "exact_phrase",
+            "exact_token_match",
+            "all_term_tokens_present",
+            "identifier_token_match",
+        }:
             continue
         direct_matches.append({**entry, "score": identifier_score})
 
@@ -197,6 +202,48 @@ def _strong_direct_primary_table_match(
     if top_score >= second_score + 0.15:
         return top_table
     return None
+
+
+def _score_identifier_match(term: str, *texts: str) -> tuple[float, list[str]]:
+    """
+    Score identifier-only matches more strongly than generic substring matches.
+
+    This keeps simple singular/plural entity queries like "partner" -> "partners"
+    on the direct-table path instead of falling through to glossary-expanded
+    related tables.
+    """
+    normalized_term = _normalize_text(term)
+    term_tokens = set(_tokenize(term))
+    if not normalized_term or not term_tokens:
+        return 0.0, []
+
+    best_score = 0.0
+    evidences: list[str] = []
+
+    for text in texts:
+        normalized_text = _normalize_text(text)
+        text_tokens = set(_tokenize(text))
+        if not normalized_text or not text_tokens:
+            continue
+
+        if normalized_text == normalized_term:
+            return 1.0, ["exact_phrase"]
+        if term_tokens == text_tokens:
+            return 0.92, ["exact_token_match"]
+        if term_tokens <= text_tokens:
+            if len(term_tokens) == 1:
+                local_score = 0.91
+                local_evidence = ["identifier_token_match"]
+            else:
+                local_score = 0.88
+                local_evidence = ["all_term_tokens_present"]
+        else:
+            local_score, local_evidence = _score_match(term, text)
+        if local_score > best_score:
+            best_score = local_score
+            evidences = local_evidence
+
+    return round(best_score, 4), _unique(evidences)
 
 
 def _normalize_text(value: str) -> str:
