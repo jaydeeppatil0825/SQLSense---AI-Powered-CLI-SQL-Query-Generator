@@ -156,10 +156,12 @@ def classify_query_shape(
     table_count = len([entry for entry in selected_tables if entry.get("table")])
     requested_dimensions = list((intent or {}).get("requested_dimensions") or plan.get("requested_dimensions") or [])
     requested_metrics = list((intent or {}).get("requested_metrics") or plan.get("requested_metrics") or [])
+    requested_filters = list((intent or {}).get("requested_filters") or plan.get("requested_filters") or [])
     has_grouping = bool(plan.get("grouping") or plan.get("dimension") or requested_dimensions)
-    has_filters = bool(filter_candidates or plan.get("filters") or plan.get("date_range"))
+    has_filters = bool(filter_candidates or plan.get("filters") or plan.get("date_range") or requested_filters)
     has_formula = bool(formula_evidence)
-    has_join = bool(join_paths) or table_count > 1
+    has_join_paths = bool(join_paths)
+    has_join = has_join_paths or table_count > 1
     intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
     planner_intent = str(plan.get("intent") or "").strip().lower()
     aggregate_hint = _aggregate_function_hint(question)
@@ -186,7 +188,7 @@ def classify_query_shape(
         return "ranking_query"
     if has_grouping and has_metric:
         return "grouped_aggregate"
-    if has_join:
+    if has_join_paths:
         return "joined_lookup"
     if is_count and table_count == 1:
         return "single_table_count"
@@ -1716,17 +1718,17 @@ def _build_query_context_from_retrieved_context(
         if str(entry.get("table", "")).strip() in enriched_kb
     ]
     measure_candidates = [
-        dict(entry)
+        _ensure_candidate_reason(dict(entry), role="metric")
         for entry in (retrieved_context.get("measure_candidates") or [])
         if str(entry.get("table", "")).strip() in enriched_kb
     ]
     dimension_candidates = [
-        dict(entry)
+        _ensure_candidate_reason(dict(entry), role="dimension")
         for entry in (retrieved_context.get("dimension_candidates") or [])
         if str(entry.get("table", "")).strip() in enriched_kb
     ]
     filter_candidates = [
-        dict(entry)
+        _ensure_candidate_reason(dict(entry), role="filter")
         for entry in (retrieved_context.get("filter_candidates") or [])
         if str(entry.get("table", "")).strip() in enriched_kb
     ]
@@ -2227,18 +2229,18 @@ def _route_recommendation_from_contract(
         return "cannot_plan_safely", "metric evidence is missing"
     if missing_evidence_flags.get("missing_dimension"):
         return "cannot_plan_safely", "dimension evidence is missing"
+    if missing_evidence_flags.get("missing_filter_column"):
+        return "cannot_plan_safely", "filter evidence is missing"
     if confidence < 0.3 or not selected_tables:
         return "cannot_plan_safely", "planner confidence is too low"
-    if not can_plan:
-        return "unsupported_query_shape", f"{query_shape} is not implemented for deterministic SQL generation yet"
     if query_shape in {"single_table_list", "single_table_count"}:
         if confidence >= 0.7 or (has_direct_match and confidence >= 0.55):
             return "simple_rule_based", "single-table deterministic browse/count query"
         return "cannot_plan_safely", "single-table evidence is too weak for deterministic browse/count routing"
     if query_shape == "unknown":
-        if confidence < 0.5:
-            return "cannot_plan_safely", "planner could not derive a supported query shape with enough confidence"
-        return "unsupported_query_shape", "planner could not derive a supported query shape"
+        return "cannot_plan_safely", "planner could not derive a supported query shape with enough confidence"
+    if not can_plan:
+        return "unsupported_query_shape", f"{query_shape} is not implemented for deterministic SQL generation yet"
     return "deterministic_sql_required", f"{query_shape} requires deterministic SQL generation"
 
 
@@ -2283,19 +2285,34 @@ def _ambiguities_for_contract(
         ]
         if len(scored) == 2 and abs(scored[0] - scored[1]) < 0.12:
             ambiguities.append("table_selection")
-    if len({
-        f"{entry.get('table')}.{entry.get('column')}"
-        for entry in measure_candidates
-        if entry.get("table") and entry.get("column")
-    }) > 1:
+    if _has_close_role_ambiguity(measure_candidates):
         ambiguities.append("metric_selection")
-    if len({
-        f"{entry.get('table')}.{entry.get('column')}"
-        for entry in dimension_candidates
-        if entry.get("table") and entry.get("column")
-    }) > 1:
+    if _has_close_role_ambiguity(dimension_candidates):
         ambiguities.append("dimension_selection")
     return ambiguities
+
+
+def _has_close_role_ambiguity(candidates: list[dict[str, Any]]) -> bool:
+    unique_candidates = []
+    seen: set[tuple[str, str]] = set()
+    for entry in candidates or []:
+        key = (str(entry.get("table") or "").strip(), str(entry.get("column") or "").strip())
+        if not key[0] or not key[1] or key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(entry)
+    if len(unique_candidates) < 2:
+        return False
+    unique_candidates.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            str(item.get("table") or ""),
+            str(item.get("column") or ""),
+        )
+    )
+    top_score = float(unique_candidates[0].get("score") or 0.0)
+    second_score = float(unique_candidates[1].get("score") or 0.0)
+    return abs(top_score - second_score) < 0.08
 
 
 def _join_candidates_for_contract(
@@ -2427,9 +2444,23 @@ def _fallback_metric_candidates_from_selected_columns(
                 "score": float(entry.get("confidence") or 0.55),
                 "matched_terms": _content_terms(question),
                 "source": "selected_columns_fallback",
+                "reason": "metric candidate derived from numeric selected column aggregate fallback",
             }
         )
     return candidates
+
+
+def _ensure_candidate_reason(entry: dict[str, Any], *, role: str) -> dict[str, Any]:
+    normalized = dict(entry or {})
+    if str(normalized.get("reason") or "").strip():
+        return normalized
+    source = str(normalized.get("source") or "retrieved_context").strip()
+    matched_terms = [str(term).strip() for term in (normalized.get("matched_terms") or []) if str(term).strip()]
+    reason_parts = [f"{role} candidate retrieved from {source}"]
+    if matched_terms:
+        reason_parts.append(f"matched terms: {', '.join(matched_terms)}")
+    normalized["reason"] = "; ".join(reason_parts)
+    return normalized
 
 
 def _prune_single_table_aggregate_context(

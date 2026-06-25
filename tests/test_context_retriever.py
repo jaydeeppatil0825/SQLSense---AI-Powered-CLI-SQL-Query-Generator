@@ -291,6 +291,30 @@ def test_context_retriever_preserves_pending_billed_amount_without_formula_inven
     assert context.get("formula_evidence") in (None, [])
 
 
+def test_context_retriever_resolves_filter_candidates_from_dynamic_column_evidence():
+    intent = {
+        "requested_dimensions": [],
+        "requested_metrics": ["total amount"],
+        "requested_filters": ["status is pending"],
+        "raw_business_terms": ["total amount", "status", "pending", "bills"],
+        "source_scope": ["bills"],
+    }
+
+    context = retrieve_context(
+        "total amount from bills where status is pending",
+        intent,
+        KB,
+        business_glossary=GLOSSARY,
+        vector_retriever=None,
+    )
+
+    assert any(entry["column"] == "billed_value" for entry in context["measure_candidates"])
+    assert any(entry["column"] == "settlement_state" for entry in context["filter_candidates"])
+    filter_entry = next(entry for entry in context["filter_candidates"] if entry["column"] == "settlement_state")
+    assert filter_entry["score"] >= 0.45
+    assert "filter" in filter_entry["reason"].lower()
+
+
 def test_context_retriever_returns_fk_relationship_context_for_related_matches():
     intent = {
         "requested_dimensions": ["accounts"],

@@ -185,7 +185,34 @@ def test_qp2_single_table_aggregate_contract_preserves_metric_evidence():
     assert context["join_paths"] == []
     assert context["required_joins"] == []
     assert any(candidate["column"] == "amount_total" for candidate in context["metric_candidates"])
+    metric_entry = next(candidate for candidate in context["metric_candidates"] if candidate["column"] == "amount_total")
+    assert "metric" in metric_entry["reason"].lower()
     assert context["vector_results"] == {}
+
+
+def test_qp6_show_sum_amount_from_bills_routes_to_deterministic_sql():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "amount_total", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate", "is_measure": True},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    glossary = generate_business_glossary(knowledge_base, use_ai_enrichment=True)
+
+    context = build_query_context(
+        "show sum amount from bills",
+        knowledge_base,
+        business_glossary=glossary,
+        use_vector_retrieval=False,
+    )
+
+    assert context["query_shape"] == "single_table_aggregate"
+    assert context["route_recommendation"] == "deterministic_sql_required"
 
 
 def test_qp3_multi_metric_aggregate_classification():
@@ -365,6 +392,121 @@ def test_qp3_filtered_query_classification():
     assert context["query_shape"] == "filtered_query"
     assert context["route_recommendation"] == "deterministic_sql_required"
     assert context["filter_candidates"]
+    assert any("filter" in str(entry.get("reason") or "").lower() for entry in context["filter_candidates"])
+
+
+def test_qp6_missing_filter_evidence_routes_to_cannot_plan_safely():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "amount_total", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate", "is_measure": True},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    intent = {
+        "intent_type": "aggregate",
+        "requested_metrics": ["amount"],
+        "requested_dimensions": [],
+        "requested_filters": ["status pending"],
+        "requested_sort": {},
+        "limit": None,
+        "needs_grouping": False,
+        "needs_aggregation": True,
+        "needs_join": False,
+    }
+    retrieved_context = {
+        "query_terms": ["amount", "status", "pending", "bills"],
+        "matched_tables": [
+            {"table": "bills", "score": 0.91, "matched_terms": ["bills"], "source": "kb_identifier"},
+        ],
+        "matched_columns": [
+            {"table": "bills", "column": "amount_total", "semantic_type": "numeric_candidate", "is_measure": True, "score": 0.95, "matched_terms": ["amount"], "source": "glossary"},
+        ],
+        "matched_glossary_terms": [],
+        "matched_relationships": [],
+        "possible_join_paths": [],
+        "measure_candidates": [
+            {"table": "bills", "column": "amount_total", "semantic_type": "numeric_candidate", "is_measure": True, "score": 0.95, "matched_terms": ["amount"], "source": "glossary"},
+        ],
+        "dimension_candidates": [],
+        "filter_candidates": [],
+        "retrieval_sources": ["kb_identifier", "glossary"],
+        "confidence": 0.9,
+    }
+
+    context = build_query_context(
+        "total amount from bills where status is pending",
+        knowledge_base,
+        use_vector_retrieval=False,
+        intent=intent,
+        retrieved_context=retrieved_context,
+    )
+
+    assert context["query_shape"] == "filtered_query"
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert "missing_filter_column" in context["missing_evidence"]
+
+
+def test_qp5_vague_metric_only_question_stays_unplanned_without_table_evidence():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "amount_total", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate", "is_measure": True},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "invoices": {
+            "columns": [
+                {"name": "invoice_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "amount_total", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate", "is_measure": True},
+            ],
+            "primary_keys": ["invoice_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+
+    context = build_query_context(
+        "show amount",
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=False,
+    )
+
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert context["query_shape"] == "unknown"
+    assert set(context["selected_table_names"]) == {"bills", "invoices"}
+    assert "table_selection" in context["ambiguities"] or context["confidence"] <= 0.55
+
+
+def test_qp6_blocked_unsafe_route():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+
+    context = build_query_context(
+        "drop bills",
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=False,
+    )
+
+    assert context["query_shape"] == "blocked_unsafe"
+    assert context["route_recommendation"] == "blocked_unsafe"
 
 
 def test_query_planner_does_not_use_module_field_for_scoring():

@@ -350,7 +350,7 @@ def _score_match(term: str, *texts: str) -> tuple[float, list[str]]:
 
 def _query_terms(normalized_question: str, intent: Dict[str, Any]) -> list[str]:
     terms = []
-    for key in ("raw_business_terms", "requested_metrics", "requested_dimensions", "requested_filters"):
+    for key in ("raw_business_terms", "requested_metrics", "requested_dimensions", "requested_filters", "source_scope"):
         values = intent.get(key) or []
         if isinstance(values, str):
             values = [values]
@@ -450,6 +450,7 @@ def _match_columns(query_terms: list[str], knowledge_base: Dict[str, Any]) -> li
                     "is_measure": column_is_measure(column),
                     "is_dimension": column_is_dimension(column),
                     "is_date": column_is_date(column),
+                    "sample_values": list(column_sample_values(column)),
                     "score": round(best_score, 4),
                     "matched_terms": _unique(matched_terms),
                     "evidence_sources": _unique(["runtime_column_name", *evidence_sources]),
@@ -820,30 +821,30 @@ def _candidate_columns(
     require_dimension: bool = False,
     require_filter: bool = False,
 ) -> list[Dict[str, Any]]:
-    candidates = []
     requested_terms = [_humanize(term) for term in requested_terms if _humanize(term)]
+    if (require_measure or require_dimension or require_filter) and not requested_terms:
+        return []
     if require_filter and not requested_terms:
         return []
+    role = "measure" if require_measure else "dimension" if require_dimension else "filter" if require_filter else "generic"
+    candidates = []
     for entry in matched_columns:
-        if require_measure and not bool(entry.get("is_measure")):
+        score, reasons = _role_candidate_score(entry, requested_terms, role=role)
+        if score <= 0:
             continue
-        if require_dimension and not (
-            bool(entry.get("is_dimension"))
-            or str(entry.get("semantic_type") or "") in {"name", "text", "category_candidate", "text_candidate", "date"}
-        ):
-            continue
-        if require_filter and requested_terms:
-            matched_terms = {str(term).lower() for term in entry.get("matched_terms", [])}
-            if not any(term.lower() in matched_terms for term in requested_terms):
-                continue
-        candidates.append(entry)
-    if not candidates and requested_terms:
-        for entry in matched_columns:
-            matched_terms = {str(term).lower() for term in entry.get("matched_terms", [])}
-            if any(term.lower() in matched_terms for term in requested_terms):
-                candidates.append(entry)
+        candidate = dict(entry)
+        candidate["score"] = round(score, 4)
+        candidate["reason"] = "; ".join(_unique(reasons))
+        candidates.append(candidate)
     deduped = []
     seen = set()
+    candidates.sort(
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            str(item.get("table") or ""),
+            str(item.get("column") or ""),
+        )
+    )
     for entry in candidates:
         key = (entry.get("table"), entry.get("column"))
         if key in seen:
@@ -851,6 +852,172 @@ def _candidate_columns(
         seen.add(key)
         deduped.append(entry)
     return deduped[:10]
+
+
+def _role_candidate_score(
+    entry: Dict[str, Any],
+    requested_terms: list[str],
+    *,
+    role: str,
+) -> tuple[float, list[str]]:
+    semantic_type = str(entry.get("semantic_type") or "").strip().lower()
+    core_semantic_type = str(entry.get("core_semantic_type") or "").strip().lower()
+    table_name = str(entry.get("table") or "").strip()
+    column_name = str(entry.get("column") or "").strip()
+    if not table_name or not column_name:
+        return 0.0, []
+
+    is_measure = bool(entry.get("is_measure"))
+    is_dimension = bool(entry.get("is_dimension"))
+    is_date = bool(entry.get("is_date"))
+    matched_terms = [str(term).strip() for term in (entry.get("matched_terms") or []) if str(term).strip()]
+    evidence_sources = [str(source).strip() for source in (entry.get("evidence_sources") or []) if str(source).strip()]
+    search_texts = [
+        column_name,
+        _humanize(column_name),
+        table_name,
+        _humanize(table_name),
+        semantic_type,
+        core_semantic_type,
+        *matched_terms,
+    ]
+
+    best_term_score = 0.0
+    term_reasons: list[str] = []
+    for term in requested_terms:
+        local_score, local_reasons = _score_match(term, *search_texts)
+        if local_score > best_term_score:
+            best_term_score = local_score
+            term_reasons = [f"requested term '{term}' matched column context", *local_reasons]
+
+    base_score = float(entry.get("score") or 0.0) * 0.7
+    reasons: list[str] = []
+
+    if role == "measure":
+        if semantic_type in {"id", "date", "boolean"} or core_semantic_type in {"id", "date", "boolean"}:
+            return 0.0, []
+        if not (
+            is_measure
+            or semantic_type in {"money", "quantity", "percentage", "numeric_candidate"}
+            or core_semantic_type == "numeric_candidate"
+        ):
+            return 0.0, []
+        base_score += 0.18 if is_measure else 0.1
+        reasons.append("column is eligible as a numeric metric")
+        if requested_terms and best_term_score <= 0:
+            return 0.0, []
+
+    elif role == "dimension":
+        if semantic_type in {"id", "boolean"} or core_semantic_type == "id":
+            return 0.0, []
+        if not (
+            is_dimension
+            or is_date
+            or semantic_type in {"name", "text", "category_candidate", "text_candidate", "date"}
+            or core_semantic_type in {"text_candidate", "category_candidate", "date"}
+        ):
+            return 0.0, []
+        base_score += 0.18 if is_dimension else 0.1
+        reasons.append("column is eligible as a grouping or display dimension")
+        if requested_terms and best_term_score <= 0:
+            return 0.0, []
+
+    elif role == "filter":
+        filter_support = 0.0
+        filter_reasons: list[str] = []
+        if requested_terms:
+            filter_support, filter_reasons = _filter_support_score(entry, requested_terms)
+        if filter_support <= 0:
+            return 0.0, []
+        base_score += 0.14
+        best_term_score = max(best_term_score, filter_support)
+        reasons.append("column can support a requested filter")
+        reasons.extend(filter_reasons)
+
+    else:
+        if requested_terms and best_term_score <= 0:
+            return 0.0, []
+
+    if term_reasons:
+        reasons.extend(term_reasons)
+    if evidence_sources:
+        reasons.append(f"evidence from {', '.join(_unique(evidence_sources))}")
+
+    total_score = min(base_score + best_term_score, 1.0)
+    if requested_terms and total_score < 0.45:
+        return 0.0, []
+    return round(total_score, 4), _unique(reasons)
+
+
+def _filter_support_score(entry: Dict[str, Any], requested_terms: list[str]) -> tuple[float, list[str]]:
+    semantic_type = str(entry.get("semantic_type") or "").strip().lower()
+    core_semantic_type = str(entry.get("core_semantic_type") or "").strip().lower()
+    column_name = str(entry.get("column") or "").strip()
+    table_name = str(entry.get("table") or "").strip()
+    matched_terms = [str(term).strip() for term in (entry.get("matched_terms") or []) if str(term).strip()]
+    search_texts = [column_name, _humanize(column_name), table_name, _humanize(table_name), *matched_terms]
+    best_score = 0.0
+    reasons: list[str] = []
+
+    for term in requested_terms:
+        score, local_reasons = _score_match(term, *search_texts)
+        if score > best_score:
+            best_score = score
+            reasons = [f"filter term '{term}' matched column context", *local_reasons]
+
+        sample_score = _sample_value_match_score(term, entry)
+        if sample_score > best_score:
+            best_score = sample_score
+            reasons = [f"filter term '{term}' matched sampled values"]
+
+    if _looks_like_date_filter(requested_terms) and bool(entry.get("is_date")):
+        best_score = max(best_score, 0.7)
+        reasons.append("date-style filter matched a date column")
+
+    if _looks_like_numeric_filter(requested_terms) and (
+        semantic_type in {"money", "quantity", "percentage", "numeric_candidate"}
+        or core_semantic_type == "numeric_candidate"
+    ):
+        best_score = max(best_score, 0.62)
+        reasons.append("comparison filter matched a numeric column")
+
+    return round(best_score, 4), _unique(reasons)
+
+
+def _sample_value_match_score(term: str, entry: Dict[str, Any]) -> float:
+    term_tokens = set(_tokenize(term))
+    if not term_tokens:
+        return 0.0
+    best_score = 0.0
+    for value in entry.get("sample_values", []) or []:
+        value_tokens = set(_tokenize(str(value)))
+        if not value_tokens:
+            continue
+        overlap = term_tokens & value_tokens
+        if not overlap:
+            continue
+        if term_tokens <= value_tokens:
+            best_score = max(best_score, 0.76)
+        else:
+            best_score = max(best_score, len(overlap) / max(len(term_tokens), 1))
+    return round(best_score, 4)
+
+
+def _looks_like_date_filter(requested_terms: list[str]) -> bool:
+    combined = " ".join(requested_terms).lower()
+    return bool(
+        re.search(r"\b(before|after|between)\b", combined)
+        or re.search(r"\b\d{4}-\d{2}-\d{2}\b", combined)
+        or re.search(r"\b20\d{2}\b", combined)
+    )
+
+
+def _looks_like_numeric_filter(requested_terms: list[str]) -> bool:
+    combined = " ".join(requested_terms).lower()
+    return bool(
+        re.search(r"\b(greater than|less than|more than|under|over|below|above)\b", combined)
+        or re.search(r"\b\d+(?:\.\d+)?\b", combined)
+    )
 
 
 def _overall_confidence(
