@@ -4,7 +4,7 @@ from query_pipeline.intent_builder import build_intent
 
 
 def test_fallback_intent_builder_handles_simple_browse_query():
-    intent = build_intent("show all accounts", ai_backend="local")
+    intent = build_intent("show all bills", ai_backend="local")
 
     assert intent["intent_type"] == "list"
     assert intent["business_operation"] == "browse"
@@ -12,11 +12,11 @@ def test_fallback_intent_builder_handles_simple_browse_query():
     assert intent["requested_metrics"] == []
     assert intent["needs_grouping"] is False
     assert intent["needs_aggregation"] is False
-    assert "accounts" in intent["raw_business_terms"]
+    assert "bills" in intent["raw_business_terms"]
 
 
 def test_fallback_intent_builder_handles_count_query():
-    intent = build_intent("count accounts", ai_backend="local")
+    intent = build_intent("count bills", ai_backend="local")
 
     assert intent["intent_type"] == "count"
     assert intent["business_operation"] == "count"
@@ -24,32 +24,68 @@ def test_fallback_intent_builder_handles_count_query():
     assert intent["requested_metrics"] == []
     assert intent["needs_aggregation"] is True
     assert intent["limit"] is None
-    assert "accounts" in intent["raw_business_terms"]
+    assert "bills" in intent["raw_business_terms"]
 
 
 def test_fallback_intent_builder_handles_ranking_query():
-    intent = build_intent("top 5 accounts by deal value", ai_backend="local")
+    intent = build_intent("top 5 partners by amount", ai_backend="local")
 
     assert intent["intent_type"] == "ranking"
     assert intent["limit"] == 5
-    assert intent["requested_metrics"] == ["deal value"]
-    assert intent["requested_dimensions"] == ["accounts"]
+    assert intent["requested_metrics"] == ["amount"]
+    assert intent["requested_dimensions"] == ["partners"]
     assert intent["needs_grouping"] is True
     assert intent["needs_aggregation"] is True
     assert intent["needs_join"] == "likely"
+    assert intent["requested_sort"] == {"direction": "desc", "terms": "amount"}
 
 
 def test_fallback_intent_builder_handles_grouped_metric_query():
-    intent = build_intent("deal value by account", ai_backend="local")
+    intent = build_intent("total amount by partner", ai_backend="local")
 
     assert intent["intent_type"] == "grouped_summary"
-    assert intent["requested_metrics"] == ["deal value"]
-    assert intent["requested_dimensions"] == ["account"]
+    assert intent["requested_metrics"] == ["amount"]
+    assert intent["requested_dimensions"] == ["partner"]
     assert intent["needs_grouping"] is True
+    assert intent["needs_aggregation"] is True
+    assert intent["aggregate_function"] == "sum"
+
+
+@pytest.mark.parametrize(
+    ("question", "aggregate_function"),
+    [
+        ("show total amount from bills", "sum"),
+        ("show sum amount from bills", "sum"),
+        ("show average amount from bills", "avg"),
+        ("show highest amount from bills", "max"),
+        ("show lowest amount from bills", "min"),
+    ],
+)
+def test_fallback_intent_builder_detects_generic_aggregate_queries(question, aggregate_function):
+    intent = build_intent(question, ai_backend="local")
+
+    assert intent["intent_type"] == "aggregate"
+    assert intent["aggregate_function"] == aggregate_function
+    assert intent["requested_metrics"] == ["amount"]
+    assert intent["source_scope"] == ["bills"]
+    assert intent["requested_filters"] == []
+    assert intent["needs_grouping"] is False
     assert intent["needs_aggregation"] is True
 
 
-def test_fallback_intent_builder_preserves_business_terms_for_pending_grouped_amount():
+def test_fallback_intent_builder_keeps_filtered_aggregate_intent_generic():
+    intent = build_intent("total amount from bills where status is pending", ai_backend="local")
+
+    assert intent["intent_type"] == "aggregate"
+    assert intent["aggregate_function"] == "sum"
+    assert intent["requested_metrics"] == ["amount"]
+    assert intent["source_scope"] == ["bills"]
+    assert intent["requested_filters"] == ["status is pending"]
+    assert intent["needs_grouping"] is False
+    assert intent["needs_aggregation"] is True
+
+
+def test_fallback_intent_builder_preserves_business_terms_for_grouped_amount():
     intent = build_intent("pending billed amount by account", ai_backend="local")
 
     assert intent["requested_metrics"] == ["pending billed amount"]
@@ -66,5 +102,4 @@ def test_fallback_intent_builder_handles_stock_by_dimension_without_mapping():
     assert intent["requested_dimensions"] == ["storage point"]
     assert intent["needs_grouping"] is True
     assert intent["needs_aggregation"] is True
-
 

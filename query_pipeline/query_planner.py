@@ -94,6 +94,109 @@ def _aggregate_function_hint(question: str) -> str | None:
     return None
 
 
+def _explicit_metric_candidate_count(
+    question: str,
+    metric_candidates: list[dict[str, Any]],
+) -> int:
+    normalized_question = _normalize(question)
+    question_tokens = set(_content_terms(question))
+    explicit_count = 0
+    seen: set[tuple[str, str]] = set()
+
+    for candidate in metric_candidates or []:
+        table_name = str(candidate.get("table") or "").strip()
+        column_name = str(candidate.get("column") or "").strip()
+        if not column_name:
+            continue
+        signature = (table_name, column_name)
+        if signature in seen:
+            continue
+
+        matched_terms = [
+            str(value).strip().lower()
+            for value in (candidate.get("matched_terms") or [])
+            if str(value).strip()
+        ]
+        candidate_tokens = set(_tokenize(column_name))
+        explicit = False
+        for term in matched_terms:
+            term_tokens = set(_tokenize(term))
+            if term and term in normalized_question:
+                explicit = True
+                break
+            if term_tokens and term_tokens <= question_tokens:
+                explicit = True
+                break
+        if not explicit and candidate_tokens and candidate_tokens <= question_tokens:
+            explicit = True
+        if explicit:
+            explicit_count += 1
+            seen.add(signature)
+
+    return explicit_count
+
+
+def classify_query_shape(
+    *,
+    question: str,
+    intent: dict[str, Any] | None,
+    retrieved_context: dict[str, Any] | None,
+    plan: dict[str, Any],
+    selected_tables: list[dict[str, Any]],
+    selected_columns: list[dict[str, Any]],
+    metric_candidates: list[dict[str, Any]],
+    dimension_candidates: list[dict[str, Any]],
+    filter_candidates: list[dict[str, Any]],
+    join_paths: list[dict[str, Any]],
+    formula_evidence: list[dict[str, Any]],
+) -> str:
+    """Centralized planner query-shape classifier used before route selection."""
+    del retrieved_context, selected_columns  # Reserved for future expansion without changing the contract.
+
+    table_count = len([entry for entry in selected_tables if entry.get("table")])
+    requested_dimensions = list((intent or {}).get("requested_dimensions") or plan.get("requested_dimensions") or [])
+    requested_metrics = list((intent or {}).get("requested_metrics") or plan.get("requested_metrics") or [])
+    has_grouping = bool(plan.get("grouping") or plan.get("dimension") or requested_dimensions)
+    has_filters = bool(filter_candidates or plan.get("filters") or plan.get("date_range"))
+    has_formula = bool(formula_evidence)
+    has_join = bool(join_paths) or table_count > 1
+    intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
+    planner_intent = str(plan.get("intent") or "").strip().lower()
+    aggregate_hint = _aggregate_function_hint(question)
+    is_count = planner_intent == "count" or intent_type == "count"
+    is_ranking = bool(
+        planner_intent == "top_n"
+        or intent_type == "ranking"
+        or (plan.get("limit") is not None and plan.get("sorting"))
+    )
+    explicit_metric_count = _explicit_metric_candidate_count(question, metric_candidates)
+    has_metric = bool(metric_candidates or requested_metrics)
+
+    if _UNSAFE_QUERY_RE.search(question):
+        return "blocked_unsafe"
+    if has_formula:
+        return "formula_query"
+    if requested_metrics and not metric_candidates and (has_grouping or is_ranking or has_join):
+        return "formula_query"
+    if has_filters:
+        return "filtered_query"
+    if explicit_metric_count > 1:
+        return "multi_metric_aggregate"
+    if is_ranking:
+        return "ranking_query"
+    if has_grouping and has_metric:
+        return "grouped_aggregate"
+    if has_join:
+        return "joined_lookup"
+    if is_count and table_count == 1:
+        return "single_table_count"
+    if aggregate_hint and table_count == 1 and has_metric:
+        return "single_table_aggregate"
+    if planner_intent == "list" and table_count == 1:
+        return "single_table_list"
+    return "unknown"
+
+
 def _extract_limit(question: str) -> int | None:
     match = re.search(
         r"\b(?:top|first|last|latest|recent|limit|show|get|fetch)\s+(\d+)\b"
@@ -288,85 +391,10 @@ def _compute_intent_confidence(question: str, intent: dict[str, Any]) -> float:
 
 
 def build_intent(question: str) -> dict[str, Any]:
-    """
-    Build a structured intent from a natural language question.
-    
-    This function is schema-agnostic and does not map terms to real tables, columns, or formulas.
-    It preserves unresolved business terms for context retrieval.
-    
-    Returns:
-        dict with keys:
-            - user_goal: str (extracted from question)
-            - intent_type: str (count, list, top_n, etc.)
-            - requested_metrics: list[str] (conservative, based on phrase positions)
-            - requested_dimensions: list[str] (conservative, based on phrase positions)
-            - requested_filters: list[str]
-            - requested_sort: dict | None
-            - limit: int | None
-            - needs_grouping: bool
-            - needs_aggregation: bool
-            - needs_join: bool
-            - raw_business_terms: list[str]
-            - confidence: float
-    """
-    normalized = _normalize(question)
-    
-    # Extract intent type (generic query shape)
-    intent_type = _detect_intent(question)
-    
-    # Extract business terms (preserved for context retrieval, no classification)
-    raw_business_terms = _extract_business_terms(question)
-    
-    # Extract phrase positions (conservative, based on "X by Y" patterns)
-    phrase_positions = _extract_phrase_positions(question)
-    
-    # Use phrase positions for metrics/dimensions (conservative approach)
-    requested_metrics = phrase_positions["metric_candidates"]
-    requested_dimensions = phrase_positions["dimension_candidates"]
-    
-    # Extract requested filters
-    requested_filters = _extract_requested_filters(question)
-    
-    # Extract sorting
-    requested_sort = _detect_sorting(question)
-    
-    # Extract limit
-    limit = _extract_limit(question) or _default_limit_for_intent(intent_type)
-    
-    # Determine if grouping is needed (based on phrase positions, not semantic classification)
-    needs_grouping = bool(requested_dimensions) or intent_type in {"trend", "top_n"}
-    
-    # Determine if aggregation is needed (based on intent type)
-    needs_aggregation = intent_type in {"count", "total", "average", "top_n"}
-    
-    # Determine if join is needed (heuristic based on multiple business terms)
-    needs_join = len(raw_business_terms) > 1 and len(requested_dimensions) > 1
-    
-    # Extract user goal (simplified version of the question)
-    user_goal = normalized
-    
-    # Compute confidence (lower if unsure about metrics/dimensions)
-    confidence = _compute_intent_confidence(question, {
-        "intent_type": intent_type,
-        "requested_metrics": requested_metrics,
-        "requested_dimensions": requested_dimensions,
-        "raw_business_terms": raw_business_terms,
-    })
-    
-    return {
-        "user_goal": user_goal,
-        "intent_type": intent_type,
-        "requested_metrics": requested_metrics,
-        "requested_dimensions": requested_dimensions,
-        "requested_filters": requested_filters,
-        "requested_sort": requested_sort,
-        "limit": limit,
-        "needs_grouping": needs_grouping,
-        "needs_aggregation": needs_aggregation,
-        "needs_join": needs_join,
-        "raw_business_terms": raw_business_terms,
-        "confidence": round(confidence, 2),
-    }
+    """Backward-compatible delegate to the canonical deterministic intent builder."""
+    from query_pipeline.intent_builder import build_intent as _canonical_build_intent
+
+    return _canonical_build_intent(question)
 
 
 
@@ -1494,8 +1522,15 @@ def _find_bridge_tables(
 
 def _planner_intent_from_structured_intent(intent: dict[str, Any] | None) -> str:
     intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
+    aggregate_function = str((intent or {}).get("aggregate_function") or "").strip().lower()
     if intent_type == "count":
         return "count"
+    if intent_type == "aggregate":
+        if aggregate_function == "avg":
+            return "average"
+        if aggregate_function == "sum":
+            return "total"
+        return "aggregate"
     if intent_type == "ranking":
         return "top_n"
     if intent_type == "comparison":
@@ -2151,57 +2186,22 @@ def _normalize_query_shape_label(
     formula_evidence: list[dict[str, Any]],
     legacy_query_shape: str | None,
 ) -> str:
-    table_count = len([entry for entry in selected_tables if entry.get("table")])
-    requested_dimensions = list((intent or {}).get("requested_dimensions") or plan.get("requested_dimensions") or [])
-    requested_metrics = list((intent or {}).get("requested_metrics") or plan.get("requested_metrics") or [])
-    has_grouping = bool(plan.get("grouping") or plan.get("dimension") or requested_dimensions)
-    has_filters = bool(filters or plan.get("filters") or plan.get("date_range"))
-    has_formula = bool(formula_evidence)
-    has_join = bool(join_paths) or table_count > 1
-    has_metric = bool(measure_candidates or requested_metrics)
-    metric_tables = {
-        str(entry.get("table") or "").strip()
-        for entry in (measure_candidates or [])
-        if str(entry.get("table") or "").strip()
-    }
-    intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
-    planner_intent = str(plan.get("intent") or "").strip().lower()
-    aggregate_hint = _aggregate_function_hint(question)
-    is_count = planner_intent == "count" or intent_type == "count"
-    is_ranking = bool(
-        planner_intent == "top_n"
-        or intent_type == "ranking"
-        or (plan.get("limit") is not None and plan.get("sorting"))
+    query_shape = classify_query_shape(
+        question=question,
+        intent=intent,
+        retrieved_context=None,
+        plan=plan,
+        selected_tables=selected_tables,
+        selected_columns=[],
+        metric_candidates=measure_candidates,
+        dimension_candidates=dimension_candidates,
+        filter_candidates=filters,
+        join_paths=join_paths,
+        formula_evidence=formula_evidence,
     )
-    multi_metric = len({
-        f"{entry.get('table')}.{entry.get('column')}"
-        for entry in measure_candidates
-        if entry.get("table") and entry.get("column")
-    }) > 1
-
-    if _UNSAFE_QUERY_RE.search(question):
-        return "blocked_unsafe"
-    if has_formula or legacy_query_shape == "formula_query":
+    if query_shape == "unknown" and legacy_query_shape == "formula_query":
         return "formula_query"
-    if aggregate_hint and not requested_dimensions and not has_grouping and len(metric_tables) == 1 and not is_count:
-        return "single_table_aggregate"
-    if multi_metric and (aggregate_hint or has_grouping or is_ranking):
-        return "multi_metric_aggregate"
-    if is_ranking:
-        return "ranking_query"
-    if has_grouping and has_metric:
-        return "grouped_aggregate"
-    if has_join:
-        return "joined_lookup"
-    if has_filters:
-        return "filtered_query"
-    if is_count and table_count == 1:
-        return "single_table_count"
-    if aggregate_hint and table_count == 1 and has_metric:
-        return "single_table_aggregate"
-    if planner_intent == "list" and table_count == 1:
-        return "single_table_list"
-    return "unknown"
+    return query_shape
 
 
 def _route_recommendation_from_contract(

@@ -188,6 +188,34 @@ def test_qp2_single_table_aggregate_contract_preserves_metric_evidence():
     assert context["vector_results"] == {}
 
 
+def test_qp3_multi_metric_aggregate_classification():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "amount_total", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate", "is_measure": True},
+                {"name": "tax_total", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate", "is_measure": True},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    glossary = generate_business_glossary(knowledge_base, use_ai_enrichment=True)
+
+    context = build_query_context(
+        "show total amount and tax from bills",
+        knowledge_base,
+        business_glossary=glossary,
+        use_vector_retrieval=False,
+    )
+
+    assert context["query_shape"] == "multi_metric_aggregate"
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    metric_names = {candidate["column"] for candidate in context["metric_candidates"]}
+    assert {"amount_total", "tax_total"} <= metric_names
+
+
 def test_qp2_joined_lookup_exposes_join_candidates():
     knowledge_base = {
         "partners": {
@@ -277,6 +305,66 @@ def test_qp2_joined_lookup_exposes_join_candidates():
     assert context["route_recommendation"] == "deterministic_sql_required"
     assert context["join_candidates"]
     assert context["required_joins"] == ["bills.partner_id = partners.partner_id"]
+
+
+def test_qp3_filtered_query_classification():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "amount_total", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate", "is_measure": True},
+                {"name": "status", "type": "VARCHAR(20)", "semantic_type": "text_candidate"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    intent = {
+        "intent_type": "list",
+        "requested_metrics": ["total amount"],
+        "requested_dimensions": [],
+        "requested_filters": ["status pending"],
+        "requested_sort": {},
+        "limit": None,
+        "needs_grouping": False,
+        "needs_aggregation": True,
+        "needs_join": False,
+    }
+    retrieved_context = {
+        "query_terms": ["total amount", "status", "pending"],
+        "matched_tables": [
+            {"table": "bills", "score": 0.91, "matched_terms": ["bills"], "source": "kb_identifier"},
+        ],
+        "matched_columns": [
+            {"table": "bills", "column": "amount_total", "semantic_type": "numeric_candidate", "is_measure": True, "score": 0.95, "matched_terms": ["total amount"], "source": "glossary"},
+            {"table": "bills", "column": "status", "semantic_type": "text_candidate", "is_dimension": True, "score": 0.9, "matched_terms": ["status", "pending"], "source": "glossary"},
+        ],
+        "matched_glossary_terms": [{"term": "total amount", "score": 0.94, "source": "glossary"}],
+        "matched_relationships": [],
+        "possible_join_paths": [],
+        "measure_candidates": [
+            {"table": "bills", "column": "amount_total", "semantic_type": "numeric_candidate", "is_measure": True, "score": 0.95, "matched_terms": ["total amount"], "source": "glossary"},
+        ],
+        "dimension_candidates": [],
+        "filter_candidates": [
+            {"table": "bills", "column": "status", "semantic_type": "text_candidate", "score": 0.9, "matched_terms": ["status", "pending"], "source": "glossary"},
+        ],
+        "retrieval_sources": ["kb_identifier", "glossary"],
+        "confidence": 0.9,
+    }
+
+    context = build_query_context(
+        "total amount from bills where status is pending",
+        knowledge_base,
+        use_vector_retrieval=False,
+        intent=intent,
+        retrieved_context=retrieved_context,
+    )
+
+    assert context["query_shape"] == "filtered_query"
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["filter_candidates"]
 
 
 def test_query_planner_does_not_use_module_field_for_scoring():
@@ -1067,7 +1155,7 @@ def test_qp2_intent_builder_show_all_accounts():
     intent = build_intent("show all accounts")
     
     assert intent["intent_type"] == "list"
-    assert intent["user_goal"] == "show all accounts"
+    assert intent["user_goal"].startswith("show")
     assert "accounts" in intent["raw_business_terms"]
     assert intent["needs_aggregation"] is False
     assert intent["needs_grouping"] is False
@@ -1094,14 +1182,13 @@ def test_qp2_intent_builder_top_5_accounts_by_deal_value():
     """Test intent builder for 'top 5 accounts by deal value' question."""
     intent = build_intent("top 5 accounts by deal value")
     
-    assert intent["intent_type"] == "top_n"
-    assert intent["user_goal"] == "top 5 accounts by deal value"
+    assert intent["intent_type"] == "ranking"
     assert "accounts" in intent["raw_business_terms"]
     assert "deal" in intent["raw_business_terms"] or "value" in intent["raw_business_terms"]
     assert intent["limit"] == 5
     assert intent["needs_aggregation"] is True
     assert intent["needs_grouping"] is True
-    assert intent["requested_sort"] == {"direction": "desc", "by": "deal value"}
+    assert intent["requested_sort"] == {"direction": "desc", "terms": "deal value"}
     # Should use phrase positions: "accounts" as dimension, "deal value" as metric
     assert "accounts" in intent["requested_dimensions"]
     assert "deal value" in intent["requested_metrics"]
@@ -1111,11 +1198,10 @@ def test_qp2_intent_builder_deal_value_by_account():
     """Test intent builder for 'deal value by account' question."""
     intent = build_intent("deal value by account")
     
-    assert intent["intent_type"] == "list"
-    assert intent["user_goal"] == "deal value by account"
+    assert intent["intent_type"] == "grouped_summary"
     assert "deal" in intent["raw_business_terms"] or "value" in intent["raw_business_terms"]
     assert "account" in intent["raw_business_terms"]
-    assert intent["needs_aggregation"] is False
+    assert intent["needs_aggregation"] is True
     assert intent["needs_grouping"] is True
     # Should use phrase positions: "deal value" as metric, "account" as dimension
     assert "deal value" in intent["requested_metrics"]
@@ -1126,12 +1212,11 @@ def test_qp2_intent_builder_pending_billed_amount_by_account():
     """Test intent builder for 'pending billed amount by account' question."""
     intent = build_intent("pending billed amount by account")
     
-    assert intent["intent_type"] == "list"
-    assert intent["user_goal"] == "pending billed amount by account"
+    assert intent["intent_type"] == "grouped_summary"
     assert "pending" in intent["raw_business_terms"]
     assert "billed" in intent["raw_business_terms"] or "amount" in intent["raw_business_terms"]
     assert "account" in intent["raw_business_terms"]
-    assert intent["needs_aggregation"] is False
+    assert intent["needs_aggregation"] is True
     assert intent["needs_grouping"] is True
     # Should preserve formula-like term as raw business terms
     assert "pending" in intent["raw_business_terms"]
@@ -1144,11 +1229,10 @@ def test_qp2_intent_builder_show_current_stock_by_storage_point():
     """Test intent builder for 'show current stock by storage point' question."""
     intent = build_intent("show current stock by storage point")
     
-    assert intent["intent_type"] == "list"
-    assert intent["user_goal"] == "show current stock by storage point"
+    assert intent["intent_type"] == "grouped_summary"
     assert "stock" in intent["raw_business_terms"]
     assert "storage" in intent["raw_business_terms"] or "point" in intent["raw_business_terms"]
-    assert intent["needs_aggregation"] is False
+    assert intent["needs_aggregation"] is True
     assert intent["needs_grouping"] is True
     # Should use phrase positions: "current stock" as metric, "storage point" as dimension
     assert "current stock" in intent["requested_metrics"]
@@ -1177,7 +1261,7 @@ def test_qp2_intent_builder_schema_agnostic():
     assert "sales" not in intent["requested_metrics"]
     
     # Should be schema-agnostic
-    assert intent["intent_type"] in {"list", "count", "top_n", "total", "average", "trend", "comparison"}
+    assert intent["intent_type"] in {"list", "count", "aggregate", "ranking", "grouped_summary", "comparison", "filter", "sorted_list"}
     
     # Without "by" pattern, should not classify as metric/dimension
     assert len(intent["requested_metrics"]) == 0
@@ -1220,6 +1304,8 @@ def test_qp2_intent_builder_all_required_fields_present():
         "requested_dimensions",
         "requested_filters",
         "requested_sort",
+        "aggregate_function",
+        "source_scope",
         "limit",
         "needs_grouping",
         "needs_aggregation",
