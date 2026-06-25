@@ -243,7 +243,7 @@ class AIBackendService:
         logger.info(f"Backend switched to NVIDIA: {self.nvidia_model} at {self.nvidia_base_url}")
 
     def set_custom_backend(
-        self,
+        self, 
         api_url: str,
         model: str = "",
         auth_header: str = "",
