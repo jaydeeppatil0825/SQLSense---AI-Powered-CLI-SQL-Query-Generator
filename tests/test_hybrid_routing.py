@@ -268,7 +268,7 @@ def _context(
 
 def _assert_complex_not_implemented(service, message, sql):
     assert sql is None
-    assert "complex deterministic sql generation is not implemented yet" in message.lower()
+    assert "complex deterministic sql generation is not implemented for this query type yet" in message.lower()
     assert service.get_last_query_context()["route_used"] == "complex_deterministic_not_ready"
 
 
@@ -1555,7 +1555,7 @@ def test_simple_sample_value_filter_fails_cleanly_without_runtime_ai(monkeypatch
 
     assert success is False
     assert sql is None
-    assert "complex deterministic sql generation is not implemented yet" in message.lower()
+    assert "complex deterministic sql generation is not implemented for this query type yet" in message.lower()
     assert service.get_last_query_context()["selected_table_names"][0] == "accounts"
 
 

@@ -18,7 +18,10 @@ import inspect
 import re
 
 from query_pipeline.query_planner import build_query_context
-from sql_pipeline.deterministic_sql_generator import generate_single_table_aggregate_sql
+from sql_pipeline.deterministic_sql_generator import (
+    generate_single_table_aggregate_sql,
+    looks_like_single_table_aggregate_request,
+)
 from sql_pipeline.simple_query_generator import generate_simple_sql
 from sql_pipeline.sql_generator import (
     generate_sql as _blocked_generate_sql,
@@ -1344,14 +1347,36 @@ class QuestionService:
         if is_simple_list_count:
             logger.info(f"Simple single-table list/count detected: intent={intent_type}, table={selected_tables[0].get('table') if selected_tables else 'unknown'}")
             route = "simple_rule_based"
+
+        is_phase1a_aggregate = looks_like_single_table_aggregate_request(query_context)
+
+        if is_phase1a_aggregate:
+            deterministic_aggregate = generate_single_table_aggregate_sql(
+                query_context=query_context,
+                knowledge_base=knowledge_base,
+            )
+            if deterministic_aggregate.status == "generated" and deterministic_aggregate.sql:
+                safety_ok, safety_reason = validate_sql(deterministic_aggregate.sql)
+                struct_ok, struct_reason = validate_sql_structure(deterministic_aggregate.sql, knowledge_base)
+                if safety_ok and struct_ok:
+                    _set_route(query_context, "deterministic-aggregate", deterministic_aggregate.reason)
+                    self.conversation_memory.add_turn(
+                        user_question=question,
+                        is_follow_up=is_follow_up,
+                        rewritten_question=rewritten_question,
+                        generated_sql=deterministic_aggregate.sql,
+                    )
+                    return True, "SQL generated successfully (deterministic aggregate)", deterministic_aggregate.sql, None
+                fail_reason = safety_reason if not safety_ok else struct_reason
+                return False, f"SQL validation failed: {fail_reason}", None, None
+            if deterministic_aggregate.status == "cannot_plan_safely":
+                _set_route(query_context, "cannot_plan_safely", deterministic_aggregate.reason)
+                return False, "Cannot plan this query safely from available schema evidence.", None, None
         
         # Block complex queries (Phase 2 Step 6)
         if complex_sql_plan and not is_simple_list_count:
             _set_route(query_context, "complex_deterministic_not_ready", "Complex SQL not implemented in Phase 2")
-            return False, (
-                "Complex deterministic SQL generation is not implemented yet. "
-                "The query was planned, but SQL was not generated because AI SQL generation is disabled."
-            ), None, None
+            return False, "Complex deterministic SQL generation is not implemented for this query type yet.", None, None
         
         # Block unsafe/missing evidence
         if route in {"needs_clarification", "cannot_plan_safely"}:
@@ -1392,32 +1417,9 @@ class QuestionService:
                 logger.error(f"Simple SQL generation failed: {e}")
                 return False, f"Simple SQL generation failed: {str(e)}", None, None
 
-        deterministic_aggregate = generate_single_table_aggregate_sql(
-            query_context=query_context,
-            knowledge_base=knowledge_base,
-        )
-        if deterministic_aggregate.status == "generated" and deterministic_aggregate.sql:
-            safety_ok, safety_reason = validate_sql(deterministic_aggregate.sql)
-            struct_ok, struct_reason = validate_sql_structure(deterministic_aggregate.sql, knowledge_base)
-            if safety_ok and struct_ok:
-                _set_route(query_context, "deterministic-aggregate", deterministic_aggregate.reason)
-                self.conversation_memory.add_turn(
-                    user_question=question,
-                    is_follow_up=is_follow_up,
-                    rewritten_question=rewritten_question,
-                    generated_sql=deterministic_aggregate.sql,
-                )
-                return True, "SQL generated successfully (deterministic aggregate)", deterministic_aggregate.sql, None
-            fail_reason = safety_reason if not safety_ok else struct_reason
-            return False, f"SQL validation failed: {fail_reason}", None, None
-
-        if deterministic_aggregate.status == "cannot_plan_safely":
-            _set_route(query_context, "cannot_plan_safely", deterministic_aggregate.reason)
-            return False, "Cannot plan this query safely from available schema evidence.", None, None
-        
         # Default: complex query not implemented
         _set_route(query_context, "complex_deterministic_not_ready", "Complex SQL not implemented in Phase 2")
-        return False, "Complex deterministic SQL generation is not implemented yet. Please try a simpler query.", None, None
+        return False, "Complex deterministic SQL generation is not implemented for this query type yet.", None, None
     
     def _build_success_result(
         self,

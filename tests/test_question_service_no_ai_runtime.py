@@ -137,6 +137,81 @@ def test_single_table_total_uses_deterministic_aggregate_without_runtime_ai(monk
     assert service.get_last_query_context()["route_used"] == "deterministic-aggregate"
 
 
+@pytest.mark.parametrize(
+    ("question", "expected_sql"),
+    [
+        ("show sum amount from bills", "SELECT SUM(amount_total) AS sum_amount_total FROM bills;"),
+        ("show average amount from bills", "SELECT AVG(amount_total) AS avg_amount_total FROM bills;"),
+        ("show highest amount from bills", "SELECT MAX(amount_total) AS max_amount_total FROM bills;"),
+        ("show maximum amount from bills", "SELECT MAX(amount_total) AS max_amount_total FROM bills;"),
+        ("show lowest amount from bills", "SELECT MIN(amount_total) AS min_amount_total FROM bills;"),
+        ("show minimum amount from bills", "SELECT MIN(amount_total) AS min_amount_total FROM bills;"),
+    ],
+)
+def test_single_table_aggregate_variants_use_deterministic_aggregate_without_runtime_ai(monkeypatch, question, expected_sql):
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "amount_total", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+                {"name": "tax_total", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+    service = QuestionService()
+
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL retry must remain disabled")),
+    )
+
+    success, message, sql, error = service.process_question(question, knowledge_base, ai_backend="local")
+
+    assert success is True
+    assert sql == expected_sql
+    assert service.get_last_query_context()["route_used"] == "deterministic-aggregate"
+
+
+def test_single_table_aggregate_metric_ambiguity_returns_cannot_plan_safely(monkeypatch):
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "amount_total", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+                {"name": "tax_total", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+    service = QuestionService()
+
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL retry must remain disabled")),
+    )
+
+    success, message, sql, error = service.process_question("show total from bills", knowledge_base, ai_backend="local")
+
+    assert success is False
+    assert sql is None
+    assert "cannot plan this query safely" in message.lower()
+    assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
+    assert service.get_last_query_context()["route_reason"] == "metric_ambiguous"
+
+
 def test_runtime_ai_sql_helpers_are_blocked():
     with pytest.raises(RuntimeError):
         _call_ai_backend([], backend="local")

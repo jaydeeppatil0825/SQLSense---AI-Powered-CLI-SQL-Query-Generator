@@ -21,6 +21,11 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
+_UNSAFE_QUERY_RE = re.compile(
+    r"\b(insert|update|delete|drop|alter|truncate|create|grant|revoke)\b",
+    re.IGNORECASE,
+)
+
 
 _QUESTION_STOP_WORDS = {
     "show",
@@ -74,6 +79,19 @@ def _tokenize(text: str) -> list[str]:
 
 def _content_terms(question: str) -> list[str]:
     return [token for token in _tokenize(question) if token not in _QUESTION_STOP_WORDS]
+
+
+def _aggregate_function_hint(question: str) -> str | None:
+    normalized = _normalize(question)
+    if re.search(r"\b(average|avg|mean)\b", normalized):
+        return "avg"
+    if re.search(r"\b(total|sum)\b", normalized):
+        return "sum"
+    if re.search(r"\b(highest|maximum|max|largest|most)\b", normalized):
+        return "max"
+    if re.search(r"\b(lowest|minimum|min|smallest|least)\b", normalized):
+        return "min"
+    return None
 
 
 def _extract_limit(question: str) -> int | None:
@@ -1482,6 +1500,8 @@ def _planner_intent_from_structured_intent(intent: dict[str, Any] | None) -> str
         return "top_n"
     if intent_type == "comparison":
         return "comparison"
+    if intent_type in {"grouped_summary", "sorted_list", "filter"}:
+        return "list"
     return "list"
 
 
@@ -1772,7 +1792,7 @@ def _build_query_context_from_retrieved_context(
     if requested_metrics and not measure_candidates:
         warnings.append("Requested metric remains unresolved in dynamic context.")
 
-    query_shape = _derive_complex_query_shape(
+    legacy_query_shape = _derive_complex_query_shape(
         plan,
         intent,
         selected_tables,
@@ -1783,7 +1803,7 @@ def _build_query_context_from_retrieved_context(
         retrieved_context.get("formula_evidence") or [],
     )
 
-    missing_evidence = _detect_missing_evidence(
+    missing_evidence_flags = _detect_missing_evidence(
         plan,
         selected_tables,
         selected_columns,
@@ -1795,15 +1815,15 @@ def _build_query_context_from_retrieved_context(
         dimension_candidates,
         filters,
         retrieved_context.get("formula_evidence") or [],
-        query_shape,
+        legacy_query_shape,
     )
 
-    route_recommendation = _compute_route_recommendation(
+    legacy_route_recommendation = _compute_route_recommendation(
         plan,
-        missing_evidence,
+        missing_evidence_flags,
         confidence,
         selected_tables,
-        query_shape,
+        legacy_query_shape,
     )
 
     complex_sql_plan = _build_complex_sql_plan(
@@ -1816,51 +1836,49 @@ def _build_query_context_from_retrieved_context(
         filters,
         join_paths,
         retrieved_context.get("formula_evidence") or [],
-        missing_evidence,
-        route_recommendation,
-        query_shape,
+        missing_evidence_flags,
+        legacy_route_recommendation,
+        legacy_query_shape,
     )
 
-    debug_trace = _build_debug_trace(
+    debug_trace_details = _build_debug_trace(
         question,
         plan,
         selected_tables,
         selected_columns,
         join_paths,
-        missing_evidence,
+        missing_evidence_flags,
         confidence,
-        route_recommendation,
+        legacy_route_recommendation,
     )
 
-    return {
-        "normalized_question": normalized_question,
-        "intent": intent,
-        "retrieved_context": retrieved_context,
-        "plan": plan,
-        "missing_evidence": missing_evidence,
-        "confidence": round(confidence, 2),
-        "route_recommendation": route_recommendation,
-        "complex_sql_plan": complex_sql_plan,
-        "debug_trace": debug_trace,
-        # Legacy fields for backward compatibility
-        "selected_tables": selected_tables,
-        "selected_columns": selected_columns,
-        "selected_table_names": selected_table_names,
-        "selected_knowledge_base": reduced_kb,
-        "warnings": warnings,
-        "knowledge_base": enriched_kb,
-        "vector_results": {},
-        "vector_used": False,
-        "join_paths": join_paths,
-        "fk_relationships": _build_fk_relationship_graph(enriched_kb),
-        "matched_relationships": matched_relationships,
-        "measure_candidates": measure_candidates,
-        "dimension_candidates": dimension_candidates,
-        "filter_candidates": filter_candidates,
-        "formula_evidence": list(retrieved_context.get("formula_evidence") or []),
-        "filters": filters,
-        "evidence_sources": list(retrieved_context.get("retrieval_sources") or []),
-    }   
+    return _normalize_planner_output(
+        question=question,
+        normalized_question=normalized_question,
+        intent=intent,
+        retrieved_context=retrieved_context,
+        plan=plan,
+        selected_tables=selected_tables,
+        selected_columns=selected_columns,
+        selected_table_names=selected_table_names,
+        selected_knowledge_base=reduced_kb,
+        knowledge_base=enriched_kb,
+        warnings=warnings,
+        confidence=confidence,
+        vector_results={},
+        vector_used=False,
+        join_paths=join_paths,
+        fk_relationships=_build_fk_relationship_graph(enriched_kb),
+        matched_relationships=matched_relationships,
+        measure_candidates=measure_candidates,
+        dimension_candidates=dimension_candidates,
+        filter_candidates=filter_candidates,
+        formula_evidence=list(retrieved_context.get("formula_evidence") or []),
+        missing_evidence_flags=missing_evidence_flags,
+        complex_sql_plan=complex_sql_plan,
+        legacy_route_recommendation=legacy_route_recommendation,
+        debug_trace_details=debug_trace_details,
+    )
 
 
 def _detect_missing_evidence(
@@ -2118,6 +2136,522 @@ def _build_debug_trace(
         "selected_table_names": [t.get("table") for t in selected_tables],
         "selected_column_names": [(c.get("table"), c.get("column")) for c in selected_columns[:10]],
     }
+
+
+def _normalize_query_shape_label(
+    *,
+    question: str,
+    plan: dict[str, Any],
+    intent: dict[str, Any] | None,
+    selected_tables: list[dict[str, Any]],
+    measure_candidates: list[dict[str, Any]],
+    dimension_candidates: list[dict[str, Any]],
+    filters: list[dict[str, Any]],
+    join_paths: list[dict[str, Any]],
+    formula_evidence: list[dict[str, Any]],
+    legacy_query_shape: str | None,
+) -> str:
+    table_count = len([entry for entry in selected_tables if entry.get("table")])
+    requested_dimensions = list((intent or {}).get("requested_dimensions") or plan.get("requested_dimensions") or [])
+    requested_metrics = list((intent or {}).get("requested_metrics") or plan.get("requested_metrics") or [])
+    has_grouping = bool(plan.get("grouping") or plan.get("dimension") or requested_dimensions)
+    has_filters = bool(filters or plan.get("filters") or plan.get("date_range"))
+    has_formula = bool(formula_evidence)
+    has_join = bool(join_paths) or table_count > 1
+    has_metric = bool(measure_candidates or requested_metrics)
+    metric_tables = {
+        str(entry.get("table") or "").strip()
+        for entry in (measure_candidates or [])
+        if str(entry.get("table") or "").strip()
+    }
+    intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
+    planner_intent = str(plan.get("intent") or "").strip().lower()
+    aggregate_hint = _aggregate_function_hint(question)
+    is_count = planner_intent == "count" or intent_type == "count"
+    is_ranking = bool(
+        planner_intent == "top_n"
+        or intent_type == "ranking"
+        or (plan.get("limit") is not None and plan.get("sorting"))
+    )
+    multi_metric = len({
+        f"{entry.get('table')}.{entry.get('column')}"
+        for entry in measure_candidates
+        if entry.get("table") and entry.get("column")
+    }) > 1
+
+    if _UNSAFE_QUERY_RE.search(question):
+        return "blocked_unsafe"
+    if has_formula or legacy_query_shape == "formula_query":
+        return "formula_query"
+    if aggregate_hint and not requested_dimensions and not has_grouping and len(metric_tables) == 1 and not is_count:
+        return "single_table_aggregate"
+    if multi_metric and (aggregate_hint or has_grouping or is_ranking):
+        return "multi_metric_aggregate"
+    if is_ranking:
+        return "ranking_query"
+    if has_grouping and has_metric:
+        return "grouped_aggregate"
+    if has_join:
+        return "joined_lookup"
+    if has_filters:
+        return "filtered_query"
+    if is_count and table_count == 1:
+        return "single_table_count"
+    if aggregate_hint and table_count == 1 and has_metric:
+        return "single_table_aggregate"
+    if planner_intent == "list" and table_count == 1:
+        return "single_table_list"
+    return "unknown"
+
+
+def _route_recommendation_from_contract(
+    *,
+    query_shape: str,
+    confidence: float,
+    missing_evidence_flags: dict[str, Any],
+    selected_tables: list[dict[str, Any]],
+    can_plan: bool,
+) -> tuple[str, str]:
+    has_direct_match = bool(
+        len(selected_tables) == 1
+        and "question directly" in str((selected_tables[0] or {}).get("reason") or "").lower()
+    )
+    if query_shape == "blocked_unsafe":
+        return "blocked_unsafe", "question contains blocked SQL operation wording"
+
+    if missing_evidence_flags.get("missing_join_path"):
+        return "cannot_plan_safely", "required join path evidence is missing"
+    if missing_evidence_flags.get("missing_formula_evidence"):
+        return "cannot_plan_safely", "formula evidence is missing"
+    if missing_evidence_flags.get("missing_metric"):
+        return "cannot_plan_safely", "metric evidence is missing"
+    if missing_evidence_flags.get("missing_dimension"):
+        return "cannot_plan_safely", "dimension evidence is missing"
+    if confidence < 0.3 or not selected_tables:
+        return "cannot_plan_safely", "planner confidence is too low"
+    if not can_plan:
+        return "unsupported_query_shape", f"{query_shape} is not implemented for deterministic SQL generation yet"
+    if query_shape in {"single_table_list", "single_table_count"}:
+        if confidence >= 0.7 or (has_direct_match and confidence >= 0.55):
+            return "simple_rule_based", "single-table deterministic browse/count query"
+        return "cannot_plan_safely", "single-table evidence is too weak for deterministic browse/count routing"
+    if query_shape == "unknown":
+        if confidence < 0.5:
+            return "cannot_plan_safely", "planner could not derive a supported query shape with enough confidence"
+        return "unsupported_query_shape", "planner could not derive a supported query shape"
+    return "deterministic_sql_required", f"{query_shape} requires deterministic SQL generation"
+
+
+def _required_evidence_for_query_shape(query_shape: str) -> list[str]:
+    mapping = {
+        "single_table_list": ["selected_table"],
+        "single_table_count": ["selected_table"],
+        "single_table_aggregate": ["selected_table", "metric_candidate", "aggregate_function"],
+        "grouped_aggregate": ["selected_table", "metric_candidate", "dimension_candidate"],
+        "joined_lookup": ["selected_table", "join_candidate", "required_join"],
+        "filtered_query": ["selected_table", "filter_candidate"],
+        "ranking_query": ["selected_table", "metric_candidate", "order_by_candidate"],
+        "formula_query": ["selected_table", "formula_evidence"],
+        "multi_metric_aggregate": ["selected_table", "metric_candidate"],
+        "unknown": [],
+        "blocked_unsafe": [],
+    }
+    return list(mapping.get(query_shape, []))
+
+
+def _missing_evidence_list(missing_evidence_flags: dict[str, Any]) -> list[str]:
+    ordered = [
+        "missing_metric",
+        "missing_dimension",
+        "missing_join_path",
+        "missing_filter_column",
+        "missing_formula_evidence",
+    ]
+    return [key for key in ordered if missing_evidence_flags.get(key)]
+
+
+def _ambiguities_for_contract(
+    selected_tables: list[dict[str, Any]],
+    measure_candidates: list[dict[str, Any]],
+    dimension_candidates: list[dict[str, Any]],
+) -> list[str]:
+    ambiguities: list[str] = []
+    if len(selected_tables) > 1:
+        scored = [
+            float(entry.get("confidence", entry.get("score", 0.0)) or 0.0)
+            for entry in selected_tables[:2]
+        ]
+        if len(scored) == 2 and abs(scored[0] - scored[1]) < 0.12:
+            ambiguities.append("table_selection")
+    if len({
+        f"{entry.get('table')}.{entry.get('column')}"
+        for entry in measure_candidates
+        if entry.get("table") and entry.get("column")
+    }) > 1:
+        ambiguities.append("metric_selection")
+    if len({
+        f"{entry.get('table')}.{entry.get('column')}"
+        for entry in dimension_candidates
+        if entry.get("table") and entry.get("column")
+    }) > 1:
+        ambiguities.append("dimension_selection")
+    return ambiguities
+
+
+def _join_candidates_for_contract(
+    join_paths: list[dict[str, Any]],
+    matched_relationships: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for path in join_paths or []:
+        signature = (
+            str(path.get("from_table") or ""),
+            str(path.get("to_table") or ""),
+            str(path.get("length") or ""),
+        )
+        if signature in seen:
+            continue
+        seen.add(signature)
+        candidates.append(
+            {
+                "from_table": str(path.get("from_table") or "").strip(),
+                "to_table": str(path.get("to_table") or "").strip(),
+                "length": int(path.get("length") or 0),
+                "support_score": float(path.get("support_score") or 0.0),
+                "source": "join_path",
+            }
+        )
+    for rel in matched_relationships or []:
+        signature = (
+            str(rel.get("from_table") or ""),
+            str(rel.get("to_table") or ""),
+            str(rel.get("join_condition") or ""),
+        )
+        if signature in seen:
+            continue
+        seen.add(signature)
+        candidates.append(
+            {
+                "from_table": str(rel.get("from_table") or "").strip(),
+                "to_table": str(rel.get("to_table") or "").strip(),
+                "join_condition": str(rel.get("join_condition") or "").strip(),
+                "source": str(rel.get("source") or "relationship"),
+            }
+        )
+    return candidates
+
+
+def _order_by_candidates_for_contract(
+    sorting: dict[str, Any] | None,
+    measure_candidates: list[dict[str, Any]],
+    dimension_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not isinstance(sorting, dict) or not sorting:
+        return []
+    by_value = str(sorting.get("by") or "").strip()
+    direction = str(sorting.get("direction") or "asc").strip().lower() or "asc"
+    candidates: list[dict[str, Any]] = []
+    if by_value:
+        candidates.append({"by": by_value, "direction": direction, "source": "plan.sorting"})
+    for entry in (measure_candidates or [])[:2]:
+        candidates.append(
+            {
+                "table": str(entry.get("table") or "").strip(),
+                "column": str(entry.get("column") or "").strip(),
+                "direction": direction,
+                "source": "measure_candidate",
+            }
+        )
+    for entry in (dimension_candidates or [])[:2]:
+        candidates.append(
+            {
+                "table": str(entry.get("table") or "").strip(),
+                "column": str(entry.get("column") or "").strip(),
+                "direction": direction,
+                "source": "dimension_candidate",
+            }
+        )
+    return candidates
+
+
+def _group_by_candidates_for_contract(
+    plan: dict[str, Any],
+    dimension_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    requested_grouping = [str(value).strip() for value in (plan.get("grouping") or []) if str(value).strip()]
+    candidates = []
+    for entry in dimension_candidates or []:
+        candidates.append(
+            {
+                "table": str(entry.get("table") or "").strip(),
+                "column": str(entry.get("column") or "").strip(),
+                "source": str(entry.get("source") or "dimension_candidate"),
+            }
+        )
+    for value in requested_grouping:
+        candidates.append({"label": value, "source": "plan.grouping"})
+    return candidates
+
+
+def _fallback_metric_candidates_from_selected_columns(
+    selected_columns: list[dict[str, Any]],
+    question: str,
+) -> list[dict[str, Any]]:
+    if not _aggregate_function_hint(question):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in selected_columns or []:
+        table_name = str(entry.get("table") or "").strip()
+        column_name = str(entry.get("column") or "").strip()
+        semantic_type = str(entry.get("semantic_type") or "").strip().lower()
+        core_semantic_type = str(entry.get("core_semantic_type") or "").strip().lower()
+        if not table_name or not column_name:
+            continue
+        if semantic_type in {"id", "date", "boolean"} or core_semantic_type in {"id", "date", "boolean"}:
+            continue
+        if semantic_type not in {"numeric_candidate", "money", "quantity", "percentage"} and core_semantic_type != "numeric_candidate":
+            continue
+        key = (table_name, column_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            {
+                "table": table_name,
+                "column": column_name,
+                "semantic_type": semantic_type or core_semantic_type or "numeric_candidate",
+                "core_semantic_type": core_semantic_type or semantic_type or "numeric_candidate",
+                "score": float(entry.get("confidence") or 0.55),
+                "matched_terms": _content_terms(question),
+                "source": "selected_columns_fallback",
+            }
+        )
+    return candidates
+
+
+def _prune_single_table_aggregate_context(
+    selected_tables: list[dict[str, Any]],
+    selected_columns: list[dict[str, Any]],
+    selected_table_names: list[str],
+    measure_candidates: list[dict[str, Any]],
+    dimension_candidates: list[dict[str, Any]],
+    filter_candidates: list[dict[str, Any]],
+    join_paths: list[dict[str, Any]],
+    matched_relationships: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    if measure_candidates:
+        primary_table = str(measure_candidates[0].get("table") or "").strip()
+    elif selected_table_names:
+        primary_table = str(selected_table_names[0] or "").strip()
+    else:
+        primary_table = ""
+    if not primary_table:
+        return (
+            selected_tables,
+            selected_columns,
+            selected_table_names,
+            measure_candidates,
+            [],
+            filter_candidates,
+            join_paths,
+            matched_relationships,
+        )
+
+    pruned_tables = [entry for entry in selected_tables if str(entry.get("table") or "").strip() == primary_table]
+    pruned_table_names = [primary_table]
+    pruned_columns = [entry for entry in selected_columns if str(entry.get("table") or "").strip() == primary_table]
+    pruned_measures = [entry for entry in measure_candidates if str(entry.get("table") or "").strip() == primary_table]
+    pruned_filters = [entry for entry in filter_candidates if str(entry.get("table") or "").strip() == primary_table]
+    return (
+        pruned_tables,
+        pruned_columns,
+        pruned_table_names,
+        pruned_measures,
+        [],
+        pruned_filters,
+        [],
+        [],
+    )
+
+
+def _normalize_planner_output(
+    *,
+    question: str,
+    normalized_question: str,
+    intent: Any,
+    retrieved_context: dict[str, Any] | None,
+    plan: dict[str, Any],
+    selected_tables: list[dict[str, Any]],
+    selected_columns: list[dict[str, Any]],
+    selected_table_names: list[str],
+    selected_knowledge_base: dict[str, Any],
+    knowledge_base: dict[str, Any],
+    warnings: list[str],
+    confidence: float,
+    vector_results: dict[str, Any] | None,
+    vector_used: bool,
+    join_paths: list[dict[str, Any]],
+    fk_relationships: dict[str, Any],
+    matched_relationships: list[dict[str, Any]],
+    measure_candidates: list[dict[str, Any]],
+    dimension_candidates: list[dict[str, Any]],
+    filter_candidates: list[dict[str, Any]],
+    formula_evidence: list[dict[str, Any]],
+    missing_evidence_flags: dict[str, Any],
+    complex_sql_plan: dict[str, Any] | None,
+    legacy_route_recommendation: str,
+    debug_trace_details: dict[str, Any],
+) -> dict[str, Any]:
+    effective_measure_candidates = list(measure_candidates or []) or _fallback_metric_candidates_from_selected_columns(
+        selected_columns,
+        question,
+    )
+
+    query_shape = _normalize_query_shape_label(
+        question=question,
+        plan=plan,
+        intent=intent if isinstance(intent, dict) else None,
+        selected_tables=selected_tables,
+        measure_candidates=effective_measure_candidates,
+        dimension_candidates=dimension_candidates,
+        filters=filter_candidates,
+        join_paths=join_paths,
+        formula_evidence=formula_evidence,
+        legacy_query_shape=(complex_sql_plan or {}).get("query_shape"),
+    )
+
+    if query_shape == "single_table_aggregate":
+        (
+            selected_tables,
+            selected_columns,
+            selected_table_names,
+            effective_measure_candidates,
+            dimension_candidates,
+            filter_candidates,
+            join_paths,
+            matched_relationships,
+        ) = _prune_single_table_aggregate_context(
+            selected_tables,
+            selected_columns,
+            selected_table_names,
+            effective_measure_candidates,
+            dimension_candidates,
+            filter_candidates,
+            join_paths,
+            matched_relationships,
+        )
+        selected_knowledge_base = {
+            table_name: deepcopy(selected_knowledge_base.get(table_name) or knowledge_base.get(table_name) or {})
+            for table_name in selected_table_names
+            if table_name in selected_knowledge_base or table_name in knowledge_base
+        }
+
+    join_candidates = _join_candidates_for_contract(join_paths, matched_relationships)
+    required_joins = _required_join_predicates(join_paths)
+    group_by_candidates = _group_by_candidates_for_contract(plan, dimension_candidates)
+    order_by_candidates = _order_by_candidates_for_contract(plan.get("sorting"), effective_measure_candidates, dimension_candidates)
+    required_evidence = _required_evidence_for_query_shape(query_shape)
+    missing_evidence = _missing_evidence_list(missing_evidence_flags)
+    ambiguities = _ambiguities_for_contract(selected_tables, effective_measure_candidates, dimension_candidates)
+    can_plan = bool(
+        selected_table_names
+        and query_shape not in {"unknown", "blocked_unsafe"}
+        and not missing_evidence
+    )
+    route_recommendation, route_reason = _route_recommendation_from_contract(
+        query_shape=query_shape,
+        confidence=float(confidence or 0.0),
+        missing_evidence_flags=missing_evidence_flags,
+        selected_tables=selected_tables,
+        can_plan=can_plan,
+    )
+
+    normalized_complex_sql_plan = dict(complex_sql_plan or {})
+    if query_shape == "single_table_aggregate" and not normalized_complex_sql_plan:
+        normalized_complex_sql_plan = {
+            "query_shape": query_shape,
+            "metric_candidates": list(effective_measure_candidates),
+            "dimension_candidates": [],
+            "filter_candidates": list(filter_candidates),
+            "selected_tables": list(selected_tables),
+            "selected_columns": list(selected_columns),
+            "join_paths": [],
+            "required_joins": [],
+            "aggregation_type": _aggregate_function_hint(question),
+            "ordering": {},
+            "limit": plan.get("limit"),
+            "formula_evidence": list(formula_evidence),
+            "sql_skeleton_type": query_shape,
+            "missing_evidence": {},
+            "route_recommendation": route_recommendation,
+        }
+    elif normalized_complex_sql_plan:
+        normalized_complex_sql_plan["query_shape"] = query_shape
+        normalized_complex_sql_plan["required_joins"] = required_joins
+        normalized_complex_sql_plan["route_recommendation"] = route_recommendation
+
+    debug_trace = [
+        {"stage": "question", "value": question},
+        {"stage": "intent", "value": plan.get("intent")},
+        {"stage": "query_shape", "value": query_shape},
+        {"stage": "selected_tables", "value": list(selected_table_names)},
+        {"stage": "join_count", "value": len(join_paths)},
+        {"stage": "route_recommendation", "value": route_recommendation},
+        {"stage": "route_reason", "value": route_reason},
+    ]
+    if missing_evidence:
+        debug_trace.append({"stage": "missing_evidence", "value": list(missing_evidence)})
+    if ambiguities:
+        debug_trace.append({"stage": "ambiguities", "value": list(ambiguities)})
+
+    normalized_result = {
+        "normalized_question": normalized_question,
+        "intent": intent if isinstance(intent, dict) else {"intent_type": str(intent or "").strip().lower()},
+        "query_shape": query_shape,
+        "route_recommendation": route_recommendation,
+        "selected_tables": list(selected_tables),
+        "selected_table_names": list(selected_table_names),
+        "selected_columns": list(selected_columns),
+        "metric_candidates": list(effective_measure_candidates),
+        "dimension_candidates": list(dimension_candidates),
+        "filter_candidates": list(filter_candidates),
+        "join_candidates": join_candidates,
+        "required_joins": required_joins,
+        "group_by_candidates": group_by_candidates,
+        "order_by_candidates": order_by_candidates,
+        "limit": plan.get("limit"),
+        "complex_sql_plan": normalized_complex_sql_plan,
+        "required_evidence": required_evidence,
+        "missing_evidence": missing_evidence,
+        "ambiguities": ambiguities,
+        "can_plan": can_plan,
+        "route_reason": route_reason,
+        "debug_trace": debug_trace,
+        "vector_results": dict(vector_results or {}),
+        "vector_used": bool(vector_used),
+        # Legacy / compatibility fields
+        "route_recommendation_legacy": legacy_route_recommendation,
+        "missing_evidence_flags": dict(missing_evidence_flags or {}),
+        "debug_trace_details": dict(debug_trace_details or {}),
+        "retrieved_context": retrieved_context if isinstance(retrieved_context, dict) else {},
+        "plan": plan,
+        "selected_knowledge_base": selected_knowledge_base,
+        "warnings": list(warnings or []),
+        "knowledge_base": knowledge_base,
+        "join_paths": list(join_paths),
+        "fk_relationships": fk_relationships,
+        "matched_relationships": list(matched_relationships or []),
+        "measure_candidates": list(effective_measure_candidates),
+        "formula_evidence": list(formula_evidence),
+        "filters": list(filter_candidates),
+        "evidence_sources": list(plan.get("evidence_sources") or []),
+        "confidence": round(float(confidence or 0.0), 2),
+        "route_used": "",
+    }
+    return normalized_result
 
 
 def build_query_context(
@@ -2382,7 +2916,7 @@ def build_query_context(
     dimension_candidates: list[dict[str, Any]] = []
     filter_candidates = list(plan.get("filters") or [])
     formula_evidence = list(plan.get("formula_evidence") or [])
-    query_shape = _derive_complex_query_shape(
+    legacy_query_shape = _derive_complex_query_shape(
         plan,
         None,
         selected_tables,
@@ -2393,7 +2927,7 @@ def build_query_context(
         formula_evidence,
     )
 
-    missing_evidence = _detect_missing_evidence(
+    missing_evidence_flags = _detect_missing_evidence(
         plan,
         selected_tables,
         selected_columns,
@@ -2405,15 +2939,15 @@ def build_query_context(
         dimension_candidates,
         filter_candidates,
         formula_evidence,
-        query_shape,
+        legacy_query_shape,
     )
 
-    route_recommendation = _compute_route_recommendation(
+    legacy_route_recommendation = _compute_route_recommendation(
         plan,
-        missing_evidence,
+        missing_evidence_flags,
         overall_confidence,
         selected_tables,
-        query_shape,
+        legacy_query_shape,
     )
 
     complex_sql_plan = _build_complex_sql_plan(
@@ -2426,45 +2960,46 @@ def build_query_context(
         filter_candidates,
         join_paths,
         formula_evidence,
-        missing_evidence,
-        route_recommendation,
-        query_shape,
+        missing_evidence_flags,
+        legacy_route_recommendation,
+        legacy_query_shape,
     )
 
-    debug_trace = _build_debug_trace(
+    debug_trace_details = _build_debug_trace(
         question,
         plan,
         selected_tables,
         selected_columns,
         join_paths,
-        missing_evidence,
+        missing_evidence_flags,
         overall_confidence,
-        route_recommendation,
+        legacy_route_recommendation,
     )
 
-    return {
-        "normalized_question": normalized_question,
-        "intent": intent,
-        "retrieved_context": None,  # Built internally in this path
-        "plan": plan,
-        "missing_evidence": missing_evidence,
-        "confidence": overall_confidence,
-        "route_recommendation": route_recommendation,
-        "complex_sql_plan": complex_sql_plan,
-        "debug_trace": debug_trace,
-        # Legacy fields for backward compatibility
-        "selected_tables": selected_tables,
-        "selected_columns": selected_columns,
-        "selected_table_names": selected_names,
-        "selected_knowledge_base": reduced_kb,
-        "warnings": warnings,
-        "knowledge_base": enriched_kb,
-        "vector_results": vector_results,
-        "vector_used": bool(vector_results and vector_results.get("used_vector")),
-        "join_paths": join_paths,
-        "fk_relationships": fk_graph,
-        "measure_candidates": measure_candidates,
-        "dimension_candidates": dimension_candidates,
-        "filter_candidates": filter_candidates,
-        "formula_evidence": formula_evidence,
-    }
+    return _normalize_planner_output(
+        question=question,
+        normalized_question=normalized_question,
+        intent=intent,
+        retrieved_context={},
+        plan=plan,
+        selected_tables=selected_tables,
+        selected_columns=selected_columns,
+        selected_table_names=selected_names,
+        selected_knowledge_base=reduced_kb,
+        knowledge_base=enriched_kb,
+        warnings=warnings,
+        confidence=overall_confidence,
+        vector_results=vector_results,
+        vector_used=bool(vector_results and vector_results.get("used_vector")),
+        join_paths=join_paths,
+        fk_relationships=fk_graph,
+        matched_relationships=[],
+        measure_candidates=measure_candidates,
+        dimension_candidates=dimension_candidates,
+        filter_candidates=filter_candidates,
+        formula_evidence=formula_evidence,
+        missing_evidence_flags=missing_evidence_flags,
+        complex_sql_plan=complex_sql_plan,
+        legacy_route_recommendation=legacy_route_recommendation,
+        debug_trace_details=debug_trace_details,
+    )

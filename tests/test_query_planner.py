@@ -143,8 +143,140 @@ def test_query_planner_prefers_unique_direct_singular_table_match_for_simple_bro
 
     assert context["selected_table_names"] == ["clients"]
     assert context["join_paths"] == []
-    assert context["route_recommendation"] == "simple_rule_ok"
-    assert context["complex_sql_plan"] is None
+    assert context["route_recommendation"] == "simple_rule_based"
+    assert context["query_shape"] == "single_table_list"
+    assert context["complex_sql_plan"] == {}
+
+
+def test_qp2_single_table_aggregate_contract_preserves_metric_evidence():
+    knowledge_base = {
+        "partners": {
+            "columns": [
+                {"name": "partner_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "partner_name", "type": "VARCHAR(100)", "semantic_type": "text_candidate"},
+            ],
+            "primary_keys": ["partner_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "partner_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "amount_total", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate", "is_measure": True},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [{"column": "partner_id", "referenced_table": "partners", "referenced_column": "partner_id"}],
+            "relationships": [],
+        },
+    }
+    glossary = generate_business_glossary(knowledge_base, use_ai_enrichment=True)
+
+    context = build_query_context(
+        "show total amount from bills",
+        knowledge_base,
+        business_glossary=glossary,
+        use_vector_retrieval=False,
+    )
+
+    assert context["query_shape"] == "single_table_aggregate"
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["selected_table_names"] == ["bills"]
+    assert context["join_paths"] == []
+    assert context["required_joins"] == []
+    assert any(candidate["column"] == "amount_total" for candidate in context["metric_candidates"])
+    assert context["vector_results"] == {}
+
+
+def test_qp2_joined_lookup_exposes_join_candidates():
+    knowledge_base = {
+        "partners": {
+            "columns": [
+                {"name": "partner_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "partner_name", "type": "VARCHAR(100)", "semantic_type": "text_candidate"},
+            ],
+            "primary_keys": ["partner_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "partner_id", "type": "INTEGER", "semantic_type": "id"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [{"column": "partner_id", "referenced_table": "partners", "referenced_column": "partner_id"}],
+            "relationships": [],
+        },
+    }
+    intent = {
+        "intent_type": "list",
+        "requested_metrics": [],
+        "requested_dimensions": [],
+        "requested_filters": [],
+        "requested_sort": {},
+        "limit": None,
+        "needs_grouping": False,
+        "needs_aggregation": False,
+        "needs_join": True,
+    }
+    retrieved_context = {
+        "query_terms": ["bills", "partner", "name"],
+        "matched_tables": [
+            {"table": "bills", "score": 0.88, "matched_terms": ["bills"], "source": "kb_identifier"},
+            {"table": "partners", "score": 0.85, "matched_terms": ["partner"], "source": "kb_identifier"},
+        ],
+        "matched_columns": [
+            {"table": "partners", "column": "partner_name", "semantic_type": "text_candidate", "is_dimension": True, "score": 0.92, "matched_terms": ["partner name"], "source": "glossary"},
+        ],
+        "matched_glossary_terms": [{"term": "partner name", "score": 0.9, "source": "glossary"}],
+        "matched_relationships": [
+            {
+                "from_table": "bills",
+                "from_column": "partner_id",
+                "to_table": "partners",
+                "to_column": "partner_id",
+                "join_condition": "bills.partner_id = partners.partner_id",
+                "source": "fk_relationship",
+            }
+        ],
+        "possible_join_paths": [
+            {
+                "from_table": "bills",
+                "to_table": "partners",
+                "path": [
+                    {
+                        "from_table": "bills",
+                        "from_column": "partner_id",
+                        "to_table": "partners",
+                        "to_column": "partner_id",
+                        "join_condition": "bills.partner_id = partners.partner_id",
+                    }
+                ],
+                "length": 1,
+            }
+        ],
+        "measure_candidates": [],
+        "dimension_candidates": [
+            {"table": "partners", "column": "partner_name", "semantic_type": "text_candidate", "is_dimension": True, "score": 0.92, "matched_terms": ["partner name"], "source": "glossary"},
+        ],
+        "filter_candidates": [],
+        "retrieval_sources": ["kb_identifier", "glossary", "relationship_context"],
+        "confidence": 0.89,
+    }
+
+    context = build_query_context(
+        "show bills with partner name",
+        knowledge_base,
+        use_vector_retrieval=False,
+        intent=intent,
+        retrieved_context=retrieved_context,
+    )
+
+    assert context["query_shape"] == "joined_lookup"
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["join_candidates"]
+    assert context["required_joins"] == ["bills.partner_id = partners.partner_id"]
 
 
 def test_query_planner_does_not_use_module_field_for_scoring():
@@ -309,7 +441,9 @@ def test_query_planner_uses_retrieved_context_for_ranking_query():
     assert context["measure_candidates"][0]["column"] == "deal_value"
     assert context["dimension_candidates"][0]["column"] == "account_label"
     assert context["evidence_sources"] == ["kb_identifier", "glossary"]
-    assert context["complex_sql_plan"]["query_shape"] == "ranking_aggregation"
+    assert context["query_shape"] == "ranking_query"
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["complex_sql_plan"]["query_shape"] == "ranking_query"
     assert context["complex_sql_plan"]["aggregation_type"] == "sum"
     assert context["complex_sql_plan"]["required_joins"] == ["accounts.account_id = deals.account_id"]
     assert context["complex_sql_plan"]["limit"] == 5
@@ -396,8 +530,10 @@ def test_query_planner_leaves_pending_billed_amount_unresolved_without_formula_e
     assert context["measure_candidates"] == []
     assert context["plan"]["metric"] is None
     assert context["confidence"] == 0.49
+    assert context["query_shape"] == "formula_query"
     assert context["complex_sql_plan"]["query_shape"] == "formula_query"
-    assert context["missing_evidence"]["missing_formula_evidence"] is True
+    assert "missing_formula_evidence" in context["missing_evidence"]
+    assert context["missing_evidence_flags"]["missing_formula_evidence"] is True
     assert context["route_recommendation"] == "cannot_plan_safely"
     assert "Requested metric remains unresolved in dynamic context." in context["warnings"]
 
@@ -491,8 +627,9 @@ def test_query_planner_builds_grouped_aggregation_complex_plan_from_dynamic_cont
         retrieved_context=retrieved_context,
     )
 
-    assert context["route_recommendation"] == "ai_sql_required"
-    assert context["complex_sql_plan"]["query_shape"] == "grouped_aggregation"
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["query_shape"] == "grouped_aggregate"
+    assert context["complex_sql_plan"]["query_shape"] == "grouped_aggregate"
     assert context["complex_sql_plan"]["aggregation_type"] == "sum"
     assert context["complex_sql_plan"]["required_joins"] == ["clients.client_id = agreements.client_id"]
     assert context["complex_sql_plan"]["missing_evidence"] == {}
@@ -570,10 +707,21 @@ def test_qp1_structured_contract_includes_required_fields():
     assert "intent" in context
     assert "retrieved_context" in context
     assert "plan" in context
+    assert "query_shape" in context
+    assert "route_reason" in context
+    assert "required_evidence" in context
     assert "missing_evidence" in context
     assert "confidence" in context
     assert "route_recommendation" in context
     assert "debug_trace" in context
+    assert "vector_results" in context
+    assert "vector_used" in context
+    assert "join_candidates" in context
+    assert "required_joins" in context
+    assert "group_by_candidates" in context
+    assert "order_by_candidates" in context
+    assert "can_plan" in context
+    assert "ambiguities" in context
 
     # Legacy fields for backward compatibility
     assert "selected_tables" in context
@@ -636,9 +784,10 @@ def test_qp1_missing_evidence_detection():
         retrieved_context=retrieved_context,
     )
 
-    assert context["missing_evidence"]["missing_metric"] is True
-    assert context["missing_evidence"]["missing_dimension"] is False
-    assert context["missing_evidence"]["missing_join_path"] is False
+    assert "missing_metric" in context["missing_evidence"]
+    assert context["missing_evidence_flags"]["missing_metric"] is True
+    assert context["missing_evidence_flags"]["missing_dimension"] is False
+    assert context["missing_evidence_flags"]["missing_join_path"] is False
 
 
 def test_qp1_missing_join_path_detection():
@@ -691,7 +840,8 @@ def test_qp1_missing_join_path_detection():
         retrieved_context=retrieved_context,
     )
 
-    assert context["missing_evidence"]["missing_join_path"] is True
+    assert "missing_join_path" in context["missing_evidence"]
+    assert context["missing_evidence_flags"]["missing_join_path"] is True
 
 
 def test_qp1_missing_formula_evidence_detection_requires_dynamic_context():
@@ -715,11 +865,11 @@ def test_qp1_missing_formula_evidence_detection_requires_dynamic_context():
         use_vector_retrieval=False,
     )
 
-    assert context["missing_evidence"]["missing_formula_evidence"] is False
+    assert context["missing_evidence_flags"]["missing_formula_evidence"] is False
 
 
-def test_qp1_route_recommendation_simple_rule_ok():
-    """Test that simple_rule_ok is recommended for strong evidence with single table."""
+def test_qp1_route_recommendation_simple_rule_based():
+    """Test that simple_rule_based is recommended for strong evidence with single table."""
     knowledge_base = {
         "accounts": {
             "columns": [
@@ -740,17 +890,13 @@ def test_qp1_route_recommendation_simple_rule_ok():
         use_vector_retrieval=False,
     )
 
-    # With higher confidence, should recommend simple_rule_ok
-    if context["confidence"] >= 0.7:
-        assert context["route_recommendation"] == "simple_rule_ok"
-        assert context["complex_sql_plan"] is None
-    else:
-        # For moderate confidence, ai_sql_required is acceptable
-        assert context["route_recommendation"] in {"simple_rule_ok", "ai_sql_required"}
+    assert context["route_recommendation"] == "simple_rule_based"
+    assert context["query_shape"] == "single_table_list"
+    assert context["complex_sql_plan"] == {}
 
 
-def test_qp1_route_recommendation_ai_sql_required():
-    """Test that ai_sql_required is recommended for multi-table queries."""
+def test_qp1_route_recommendation_deterministic_sql_required():
+    """Test that deterministic_sql_required is recommended for multi-table queries with join evidence."""
     knowledge_base = {
         "accounts": {
             "columns": [
@@ -773,17 +919,18 @@ def test_qp1_route_recommendation_ai_sql_required():
     }
 
     context = build_query_context(
-        "show accounts and transactions",
+        "deal value by account",
         knowledge_base,
         business_glossary={},
         use_vector_retrieval=False,
     )
 
-    assert context["route_recommendation"] == "ai_sql_required"
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["query_shape"] in {"joined_lookup", "grouped_aggregate"}
 
 
-def test_qp1_route_recommendation_needs_clarification():
-    """Test that needs_clarification is recommended for weak evidence."""
+def test_qp1_route_recommendation_cannot_plan_for_weak_evidence():
+    """Test that cannot_plan_safely is recommended for weak evidence."""
     knowledge_base = {
         "generic_table": {
             "columns": [
@@ -803,12 +950,7 @@ def test_qp1_route_recommendation_needs_clarification():
         use_vector_retrieval=False,
     )
 
-    # With very low confidence, should recommend needs_clarification
-    if context["confidence"] < 0.5:
-        assert context["route_recommendation"] == "needs_clarification"
-    else:
-        # For moderate confidence, ai_sql_required is acceptable
-        assert context["route_recommendation"] in {"needs_clarification", "ai_sql_required"}
+    assert context["route_recommendation"] == "cannot_plan_safely"
 
 
 def test_qp1_route_recommendation_cannot_plan_safely():
@@ -862,7 +1004,8 @@ def test_qp1_route_recommendation_cannot_plan_safely():
     )
 
     assert context["route_recommendation"] == "cannot_plan_safely"
-    assert context["missing_evidence"]["missing_join_path"] is True
+    assert "missing_join_path" in context["missing_evidence"]
+    assert context["missing_evidence_flags"]["missing_join_path"] is True
 
 
 def test_qp1_debug_trace_structure():
@@ -887,18 +1030,12 @@ def test_qp1_debug_trace_structure():
     )
 
     debug_trace = context["debug_trace"]
-    assert "question" in debug_trace
-    assert "intent" in debug_trace
-    assert "metric" in debug_trace
-    assert "dimension" in debug_trace
-    assert "selected_table_count" in debug_trace
-    assert "selected_column_count" in debug_trace
-    assert "join_path_count" in debug_trace
-    assert "missing_evidence" in debug_trace
-    assert "confidence" in debug_trace
-    assert "route_recommendation" in debug_trace
-    assert "selected_table_names" in debug_trace
-    assert "selected_column_names" in debug_trace
+    assert isinstance(debug_trace, list)
+    stages = {entry["stage"] for entry in debug_trace}
+    assert {"question", "intent", "query_shape", "selected_tables", "join_count", "route_recommendation", "route_reason"} <= stages
+    assert isinstance(context["debug_trace_details"], dict)
+    assert "question" in context["debug_trace_details"]
+    assert "selected_table_names" in context["debug_trace_details"]
 
 
 def test_qp1_planner_does_not_guess_when_context_is_weak():
@@ -922,10 +1059,7 @@ def test_qp1_planner_does_not_guess_when_context_is_weak():
         use_vector_retrieval=False,
     )
 
-    # When context is weak, route should not be simple_rule_ok
-    assert context["route_recommendation"] != "simple_rule_ok"
-    # Should either be needs_clarification, ai_sql_required, or cannot_plan_safely
-    assert context["route_recommendation"] in {"needs_clarification", "ai_sql_required", "cannot_plan_safely"}
+    assert context["route_recommendation"] == "cannot_plan_safely"
 
 
 def test_qp2_intent_builder_show_all_accounts():

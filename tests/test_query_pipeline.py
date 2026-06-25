@@ -57,7 +57,7 @@ def test_query_pipeline_returns_structured_debug_fields(monkeypatch):
             "intent": "list",
             "question_terms": ["show", "all", "accounts"],
         },
-        "route_recommendation": "simple_rule_ok",
+        "route_recommendation": "simple_rule_based",
         "selected_table_names": ["accounts"],
         "selected_columns": [
             {"table": "accounts", "column": "account_label", "confidence": 0.91},
@@ -114,7 +114,7 @@ def test_query_pipeline_returns_structured_debug_fields(monkeypatch):
     assert captured["pipeline_context"]["intent"] == built_intent
     assert captured["pipeline_context"]["retrieved_context"] == retrieved_context
     assert captured["pipeline_context"]["plan"]["intent"] == "list"
-    assert captured["pipeline_context"]["route_recommendation"] == "simple_rule_ok"
+    assert captured["pipeline_context"]["route_recommendation"] == "simple_rule_based"
     assert captured["pipeline_context"]["complex_sql_plan"] is None
     assert captured["pipeline_context"]["formula_evidence"] == []
     assert captured["pipeline_context"]["evidence_sources"] == ["kb_identifier"]
