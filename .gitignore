@@ -12,6 +12,10 @@ __pycache__/
 *.pyo
 *.pyd
 
+
+
+.venv
+
 # Test and coverage artifacts
 .pytest_cache/
 .hypothesis/
