@@ -1589,7 +1589,7 @@ def test_top_n_browse_currently_uses_rule_based_generator(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "rule-based"
 
 
-def test_single_table_total_returns_clean_complex_failure(monkeypatch):
+def test_single_table_total_uses_deterministic_aggregate(monkeypatch):
     kb = {
         "operating_costs": {
             "columns": [
@@ -1615,8 +1615,9 @@ def test_single_table_total_returns_clean_complex_failure(monkeypatch):
 
     success, message, sql, error = service.process_question("show total operating cost", kb, ai_backend="local")
 
-    assert success is False
-    _assert_complex_not_implemented(service, message, sql)
+    assert success is True
+    assert sql == "SELECT SUM(spent_value) AS sum_spent_value FROM operating_costs;"
+    assert service.get_last_query_context()["route_used"] == "deterministic-aggregate"
 
 
 def test_top_vector_table_beats_generic_glossary_aliases_for_simple_list():

@@ -107,6 +107,36 @@ def test_count_client_singular_uses_rule_based_without_joins():
     assert context["route_used"] == "rule-based"
 
 
+def test_single_table_total_uses_deterministic_aggregate_without_runtime_ai(monkeypatch):
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "amount_total", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+    service = QuestionService()
+
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL retry must remain disabled")),
+    )
+
+    success, message, sql, error = service.process_question("show total amount from bills", knowledge_base, ai_backend="local")
+
+    assert success is True
+    assert sql == "SELECT SUM(amount_total) AS sum_amount_total FROM bills;"
+    assert service.get_last_query_context()["route_used"] == "deterministic-aggregate"
+
+
 def test_runtime_ai_sql_helpers_are_blocked():
     with pytest.raises(RuntimeError):
         _call_ai_backend([], backend="local")

@@ -18,6 +18,7 @@ import inspect
 import re
 
 from query_pipeline.query_planner import build_query_context
+from sql_pipeline.deterministic_sql_generator import generate_single_table_aggregate_sql
 from sql_pipeline.simple_query_generator import generate_simple_sql
 from sql_pipeline.sql_generator import (
     generate_sql as _blocked_generate_sql,
@@ -1390,6 +1391,29 @@ class QuestionService:
             except Exception as e:
                 logger.error(f"Simple SQL generation failed: {e}")
                 return False, f"Simple SQL generation failed: {str(e)}", None, None
+
+        deterministic_aggregate = generate_single_table_aggregate_sql(
+            query_context=query_context,
+            knowledge_base=knowledge_base,
+        )
+        if deterministic_aggregate.status == "generated" and deterministic_aggregate.sql:
+            safety_ok, safety_reason = validate_sql(deterministic_aggregate.sql)
+            struct_ok, struct_reason = validate_sql_structure(deterministic_aggregate.sql, knowledge_base)
+            if safety_ok and struct_ok:
+                _set_route(query_context, "deterministic-aggregate", deterministic_aggregate.reason)
+                self.conversation_memory.add_turn(
+                    user_question=question,
+                    is_follow_up=is_follow_up,
+                    rewritten_question=rewritten_question,
+                    generated_sql=deterministic_aggregate.sql,
+                )
+                return True, "SQL generated successfully (deterministic aggregate)", deterministic_aggregate.sql, None
+            fail_reason = safety_reason if not safety_ok else struct_reason
+            return False, f"SQL validation failed: {fail_reason}", None, None
+
+        if deterministic_aggregate.status == "cannot_plan_safely":
+            _set_route(query_context, "cannot_plan_safely", deterministic_aggregate.reason)
+            return False, "Cannot plan this query safely from available schema evidence.", None, None
         
         # Default: complex query not implemented
         _set_route(query_context, "complex_deterministic_not_ready", "Complex SQL not implemented in Phase 2")
