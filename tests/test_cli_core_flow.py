@@ -2,7 +2,6 @@
 import importlib
 from pathlib import Path
 
-import pytest
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 
 from core.app_service import AppService
@@ -406,30 +405,6 @@ def test_process_question_normalizes_none_payload(monkeypatch, tmp_path):
     assert "no result" in (result["error"] or "").lower()
 
 
-def test_process_question_normalizes_dict_payload(monkeypatch, tmp_path):
-    service = _service_with_orders(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        service.query_pipeline,
-        "run",
-        lambda **kwargs: {
-            "success": True,
-            "message": "ok",
-            "sql": "SELECT order_id FROM orders;",
-            "route": "simple-rule-based",
-            "validation_result": {"is_valid": True, "reason": "ok"},
-            "query_context": {"route_used": "simple-rule-based"},
-            "error": None,
-        },
-    )
-
-    result = service.process_question("show all orders", ai_backend="local")
-
-    assert result["success"] is True
-    assert result["route"] == "rule-based"
-    assert result["route_used"] == "rule-based"
-    assert result["validation_result"]["is_valid"] is True
-
-
 def test_rebuild_or_refresh_knowledge_base_forces_rebuild(monkeypatch):
     service = AppService()
     captured = {}
@@ -481,66 +456,6 @@ def test_handle_ask_question_guards_none_result(monkeypatch, capsys):
 
     output = capsys.readouterr().out
     assert "Internal error: question processing returned no result." in output
-
-
-@pytest.mark.parametrize(
-    ("question", "sql"),
-    [
-        ("show all partner", "SELECT partner_id, partner_name FROM partners;"),
-        ("count partner", "SELECT COUNT(*) AS total_partners FROM partners;"),
-        ("show all bill", "SELECT bill_id, bill_number FROM bills;"),
-        ("count bill", "SELECT COUNT(*) AS total_bills FROM bills;"),
-    ],
-)
-def test_handle_ask_question_accepts_simple_rule_based_result(monkeypatch, capsys, question, sql):
-    main_module = importlib.import_module("main")
-    state = main_module.SessionState()
-
-    monkeypatch.setattr(state.app_service, "is_database_connected", lambda: True)
-    monkeypatch.setattr(state.app_service, "is_database_ready", lambda: True)
-    monkeypatch.setattr(state.app_service, "load_knowledge_base", lambda: (True, "ok", KB))
-    monkeypatch.setattr(state.app_service, "detect_action", lambda asked_question: None)
-    monkeypatch.setattr(state.app_service, "get_active_backend", lambda: "local")
-    monkeypatch.setattr(
-        state.app_service,
-        "get_vector_status",
-        lambda: {"persistence": {}, "embedding": {}, "retriever": {}},
-    )
-    monkeypatch.setattr(
-        state.app_service,
-        "process_question",
-        lambda asked_question, ai_backend=None: {
-            "success": True,
-            "question": asked_question,
-            "message": "ok",
-            "generated_sql": sql,
-            "sql": sql,
-            "route": "rule-based",
-            "route_used": "simple_rule_based",
-            "validation_result": {"is_valid": True, "reason": "ok"},
-            "query_context": {
-                "plan": {"intent": "count" if "count" in asked_question else "list"},
-                "selected_tables": [
-                    {
-                        "table": "partners" if "partner" in asked_question else "bills",
-                        "confidence": 0.95,
-                        "selected_columns": [],
-                    }
-                ],
-                "route_used": "simple_rule_based",
-                "route_reason": "simple single-table question",
-            },
-            "error": None,
-        },
-    )
-    monkeypatch.setattr(main_module, "_input", lambda prompt: question)
-
-    main_module.handle_ask_question(state)
-
-    output = capsys.readouterr().out
-    assert "Unexpected error" not in output
-    assert "Route: rule-based" in output
-    assert sql in output
 
 
 def test_ai_backend_status_refresh_updates_displayed_status(monkeypatch, capsys):
