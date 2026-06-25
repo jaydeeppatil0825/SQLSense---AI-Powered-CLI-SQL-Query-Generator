@@ -410,20 +410,40 @@ def handle_ask_question(state: SessionState) -> None:
 
     # ── Process question using core service ───────────────────────────────
     ai_backend = state.app_service.get_active_backend()
-    success, message, sql, error = state.app_service.process_question(question, ai_backend)
+    result = state.app_service.process_question(question, ai_backend)
+    if result is None:
+        logger.error("Ask Question returned no result payload")
+        print("  Internal error: question processing returned no result.")
+        return
+    if not isinstance(result, dict):
+        logger.error(f"Ask Question returned invalid result payload: {type(result).__name__}")
+        print("  Internal error: question processing returned an invalid result.")
+        return
+
+    success = bool(result.get("success"))
+    message = str(result.get("message") or "")
+    error = result.get("error")
+    sql = result.get("sql") or result.get("generated_sql")
     if not success:
         print(f"  {error or message}")
         return
+    if not sql:
+        logger.error("Ask Question succeeded without SQL in result payload")
+        print("  Internal error: SQL generation succeeded without a SQL result.")
+        return
 
     # ── Display the SQL ───────────────────────────────────────────────────
-    query_context = state.app_service.get_last_query_context() or {}
+    query_context = result.get("query_context") or state.app_service.get_last_query_context() or {}
     query_plan = query_context.get("plan") or {}
     vector_status = state.app_service.get_vector_status()
     persistence_status = vector_status.get("persistence", {})
-    route_used = str(query_context.get("route_used") or "").strip()
+    route_used = str(result.get("route_used") or query_context.get("route_used") or "").strip()
     route_reason = str(query_context.get("route_reason") or "").strip()
     route_labels = {
         "rule-based": "rule-based",
+        "rule_based": "rule-based",
+        "simple_rule_based": "rule-based",
+        "simple-rule-based": "rule-based",
         "ai": "AI",
         "ai-retry": "AI retry",
         "fallback-failed": "fallback failed",
@@ -447,6 +467,8 @@ def handle_ask_question(state: SessionState) -> None:
     if selected_tables:
         print("\n  Selected Tables:")
         for table_entry in selected_tables:
+            if not isinstance(table_entry, dict):
+                continue
             print(f"  - {table_entry.get('table', '')} (confidence: {table_entry.get('confidence', 'unknown')})")
             if table_entry.get("reason"):
                 print(f"    reason: {table_entry['reason']}")
@@ -455,6 +477,7 @@ def handle_ask_question(state: SessionState) -> None:
                 column_descriptions = [
                     f"{column_entry.get('column')} [{column_entry.get('semantic_type', 'general')}]"
                     for column_entry in selected_columns[:6]
+                    if isinstance(column_entry, dict)
                 ]
                 print(f"    selected columns: {', '.join(column_descriptions)}")
 
@@ -483,18 +506,22 @@ def handle_ask_question(state: SessionState) -> None:
             top_columns = [
                 f"{entry.get('table_name')}.{entry.get('column_name')}"
                 for entry in vector_results["columns"][:5]
-                if entry.get("table_name") and entry.get("column_name")
+                if isinstance(entry, dict) and entry.get("table_name") and entry.get("column_name")
             ]
             if top_columns:
                 print(f"  - top vector columns: {', '.join(top_columns)}")
         if vector_results.get("glossary_terms"):
-            glossary_names = [t.get('term', '') for t in vector_results['glossary_terms'][:3]]
+            glossary_names = [
+                entry.get("term", "")
+                for entry in vector_results["glossary_terms"][:3]
+                if isinstance(entry, dict)
+            ]
             print(f"  - top glossary terms: {', '.join(glossary_names)}")
         if vector_results.get("relationships"):
             relationship_names = [
                 f"{entry.get('from_table')}.{entry.get('from_column')} -> {entry.get('to_table')}.{entry.get('to_column')}"
                 for entry in vector_results["relationships"][:3]
-                if entry.get("from_table") and entry.get("to_table")
+                if isinstance(entry, dict) and entry.get("from_table") and entry.get("to_table")
             ]
             if relationship_names:
                 print(f"  - top relationships: {', '.join(relationship_names)}")

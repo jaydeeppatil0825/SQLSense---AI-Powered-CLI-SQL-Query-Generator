@@ -20,6 +20,20 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
+_RULE_BASED_ROUTE_ALIASES = {
+    "rule-based",
+    "rule_based",
+    "simple_rule_based",
+    "simple-rule-based",
+}
+
+
+def _normalize_route_alias(route: Any) -> str:
+    value = str(route or "").strip()
+    if value in _RULE_BASED_ROUTE_ALIASES:
+        return "rule-based"
+    return value
+
 
 class AppService:
     """Main application service orchestrator."""
@@ -224,19 +238,57 @@ class AppService:
     def get_vector_status(self) -> Dict[str, Any]:
         """Get vector/embedding status for CLI reporting."""
         return self.database_service.get_vector_status()
+
+    def _build_question_result(
+        self,
+        *,
+        question: str,
+        success: bool,
+        message: str = "",
+        generated_sql: Optional[str] = None,
+        error: Optional[str] = None,
+        route: str = "",
+        validation_result: Optional[Dict[str, Any]] = None,
+        query_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        normalized_route = _normalize_route_alias(route)
+        return {
+            "success": bool(success),
+            "question": question,
+            "message": message,
+            "generated_sql": generated_sql,
+            "sql": generated_sql,
+            "route": normalized_route,
+            "route_used": normalized_route,
+            "validation_result": dict(validation_result or {}),
+            "query_context": dict(query_context or {}),
+            "error": error,
+        }
     
     # Question processing
-    def process_question(
+    def _process_question_payload(
         self,
         question: str,
         ai_backend: Optional[str] = None,
-    ) -> Tuple[bool, str, Optional[str], Optional[str]]:
-        """Process question and generate SQL."""
+    ) -> Dict[str, Any]:
+        """Process a question and return the standardized CLI result payload."""
         if not self.database_ready:
-            return False, "Database is not ready", None, "Database is not ready. Connect a database and let SQLSense prepare the knowledge base first."
+            return self._build_question_result(
+                question=question,
+                success=False,
+                message="Database is not ready",
+                error="Database is not ready. Connect a database and let SQLSense prepare the knowledge base first.",
+                route="cannot_plan_safely",
+            )
         knowledge_base = self.database_service.get_knowledge_base()
         if not knowledge_base:
-            return False, "Knowledge base not loaded", None, None
+            return self._build_question_result(
+                question=question,
+                success=False,
+                message="Knowledge base not loaded",
+                error="Knowledge base not loaded",
+                route="cannot_plan_safely",
+            )
         
         business_glossary = self.database_service.get_business_glossary()
         if business_glossary is None:
@@ -255,17 +307,90 @@ class AppService:
             ai_backend=backend,
         )
         self.last_pipeline_result = pipeline_result
-        success, message, sql, error = pipeline_result.to_process_tuple()
-        
-        # ── Bug fix: store generated SQL so Execute Last SQL (option 4) can find it
-        # result_service.last_sql is what get_last_sql() reads — it must be set here,
-        # not only after execution, so option 4 always has the most recent SQL.
-        if success and sql:
-            self.result_service.last_sql = sql
+        query_context = self.question_service.get_last_query_context() or {}
+        success = False
+        message = ""
+        generated_sql: Optional[str] = None
+        error: Optional[str] = None
+        route = ""
+        validation_result: Dict[str, Any] = {}
+
+        if pipeline_result is None:
+            message = "Question processing returned no result"
+            error = "Internal error: question processing returned no result."
+            route = "cannot_plan_safely"
+        elif isinstance(pipeline_result, tuple):
+            success = bool(pipeline_result[0]) if len(pipeline_result) > 0 else False
+            message = str(pipeline_result[1] or "") if len(pipeline_result) > 1 else ""
+            generated_sql = pipeline_result[2] if len(pipeline_result) > 2 else None
+            error = pipeline_result[3] if len(pipeline_result) > 3 else None
+        elif isinstance(pipeline_result, dict):
+            success = bool(pipeline_result.get("success"))
+            message = str(pipeline_result.get("message") or "")
+            generated_sql = pipeline_result.get("generated_sql") or pipeline_result.get("sql")
+            error = pipeline_result.get("error")
+            route = str(pipeline_result.get("route") or pipeline_result.get("route_used") or "")
+            validation_result = (
+                dict(pipeline_result.get("validation_result") or {})
+                if isinstance(pipeline_result.get("validation_result"), dict)
+                else {}
+            )
+            if isinstance(pipeline_result.get("query_context"), dict) and not query_context:
+                query_context = dict(pipeline_result["query_context"])
+        elif hasattr(pipeline_result, "to_dict"):
+            payload = pipeline_result.to_dict()
+            if isinstance(payload, dict):
+                success = bool(payload.get("success"))
+                message = str(payload.get("message") or "")
+                generated_sql = payload.get("generated_sql") or payload.get("sql")
+                error = payload.get("error")
+                route = str(
+                    payload.get("route")
+                    or payload.get("route_used")
+                    or payload.get("route_recommendation")
+                    or ""
+                )
+                validation_result = (
+                    dict(payload.get("validation_result") or {})
+                    if isinstance(payload.get("validation_result"), dict)
+                    else {}
+                )
+                if isinstance(payload.get("query_context"), dict) and not query_context:
+                    query_context = dict(payload["query_context"])
+            else:
+                message = "Question processing returned an invalid structured result"
+                error = "Internal error: question processing returned an invalid structured result."
+                route = "cannot_plan_safely"
+        else:
+            message = "Question processing returned an unsupported result type"
+            error = "Internal error: question processing returned an unsupported result type."
+            route = "cannot_plan_safely"
+
+        route = route or str(query_context.get("route_used") or query_context.get("route") or "")
+
+        if success and generated_sql:
+            self.result_service.last_sql = generated_sql
             self.result_service.set_last_question(question)
+
+        return self._build_question_result(
+            question=question,
+            success=success,
+            message=message,
+            generated_sql=generated_sql,
+            error=error,
+            route=route,
+            validation_result=validation_result,
+            query_context=query_context,
+        )
+
+    def process_question(
+        self,
+        question: str,
+        ai_backend: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Process question and return a standardized result dictionary."""
+        return self._process_question_payload(question, ai_backend)
         
-        return success, message, sql, error
-    
     def detect_action(self, question: str) -> Optional[str]:
         """Detect conversation action."""
         return self.question_service.detect_action(question)
@@ -508,11 +633,18 @@ class AppService:
         }
         
         # Process question
-        success, message, sql, error = self.process_question(question, ai_backend)
-        if not success:
-            result["error"] = error or message
+        question_result = self.process_question(question, ai_backend)
+        if not isinstance(question_result, dict):
+            result["error"] = "Internal error: question processing returned an invalid result."
             return result
-        
+        if not question_result.get("success"):
+            result["error"] = question_result.get("error") or question_result.get("message")
+            return result
+
+        sql = question_result.get("sql") or question_result.get("generated_sql")
+        if not sql:
+            result["error"] = "Internal error: SQL generation succeeded without a SQL result."
+            return result
         result["sql"] = sql
         self.result_service.set_last_question(question)
         

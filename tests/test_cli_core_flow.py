@@ -2,6 +2,7 @@
 import importlib
 from pathlib import Path
 
+import pytest
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 
 from core.app_service import AppService
@@ -56,28 +57,28 @@ def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypat
         lambda user_question, knowledge_base, backend, first_attempt_sql, validation_reason, query_plan=None, selected_tables=None: expected_sql,
     )
 
-    success, message, sql, error = service.process_question("show total sales", ai_backend="local")
+    result = service.process_question("show total sales", ai_backend="local")
 
-    assert success is True
-    assert error is None
-    assert sql == expected_sql
-    assert service.get_last_sql() == sql
+    assert result["success"] is True
+    assert result["error"] is None
+    assert result["sql"] == expected_sql
+    assert service.get_last_sql() == expected_sql
 
     exec_success, exec_message, rows = service.execute_sql(service.get_last_sql(), revalidate=True)
 
     assert exec_success is True
     assert rows == [{"total_sales": 100}]
-    assert service.get_last_sql() == sql
+    assert service.get_last_sql() == expected_sql
 
 
 def test_destructive_natural_language_question_is_blocked(monkeypatch, tmp_path):
     service = _service_with_orders(monkeypatch, tmp_path)
 
-    success, message, sql, error = service.process_question("delete all customers", ai_backend="local")
+    result = service.process_question("delete all customers", ai_backend="local")
 
-    assert success is False
-    assert message == "Unsafe request blocked. Only SELECT questions are allowed."
-    assert sql is None
+    assert result["success"] is False
+    assert result["message"] == "Unsafe request blocked. Only SELECT questions are allowed."
+    assert result["sql"] is None
     assert service.get_last_sql() is None
 
 
@@ -114,10 +115,10 @@ def test_process_question_loads_active_glossary_without_glossary_menu(monkeypatc
     monkeypatch.setattr(service.database_service, "load_business_glossary", fake_load_business_glossary)
     monkeypatch.setattr(service.question_service, "process_question", fake_process_question)
 
-    success, message, sql, error = service.process_question("show orders", ai_backend="local")
+    result = service.process_question("show orders", ai_backend="local")
 
-    assert success is True
-    assert sql == "SELECT * FROM orders LIMIT 50;"
+    assert result["success"] is True
+    assert result["sql"] == "SELECT * FROM orders LIMIT 50;"
     assert captured["business_glossary"] == active_glossary
     assert captured["vector_retriever"] is not None
     assert captured["pipeline_context"] is not None
@@ -165,9 +166,9 @@ def test_process_question_uses_persisted_vector_index_after_reload(monkeypatch, 
 
     monkeypatch.setattr(second_service.question_service, "process_question", fake_process_question)
 
-    success, message, sql, error = second_service.process_question("show orders", ai_backend="local")
+    result = second_service.process_question("show orders", ai_backend="local")
 
-    assert success is True
+    assert result["success"] is True
     assert captured["vector_retriever"] is not None
     assert captured["pipeline_context"] is not None
     assert captured["vector_status"]["persistence"]["loaded_from_disk"] is True
@@ -223,12 +224,12 @@ def test_invalid_generated_sql_never_becomes_last_executable_sql(monkeypatch, tm
     service = _service_with_orders(monkeypatch, tmp_path)
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
 
-    success, message, sql, error = service.process_question("show total sales", ai_backend="local")
+    result = service.process_question("show total sales", ai_backend="local")
 
-    assert success is False
-    assert sql is None
+    assert result["success"] is False
+    assert result["sql"] is None
     assert service.get_last_sql() is None
-    assert "no sql" in (message or "").lower() or "no sql" in (error or "").lower()
+    assert "no sql" in (result.get("message") or "").lower() or "no sql" in (result.get("error") or "").lower()
 
 
 def test_cli_menu_labels_remain_unchanged():
@@ -369,11 +370,64 @@ def test_process_question_is_blocked_before_database_ready():
     service.database_service.knowledge_base = KB
     service.database_ready = False
 
-    success, message, sql, error = service.process_question("show orders", ai_backend="local")
+    result = service.process_question("show orders", ai_backend="local")
 
-    assert success is False
-    assert sql is None
-    assert "not ready" in (error or "").lower()
+    assert result["success"] is False
+    assert result["sql"] is None
+    assert "not ready" in (result.get("error") or "").lower()
+
+
+def test_process_question_normalizes_tuple_payload(monkeypatch, tmp_path):
+    service = _service_with_orders(monkeypatch, tmp_path)
+    service.question_service.last_query_context = {"route_used": "simple_rule_based"}
+    monkeypatch.setattr(
+        service.query_pipeline,
+        "run",
+        lambda **kwargs: (True, "ok", "SELECT order_id FROM orders;", None),
+    )
+
+    result = service.process_question("show all orders", ai_backend="local")
+
+    assert result["success"] is True
+    assert result["sql"] == "SELECT order_id FROM orders;"
+    assert result["generated_sql"] == "SELECT order_id FROM orders;"
+    assert result["route"] == "rule-based"
+    assert result["route_used"] == "rule-based"
+
+
+def test_process_question_normalizes_none_payload(monkeypatch, tmp_path):
+    service = _service_with_orders(monkeypatch, tmp_path)
+    monkeypatch.setattr(service.query_pipeline, "run", lambda **kwargs: None)
+
+    result = service.process_question("show all orders", ai_backend="local")
+
+    assert result["success"] is False
+    assert result["sql"] is None
+    assert "no result" in (result["error"] or "").lower()
+
+
+def test_process_question_normalizes_dict_payload(monkeypatch, tmp_path):
+    service = _service_with_orders(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        service.query_pipeline,
+        "run",
+        lambda **kwargs: {
+            "success": True,
+            "message": "ok",
+            "sql": "SELECT order_id FROM orders;",
+            "route": "simple-rule-based",
+            "validation_result": {"is_valid": True, "reason": "ok"},
+            "query_context": {"route_used": "simple-rule-based"},
+            "error": None,
+        },
+    )
+
+    result = service.process_question("show all orders", ai_backend="local")
+
+    assert result["success"] is True
+    assert result["route"] == "rule-based"
+    assert result["route_used"] == "rule-based"
+    assert result["validation_result"]["is_valid"] is True
 
 
 def test_rebuild_or_refresh_knowledge_base_forces_rebuild(monkeypatch):
@@ -409,6 +463,84 @@ def test_main_imports_working_services_through_compatibility_paths():
 
     assert main_module.AppService is app_service_module.AppService
     assert main_module.SUPPORTED_DB_TYPES == db_connection_module.SUPPORTED_DB_TYPES
+
+
+def test_handle_ask_question_guards_none_result(monkeypatch, capsys):
+    main_module = importlib.import_module("main")
+    state = main_module.SessionState()
+
+    monkeypatch.setattr(state.app_service, "is_database_connected", lambda: True)
+    monkeypatch.setattr(state.app_service, "is_database_ready", lambda: True)
+    monkeypatch.setattr(state.app_service, "load_knowledge_base", lambda: (True, "ok", KB))
+    monkeypatch.setattr(state.app_service, "detect_action", lambda question: None)
+    monkeypatch.setattr(state.app_service, "get_active_backend", lambda: "local")
+    monkeypatch.setattr(state.app_service, "process_question", lambda question, ai_backend=None: None)
+    monkeypatch.setattr(main_module, "_input", lambda prompt: "show all partner")
+
+    main_module.handle_ask_question(state)
+
+    output = capsys.readouterr().out
+    assert "Internal error: question processing returned no result." in output
+
+
+@pytest.mark.parametrize(
+    ("question", "sql"),
+    [
+        ("show all partner", "SELECT partner_id, partner_name FROM partners;"),
+        ("count partner", "SELECT COUNT(*) AS total_partners FROM partners;"),
+        ("show all bill", "SELECT bill_id, bill_number FROM bills;"),
+        ("count bill", "SELECT COUNT(*) AS total_bills FROM bills;"),
+    ],
+)
+def test_handle_ask_question_accepts_simple_rule_based_result(monkeypatch, capsys, question, sql):
+    main_module = importlib.import_module("main")
+    state = main_module.SessionState()
+
+    monkeypatch.setattr(state.app_service, "is_database_connected", lambda: True)
+    monkeypatch.setattr(state.app_service, "is_database_ready", lambda: True)
+    monkeypatch.setattr(state.app_service, "load_knowledge_base", lambda: (True, "ok", KB))
+    monkeypatch.setattr(state.app_service, "detect_action", lambda asked_question: None)
+    monkeypatch.setattr(state.app_service, "get_active_backend", lambda: "local")
+    monkeypatch.setattr(
+        state.app_service,
+        "get_vector_status",
+        lambda: {"persistence": {}, "embedding": {}, "retriever": {}},
+    )
+    monkeypatch.setattr(
+        state.app_service,
+        "process_question",
+        lambda asked_question, ai_backend=None: {
+            "success": True,
+            "question": asked_question,
+            "message": "ok",
+            "generated_sql": sql,
+            "sql": sql,
+            "route": "rule-based",
+            "route_used": "simple_rule_based",
+            "validation_result": {"is_valid": True, "reason": "ok"},
+            "query_context": {
+                "plan": {"intent": "count" if "count" in asked_question else "list"},
+                "selected_tables": [
+                    {
+                        "table": "partners" if "partner" in asked_question else "bills",
+                        "confidence": 0.95,
+                        "selected_columns": [],
+                    }
+                ],
+                "route_used": "simple_rule_based",
+                "route_reason": "simple single-table question",
+            },
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(main_module, "_input", lambda prompt: question)
+
+    main_module.handle_ask_question(state)
+
+    output = capsys.readouterr().out
+    assert "Unexpected error" not in output
+    assert "Route: rule-based" in output
+    assert sql in output
 
 
 def test_ai_backend_status_refresh_updates_displayed_status(monkeypatch, capsys):
