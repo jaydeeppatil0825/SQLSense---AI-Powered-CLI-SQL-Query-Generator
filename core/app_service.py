@@ -28,6 +28,10 @@ _RULE_BASED_ROUTE_ALIASES = {
 }
 
 
+def _safe_dict(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def _normalize_route_alias(route: Any) -> str:
     value = str(route or "").strip()
     if value in _RULE_BASED_ROUTE_ALIASES:
@@ -260,8 +264,8 @@ class AppService:
             "sql": generated_sql,
             "route": normalized_route,
             "route_used": normalized_route,
-            "validation_result": dict(validation_result or {}),
-            "query_context": dict(query_context or {}),
+            "validation_result": _safe_dict(validation_result),
+            "query_context": _safe_dict(query_context),
             "error": error,
         }
     
@@ -307,7 +311,7 @@ class AppService:
             ai_backend=backend,
         )
         self.last_pipeline_result = pipeline_result
-        query_context = self.question_service.get_last_query_context() or {}
+        query_context = _safe_dict(self.question_service.get_last_query_context() or {})
         success = False
         message = ""
         generated_sql: Optional[str] = None
@@ -330,13 +334,9 @@ class AppService:
             generated_sql = pipeline_result.get("generated_sql") or pipeline_result.get("sql")
             error = pipeline_result.get("error")
             route = str(pipeline_result.get("route") or pipeline_result.get("route_used") or "")
-            validation_result = (
-                dict(pipeline_result.get("validation_result") or {})
-                if isinstance(pipeline_result.get("validation_result"), dict)
-                else {}
-            )
+            validation_result = _safe_dict(pipeline_result.get("validation_result"))
             if isinstance(pipeline_result.get("query_context"), dict) and not query_context:
-                query_context = dict(pipeline_result["query_context"])
+                query_context = _safe_dict(pipeline_result["query_context"])
         elif hasattr(pipeline_result, "to_dict"):
             payload = pipeline_result.to_dict()
             if isinstance(payload, dict):
@@ -350,13 +350,9 @@ class AppService:
                     or payload.get("route_recommendation")
                     or ""
                 )
-                validation_result = (
-                    dict(payload.get("validation_result") or {})
-                    if isinstance(payload.get("validation_result"), dict)
-                    else {}
-                )
+                validation_result = _safe_dict(payload.get("validation_result"))
                 if isinstance(payload.get("query_context"), dict) and not query_context:
-                    query_context = dict(payload["query_context"])
+                    query_context = _safe_dict(payload["query_context"])
             else:
                 message = "Question processing returned an invalid structured result"
                 error = "Internal error: question processing returned an invalid structured result."

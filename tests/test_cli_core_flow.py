@@ -458,6 +458,49 @@ def test_handle_ask_question_guards_none_result(monkeypatch, capsys):
     assert "Internal error: question processing returned no result." in output
 
 
+def test_handle_ask_question_tolerates_none_nested_context(monkeypatch, capsys):
+    main_module = importlib.import_module("main")
+    state = main_module.SessionState()
+
+    monkeypatch.setattr(state.app_service, "is_database_connected", lambda: True)
+    monkeypatch.setattr(state.app_service, "is_database_ready", lambda: True)
+    monkeypatch.setattr(state.app_service, "load_knowledge_base", lambda: (True, "ok", KB))
+    monkeypatch.setattr(state.app_service, "detect_action", lambda question: None)
+    monkeypatch.setattr(state.app_service, "get_active_backend", lambda: "local")
+    monkeypatch.setattr(
+        state.app_service,
+        "process_question",
+        lambda question, ai_backend=None: {
+            "success": True,
+            "message": "ok",
+            "sql": "SELECT order_id, final_amount FROM orders;",
+            "generated_sql": "SELECT order_id, final_amount FROM orders;",
+            "route_used": "rule-based",
+            "query_context": {
+                "plan": None,
+                "selected_tables": [{"table": "orders", "confidence": 0.9, "selected_columns": []}],
+                "vector_results": None,
+                "vector_used": False,
+                "route_used": "rule-based",
+                "route_reason": "simple single-table question",
+            },
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        state.app_service,
+        "get_vector_status",
+        lambda: {"index_status": "ready", "persistence": None},
+    )
+    monkeypatch.setattr(main_module, "_input", lambda prompt: "show all partner")
+
+    main_module.handle_ask_question(state)
+
+    output = capsys.readouterr().out
+    assert "Generated SQL:" in output
+    assert "SELECT order_id, final_amount FROM orders;" in output
+
+
 def test_ai_backend_status_refresh_updates_displayed_status(monkeypatch, capsys):
     main_module = importlib.import_module("main")
     state = main_module.SessionState()

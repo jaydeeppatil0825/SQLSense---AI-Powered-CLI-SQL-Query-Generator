@@ -1224,6 +1224,8 @@ class QuestionService:
         Returns:
             (success, message, sql, error)
         """
+        self.last_query_context = None
+
         if _UNSAFE_NL_RE.search(question):
             return False, "Unsafe request blocked. Only SELECT questions are allowed.", None, None
 
@@ -1274,6 +1276,18 @@ class QuestionService:
                 vector_retriever=vector_retriever,
             )
         query_context = _merge_pipeline_metadata(query_context, pipeline_context)
+        query_context = query_context if isinstance(query_context, dict) else {}
+        query_context["plan"] = query_context.get("plan") if isinstance(query_context.get("plan"), dict) else {}
+        query_context["vector_results"] = (
+            query_context.get("vector_results")
+            if isinstance(query_context.get("vector_results"), dict)
+            else {}
+        )
+        query_context["retrieved_context"] = (
+            query_context.get("retrieved_context")
+            if isinstance(query_context.get("retrieved_context"), dict)
+            else {}
+        )
         self.last_query_context = query_context
         logger.info(
             "[PIPELINE RESULT] route=%s selected_tables=%s join_paths=%s complex_sql_plan=%s",

@@ -239,6 +239,14 @@ def test_query_planner_does_not_build_vector_index_when_retriever_is_missing():
     )
 
     assert context["vector_used"] is False
+
+
+def test_query_planner_returns_empty_vector_results_when_vector_is_unavailable():
+    context = build_query_context("show all accounts", KNOWLEDGE_BASE, business_glossary={})
+
+    assert isinstance(context.get("vector_results"), dict)
+    assert context.get("vector_results") is not None
+    assert context.get("vector_used") is False
     assert context["vector_results"]["used_vector"] is False
     assert context["vector_results"]["error"] == "vector retriever unavailable"
 

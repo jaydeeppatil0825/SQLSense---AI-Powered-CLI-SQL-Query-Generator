@@ -126,6 +126,11 @@ def _input(prompt: str) -> str:
     return input(prompt).strip()
 
 
+def _as_dict(value: object) -> dict:
+    """Return a safe dict for CLI display code."""
+    return value if isinstance(value, dict) else {}
+
+
 # ── Menu display ──────────────────────────────────────────────────────────────
 
 def display_menu(state: SessionState) -> None:
@@ -181,14 +186,15 @@ def read_menu_choice() -> int | None:
 
 def _print_database_prepare_report(state: SessionState, report: dict[str, object]) -> None:
     """Print database preparation progress/results after connect or rebuild."""
+    report = _as_dict(report)
     print("\n  Preparation status:")
     print(f"  - connecting database: {'done' if report.get('connected') else 'failed'}")
     print(f"  - building KB: {'done' if report.get('kb_built') else 'failed'}")
     print(f"  - AI enrichment: {report.get('ai_enrichment_status')} ({report.get('ai_enrichment_message')})")
     print(f"  - glossary generated: {'yes' if report.get('glossary_generated') else 'no'}")
-    vector_status = state.app_service.get_vector_status()
+    vector_status = _as_dict(state.app_service.get_vector_status() or {})
     print(f"  - vector built/skipped: {vector_status.get('index_status')}")
-    persistence = vector_status.get("persistence", {})
+    persistence = _as_dict(vector_status.get("persistence") or {})
     if report.get("vector_warning"):
         print(f"  - vector note: {report.get('vector_warning')}")
     elif persistence.get("stale_reason"):
@@ -336,10 +342,10 @@ def handle_rebuild_or_refresh_knowledge_base(state: SessionState) -> None:
 
     print(f"  [OK] Knowledge base saved successfully -> semantic/knowledge_base.json")
     print(f"  [OK] Business glossary saved -> semantic/business_glossary.json")
-    vector_status = state.app_service.get_vector_status()
-    embedding_status = vector_status.get("embedding", {})
-    retriever_status = vector_status.get("retriever", {})
-    persistence_status = vector_status.get("persistence", {})
+    vector_status = _as_dict(state.app_service.get_vector_status() or {})
+    embedding_status = _as_dict(vector_status.get("embedding") or {})
+    retriever_status = _as_dict(vector_status.get("retriever") or {})
+    persistence_status = _as_dict(vector_status.get("persistence") or {})
     print("\n  Vector / Embedding Status:")
     print(f"  - index status: {vector_status.get('index_status')}")
     print(f"  - index source: {persistence_status.get('source')}")
@@ -433,10 +439,10 @@ def handle_ask_question(state: SessionState) -> None:
         return
 
     # ── Display the SQL ───────────────────────────────────────────────────
-    query_context = result.get("query_context") or state.app_service.get_last_query_context() or {}
-    query_plan = query_context.get("plan") or {}
-    vector_status = state.app_service.get_vector_status()
-    persistence_status = vector_status.get("persistence", {})
+    query_context = _as_dict(result.get("query_context") or state.app_service.get_last_query_context() or {})
+    query_plan = _as_dict(query_context.get("plan") or {})
+    vector_status = _as_dict(state.app_service.get_vector_status() or {})
+    persistence_status = _as_dict(vector_status.get("persistence") or {})
     route_used = str(result.get("route_used") or query_context.get("route_used") or "").strip()
     route_reason = str(query_context.get("route_reason") or "").strip()
     route_labels = {
@@ -463,7 +469,7 @@ def handle_ask_question(state: SessionState) -> None:
         print(f"  - filters: {query_plan.get('filters')}")
         print(f"  - date range: {query_plan.get('date_range')}")
 
-    selected_tables = query_context.get("selected_tables", [])
+    selected_tables = query_context.get("selected_tables") or []
     if selected_tables:
         print("\n  Selected Tables:")
         for table_entry in selected_tables:
@@ -485,10 +491,10 @@ def handle_ask_question(state: SessionState) -> None:
     if query_context.get("vector_used"):
         print("\n  Vector Retrieval:")
         print("  - route: vector-enhanced")
-        vector_results = query_context.get("vector_results", {})
-        retriever_status = vector_results.get("retriever_status", {})
-        embedding_status = retriever_status.get("embedding", {})
-        last_search = retriever_status.get("last_search", {})
+        vector_results = _as_dict(query_context.get("vector_results") or {})
+        retriever_status = _as_dict(vector_results.get("retriever_status") or {})
+        embedding_status = _as_dict(retriever_status.get("embedding") or {})
+        last_search = _as_dict(retriever_status.get("last_search") or {})
         if persistence_status:
             print(f"  - index source: {persistence_status.get('source')}")
             print(f"  - index fresh: {persistence_status.get('is_fresh')}")
@@ -528,9 +534,9 @@ def handle_ask_question(state: SessionState) -> None:
     else:
         print("\n  Vector Retrieval:")
         print("  - route: rule-based (vector unavailable or not needed)")
-        vector_results = query_context.get("vector_results", {})
-        retriever_status = vector_results.get("retriever_status", {})
-        embedding_status = retriever_status.get("embedding", {})
+        vector_results = _as_dict(query_context.get("vector_results") or {})
+        retriever_status = _as_dict(vector_results.get("retriever_status") or {})
+        embedding_status = _as_dict(retriever_status.get("embedding") or {})
         if persistence_status:
             print(f"  - index source: {persistence_status.get('source')}")
             print(f"  - index fresh: {persistence_status.get('is_fresh')}")
@@ -691,7 +697,7 @@ def handle_execute_last_sql(state: SessionState) -> None:
     logger.info(f"Executing SQL: {sql[:100]}...")
     print(f"\n  Executing:\n  {sql}\n")
 
-    query_context = state.app_service.get_last_query_context() or {}
+    query_context = _as_dict(state.app_service.get_last_query_context() or {})
     if query_context.get("warnings"):
         print("  Execution warnings:")
         for warning in query_context["warnings"]:

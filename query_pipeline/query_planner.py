@@ -1849,7 +1849,7 @@ def _build_query_context_from_retrieved_context(
         "selected_knowledge_base": reduced_kb,
         "warnings": warnings,
         "knowledge_base": enriched_kb,
-        "vector_results": None,
+        "vector_results": {},
         "vector_used": False,
         "join_paths": join_paths,
         "fk_relationships": _build_fk_relationship_graph(enriched_kb),
@@ -2153,14 +2153,14 @@ def build_query_context(
     logger.debug(f"[DEBUG] Question: {question}")
     logger.debug(f"[DEBUG] Intent: {intent}, Dimension: {dimension}, Semantic hints: {semantic_hints}")
 
-    vector_results = None
+    vector_results: dict[str, Any] = {}
     if use_vector_retrieval:
         vector_results = _retrieve_with_vector(
             question,
             enriched_kb,
             business_glossary,
             retriever=vector_retriever,
-        )
+        ) or {}
     
     logger.debug(f"[DEBUG] Vector results: {vector_results.get('used_vector') if vector_results else False}")
     if vector_results:
