@@ -1,9 +1,9 @@
-# AI SQL Query Generator
+# SQLSense - AI-Powered CLI SQL Query Generator
 
-A Python CLI tool that connects to a MySQL database, builds a semantic knowledge base, and converts plain-English questions into safe, read-only SQL `SELECT` queries using local Ollama with `llama3`.
+A Python CLI tool that connects to a MySQL database, builds a semantic knowledge base, and converts plain-English questions into safe, read-only SQL `SELECT` queries using deterministic SQL generation with optional AI semantic enrichment during knowledge base build.
 
 **This project is CLI-only.** Run it with `python main.py`.
-**No NVIDIA API key is required.** The active workflow uses local Ollama only.
+**AI/LLM is used only during KB build/semantic enrichment.** Runtime question answering is entirely deterministic without AI.
 
 ---
 
@@ -16,40 +16,54 @@ Eliminate the need to write SQL manually. Describe what you want in plain Englis
 ## Folder Layout
 
 ```
-aisqlqurrey/
+SQL-Sense/
 ├── main.py                          # CLI entry point, menu loop
 ├── .env                             # Your credentials (not committed)
 ├── .env.template                    # Template — copy this to .env
 ├── requirements.txt                 # Pinned dependencies
 ├── README.md
-├── db/
+├── core/
+│   ├── app_service.py               # Main application service orchestrator
+│   └── ai_backend_service.py        # AI backend service (KB build only)
+├── kb_pipeline/
+│   ├── database_service.py         # Database connection and KB build orchestration
 │   ├── connection.py                # Engine factory (env + interactive)
 │   ├── schema_reader.py             # SQLAlchemy reflection → schema dict
 │   ├── data_profiler.py             # Aggregate profiling queries
+│   ├── knowledge_base_builder.py    # Orchestrates the KB build
+│   ├── schema_facts.py              # Schema enrichment and relationship detection
+│   ├── business_glossary.py         # Business term → column mapping
+│   ├── ai_semantic_enricher.py      # AI-powered semantic enrichment (KB build only)
+│   └── vector/                      # ChromaDB vector store and retrieval
+│       ├── chroma_store.py
+│       ├── index_builder.py
+│       ├── persistence.py
+│       └── retriever.py
+├── query_pipeline/
+│   ├── query_pipeline.py            # Query planning pipeline entry point
+│   ├── query_planner.py             # Query planning and routing logic
+│   ├── intent_builder.py            # Intent detection (deterministic)
+│   ├── context_retriever.py         # Context retrieval from KB/glossary/vector
+│   ├── question_normalizer.py       # Question normalization
+│   └── conversation/
+│       ├── question_rewriter.py     # Follow-up question rewriting (rule-based)
+│       └── conversation_memory.py  # Conversation session management
+├── sql_pipeline/
+│   ├── question_service.py          # Question processing orchestration
+│   ├── simple_query_generator.py    # Deterministic SQL for simple queries
+│   ├── sql_generator.py             # Blocked AI SQL generator (RuntimeError)
+│   ├── sql_validator.py             # SQL validation
 │   └── query_executor.py            # Safe SELECT execution
-├── semantic/
-│   ├── semantic_mapper.py           # Column name → semantic type map
-│   ├── knowledge_base_builder.py    # Orchestrates the 3-step build
-│   ├── knowledge_base.json          # Generated output (git-ignored)
-│   ├── ai_semantic_enricher.py      # AI-powered semantic enrichment
-│   └── business_glossary.py         # Business term → column mapping
-├── ai/
-│   ├── prompt_builder.py            # Builds the LLM prompt
-│   ├── sql_generator.py             # Dispatches to local Ollama
-│   └── simple_query_generator.py    # Deterministic SQL for simple queries
-├── charts/
-│   └── chart_generator.py           # Auto-generates charts from query results
-├── insights/
-│   └── insight_generator.py        # AI-powered business insights
+├── core/
+│   ├── result_service.py            # Result storage and retrieval
+│   ├── chart_service.py             # Chart generation
+│   └── insight_service.py          # Insight generation (not yet implemented)
 ├── utils/
 │   ├── file_utils.py                # save_json / load_json
-│   ├── sql_validator.py             # validate_sql / add_limit_if_missing
 │   └── logger.py                   # Centralized logging configuration
-├── conversation/
-│   ├── conversation_memory.py       # Conversation session management
-│   ├── followup_detector.py         # Follow-up question detection
-│   ├── question_rewriter.py        # Follow-up question rewriting
-│   └── action_detector.py          # Conversation action detection
+├── semantic/
+│   ├── knowledge_base.json          # Generated output (git-ignored)
+│   └── business_glossary.json       # Generated business glossary (git-ignored)
 ├── logs/
 │   └── app.log                      # Application logs (git-ignored)
 ├── output/
@@ -212,10 +226,11 @@ Select **option 3**. Type a plain-English question:
 
 The tool will:
 - Load the knowledge base for context
-- Try deterministic SQL generation first for common business questions
-- Use local Ollama when deterministic rules are not enough
+- Use deterministic SQL generation based on the query planner and business glossary
 - Validate the generated SQL for safety
 - Store and display it if safe
+
+**Note:** Complex queries requiring joins, aggregations, or business reasoning that cannot be handled deterministically will return a clean message: "Complex deterministic SQL generation is not implemented yet. Please try a simpler query."
 
 ```
   Generated SQL:
@@ -327,15 +342,14 @@ Select **option 6** to search the business glossary:
 
 ## Conversation Memory & Follow-up Questions
 
-The tool now supports conversational AI features that remember your previous questions and allow follow-up questions.
+The tool supports conversational features that remember your previous questions and allow follow-up questions using rule-based rewriting (no AI at runtime).
 
 ### Features
 
 - **Follow-up Detection**: Automatically detects when your question is a follow-up (e.g., "Where do they live?", "Make it top 10")
-- **Question Rewriting**: Rewrites follow-up questions into standalone questions for accurate SQL generation
-- **Conversation Actions**: Supports commands like "chart", "insights", "new chat", "show history"
+- **Question Rewriting**: Rewrites follow-up questions into standalone questions using rule-based logic
+- **Conversation Actions**: Supports commands like "chart", "new chat", "show history"
 - **Session Persistence**: Saves conversation sessions to `output/conversations/`
-- **Insight Choice**: After SQL execution, you can choose whether to generate insights
 
 ### Follow-up Question Examples
 
@@ -349,12 +363,6 @@ The tool now supports conversational AI features that remember your previous que
   Follow-up detected.
   Rewritten question: Show customer addresses.
   Generated SQL: SELECT name, city FROM customers LIMIT 50
-
-# Another follow-up
-  Enter your question: Make it top 10
-  Follow-up detected.
-  Rewritten question: Show top 10 customers by total sales.
-  Generated SQL: SELECT * FROM customers ORDER BY total_sales DESC LIMIT 10
 ```
 
 ### Conversation Actions
@@ -362,23 +370,9 @@ The tool now supports conversational AI features that remember your previous que
 You can use these commands at any time:
 
 - **"chart"** or **"generate chart"**: Generate a chart for the last result
-- **"insights"** or **"give insights for this"**: Generate insights for the last result
 - **"new chat"** or **"clear chat"**: Start a new conversation session
 - **"show last sql"** or **"repeat last sql"**: Show the last generated SQL
 - **"show history"** or **"show conversation history"**: Show recent conversation turns
-
-### Insight Generation
-
-After executing SQL, you'll be prompted:
-
-```bash
-  Do you want to generate insights for this result? (y/n):
-```
-
-- If you enter `y`: Insights are generated, displayed, and saved
-- If you enter `n`: Insights are skipped, and this is recorded in the conversation history
-
-You can always generate insights later using the "insights" action.
 
 ### Conversation Sessions
 
@@ -392,23 +386,31 @@ Conversation sessions are automatically saved to `output/conversations/session_Y
   - Generated SQL
   - Row count
   - Chart path (if generated)
-  - Insights (if generated)
-  - Whether insights were skipped
 
 ---
 
 ## Example Questions
 
+**Supported (simple list/count):**
 ```
 Show all customers
 Count total orders
-Show total sales
+Show all partners
+Count partners
+Show all bills
+Count bill
+```
+
+**Not yet supported (complex queries):**
+```
 Show total sales by city
 Show top 5 customers by sales
 Show sales by product category
 Show payment details with customer names
 Show customers with pending payments
 ```
+
+Complex queries will return: "Complex deterministic SQL generation is not implemented yet. Please try a simpler query."
 
 ---
 
@@ -439,14 +441,14 @@ This is rejected before SQL execution.
 
 ### SQL Generation Strategy
 
-The tool uses a **hybrid approach** for SQL generation:
+The tool uses a **deterministic approach** for SQL generation:
 
 | Query type | Handler | Examples |
 |---|---|---|
-| Simple | Deterministic Python code | "Show all customers", "Count total orders", "Show total sales" |
-| Complex | Local Ollama fallback when deterministic rules cannot answer | "Show top 5 customers by total sales", "Show monthly sales", "Revenue by category" |
+| Simple list/count | Deterministic rule-based generator | "Show all customers", "Count total orders", "Show all partners" |
+| Complex | Not yet implemented (returns clean message) | "Show top 5 customers by total sales", "Show monthly sales", "Revenue by category" |
 
-**Why?** Simple queries are safer and faster when generated by code. Local AI is reserved for questions that require joins, aggregation across multiple tables, date grouping, ranking, and business reasoning.
+**Why?** Deterministic SQL generation is safer, faster, and more predictable. AI/LLM is used only during knowledge base build for semantic enrichment, not at runtime for SQL generation. Complex queries requiring joins, aggregations, or business reasoning will return a clean message asking for a simpler query.
 
 ### Security
 
@@ -497,6 +499,7 @@ Set `DEBUG_MODE=true` in `.env` for verbose debug logging. Passwords and API key
 
 ## Future Improvements
 
+- Deterministic complex SQL generation (joins, aggregations, business reasoning)
 - PostgreSQL support
 - SQLite support
 - Schema diffing between saved knowledge base and live database
