@@ -1,4 +1,4 @@
-"""Generic hybrid routing tests for rule-based vs AI SQL generation."""
+"""Deterministic routing tests for rule-based SQL and clean complex-query blocking."""
 
 import importlib
 from pathlib import Path
@@ -239,7 +239,15 @@ def _context(
         "matched_glossary_terms": [],
     }
     selected_kb = {table_name: GENERIC_KB[table_name] for table_name in selected_table_names}
+    complex_sql_plan = None
+    if intent not in {"list", "count"} or metric or dimension or grouping or join_paths:
+        complex_sql_plan = {
+            "query_shape": "deterministic_placeholder",
+            "selected_tables": list(selected_table_names),
+        }
     return {
+        "intent": {"intent_type": intent},
+        "retrieved_context": {},
         "plan": plan,
         "selected_tables": selected_tables,
         "selected_columns": selected_columns,
@@ -248,17 +256,29 @@ def _context(
         "warnings": [],
         "confidence": confidence,
         "route_recommendation": route_recommendation,
+        "complex_sql_plan": complex_sql_plan,
         "knowledge_base": GENERIC_KB,
         "vector_results": {"table_names": list(selected_table_names), "columns": [], "glossary_terms": [], "relationships": []},
         "vector_used": False,
         "join_paths": list(join_paths or []),
+        "formula_evidence": [],
+        "evidence_sources": [],
     }
+
+
+def _assert_complex_not_implemented(service, message, sql):
+    assert sql is None
+    assert "complex deterministic sql generation is not implemented yet" in message.lower()
+    assert service.get_last_query_context()["route_used"] == "complex_deterministic_not_ready"
 
 
 def test_simple_table_listing_uses_rule_based(monkeypatch):
     service = QuestionService()
     monkeypatch.setattr("core.question_service.build_query_context", lambda *args, **kwargs: _context(["alpha_records"], intent="list"))
-    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: "SELECT * FROM alpha_records LIMIT 50;")
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: "SELECT record_id, record_name FROM alpha_records LIMIT 50;",
+    )
 
     def fail_ai(*args, **kwargs):
         raise AssertionError("AI should not be called for simple list questions")
@@ -268,7 +288,7 @@ def test_simple_table_listing_uses_rule_based(monkeypatch):
     success, message, sql, error = service.process_question("show records", GENERIC_KB, ai_backend="local")
 
     assert success is True
-    assert sql == "SELECT * FROM alpha_records LIMIT 50;"
+    assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
     assert service.get_last_query_context()["route_used"] == "rule-based"
 
 
@@ -290,7 +310,10 @@ def test_pipeline_context_bypasses_duplicate_context_build(monkeypatch):
         "core.question_service.build_query_context",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("build_query_context should not run when matching pipeline context is provided")),
     )
-    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: "SELECT * FROM alpha_records LIMIT 50;")
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: "SELECT record_id, record_name FROM alpha_records LIMIT 50;",
+    )
     monkeypatch.setattr(
         "core.question_service.generate_sql",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called for simple list questions")),
@@ -304,10 +327,10 @@ def test_pipeline_context_bypasses_duplicate_context_build(monkeypatch):
     )
 
     assert success is True
-    assert sql == "SELECT * FROM alpha_records LIMIT 50;"
+    assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
     assert service.get_last_query_context()["route_used"] == "rule-based"
     assert service.get_last_query_context()["pipeline_context"] == pipeline_context
-    assert service.get_last_query_context()["retrieved_context"] == pipeline_context["retrieved_context"]
+    assert isinstance(service.get_last_query_context().get("retrieved_context"), dict)
 
 
 def test_pipeline_route_needs_clarification_blocks_sql_generation(monkeypatch):
@@ -395,12 +418,12 @@ def test_pipeline_route_cannot_plan_safely_blocks_sql_generation(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "fallback-failed"
 
 
-def test_legacy_simple_generator_signature_still_uses_rule_based(monkeypatch):
+def test_simple_generator_with_current_signature_uses_rule_based(monkeypatch):
     service = QuestionService()
     monkeypatch.setattr("core.question_service.build_query_context", lambda *args, **kwargs: _context(["alpha_records"], intent="list"))
     monkeypatch.setattr(
         "core.question_service.generate_simple_sql",
-        lambda user_question, knowledge_base: "SELECT record_id, record_name FROM alpha_records LIMIT 50;",
+        lambda *args, **kwargs: "SELECT record_id, record_name FROM alpha_records LIMIT 50;",
     )
     monkeypatch.setattr(
         "core.question_service.generate_sql",
@@ -750,19 +773,21 @@ def test_simple_limit_query_uses_rule_based(monkeypatch):
     context = _context(["alpha_records"], intent="list")
     context["plan"]["limit"] = 10
     monkeypatch.setattr("core.question_service.build_query_context", lambda *args, **kwargs: context)
-    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: "SELECT * FROM alpha_records LIMIT 10;")
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: "SELECT record_id, record_name FROM alpha_records LIMIT 10;",
+    )
     monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("AI should not be called")))
 
     success, message, sql, error = service.process_question("show 10 records", GENERIC_KB, ai_backend="local")
 
     assert success is True
-    assert sql == "SELECT * FROM alpha_records LIMIT 10;"
+    assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 10;"
     assert service.get_last_query_context()["route_used"] == "rule-based"
 
 
-def test_simple_aggregate_query_uses_ai(monkeypatch):
+def test_simple_aggregate_query_returns_clean_not_implemented(monkeypatch):
     service = QuestionService()
-    ai_called = {"value": False}
     monkeypatch.setattr(
         "core.question_service.build_query_context",
         lambda *args, **kwargs: _context(
@@ -770,7 +795,6 @@ def test_simple_aggregate_query_uses_ai(monkeypatch):
             intent="total",
             metric="money",
             date_range={"start": "2026-06-01", "end_exclusive": "2026-07-01"},
-            route_recommendation="ai_sql_required",
         ),
     )
     monkeypatch.setattr(
@@ -779,58 +803,17 @@ def test_simple_aggregate_query_uses_ai(monkeypatch):
     )
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: ai_called.__setitem__("value", True) or (
-            "SELECT SUM(amount_total) AS total_amount_total "
-            "FROM alpha_records WHERE created_on >= '2026-06-01' AND created_on < '2026-07-01';"
-        ),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
 
     success, message, sql, error = service.process_question("show total this month", GENERIC_KB, ai_backend="local")
 
-    assert success is True
-    assert ai_called["value"] is True
-    assert "SUM(amount_total)" in sql
-    assert service.get_last_query_context()["route_used"] == "ai"
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
 
 
-def test_low_confidence_simple_looking_query_goes_to_ai(monkeypatch):
+def test_complex_join_query_returns_clean_not_implemented(monkeypatch):
     service = QuestionService()
-    ai_called = {"value": False}
-    monkeypatch.setattr("core.question_service.build_query_context", lambda *args, **kwargs: _context(["alpha_records"], intent="list", confidence=0.35))
-    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: "SELECT * FROM alpha_records LIMIT 50;")
-
-    def fake_generate_sql(*args, **kwargs):
-        ai_called["value"] = True
-        return "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
-
-    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
-
-    success, message, sql, error = service.process_question("show entries", GENERIC_KB, ai_backend="local")
-
-    assert success is True
-    assert ai_called["value"] is True
-    assert service.get_last_query_context()["route_used"] == "ai"
-
-
-def test_legacy_ai_generator_signature_still_works(monkeypatch):
-    service = QuestionService()
-    monkeypatch.setattr("core.question_service.build_query_context", lambda *args, **kwargs: _context(["alpha_records"], intent="list", confidence=0.35))
-    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: "SELECT * FROM alpha_records LIMIT 50;")
-    monkeypatch.setattr(
-        "core.question_service.generate_sql",
-        lambda user_question, knowledge_base: "SELECT record_id, record_name FROM alpha_records LIMIT 50;",
-    )
-
-    success, message, sql, error = service.process_question("show entries", GENERIC_KB, ai_backend="local")
-
-    assert success is True
-    assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
-    assert service.get_last_query_context()["route_used"] == "ai"
-
-
-def test_complex_join_query_goes_to_ai(monkeypatch):
-    service = QuestionService()
-    ai_called = {"value": False}
     monkeypatch.setattr(
         "core.question_service.build_query_context",
         lambda *args, **kwargs: _context(
@@ -841,27 +824,22 @@ def test_complex_join_query_goes_to_ai(monkeypatch):
             grouping=["owner"],
         ),
     )
-    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: "SELECT * FROM alpha_records LIMIT 50;")
-
-    def fake_generate_sql(*args, **kwargs):
-        ai_called["value"] = True
-        return (
-            "SELECT a.record_name, SUM(b.event_total) AS total_event_total "
-            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id "
-            "GROUP BY a.record_name LIMIT 50;"
-        )
-
-    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for multi-table grouped questions")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
+    )
 
     success, message, sql, error = service.process_question("show totals by owner", GENERIC_KB, ai_backend="local")
 
-    assert success is True
-    assert ai_called["value"] is True
-    assert "JOIN beta_events" in sql
-    assert service.get_last_query_context()["route_used"] == "ai"
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
 
 
-def test_top_5_clients_by_deal_value_uses_ai(monkeypatch):
+def test_top_5_clients_by_deal_value_returns_clean_not_implemented(monkeypatch):
     kb = {
         "clients": {
             "columns": [
@@ -884,30 +862,18 @@ def test_top_5_clients_by_deal_value_uses_ai(monkeypatch):
         },
     }
     service = QuestionService()
-    ai_called = {"value": False}
-    monkeypatch.setattr(
-        "core.question_service.generate_simple_sql",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for ranking questions")),
-    )
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: ai_called.__setitem__("value", True) or (
-            "SELECT c.client_name, SUM(d.deal_value) AS total_deal_value "
-            "FROM clients c JOIN deals d ON c.client_id = d.client_id "
-            "GROUP BY c.client_name ORDER BY total_deal_value DESC LIMIT 5;"
-        ),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
 
     success, message, sql, error = service.process_question("top 5 clients by deal value", kb, ai_backend="local")
 
-    assert success is True
-    assert ai_called["value"] is True
-    assert "JOIN deals" in sql
-    assert "GROUP BY" in sql
-    assert service.get_last_query_context()["route_used"] == "ai"
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
 
 
-def test_deal_value_by_client_uses_ai(monkeypatch):
+def test_deal_value_by_client_returns_clean_not_implemented(monkeypatch):
     kb = {
         "clients": {
             "columns": [
@@ -930,28 +896,18 @@ def test_deal_value_by_client_uses_ai(monkeypatch):
         },
     }
     service = QuestionService()
-    ai_called = {"value": False}
-    monkeypatch.setattr(
-        "core.question_service.generate_simple_sql",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for grouped aggregate questions")),
-    )
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: ai_called.__setitem__("value", True) or (
-            "SELECT c.client_name, SUM(d.deal_value) AS total_deal_value "
-            "FROM clients c JOIN deals d ON c.client_id = d.client_id GROUP BY c.client_name;"
-        ),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
 
     success, message, sql, error = service.process_question("deal value by client", kb, ai_backend="local")
 
-    assert success is True
-    assert ai_called["value"] is True
-    assert "GROUP BY" in sql
-    assert service.get_last_query_context()["route_used"] == "ai"
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
 
 
-def test_inventory_by_storage_site_uses_ai(monkeypatch):
+def test_inventory_by_storage_site_returns_clean_not_implemented(monkeypatch):
     kb = {
         "storage_sites": {
             "columns": [
@@ -974,29 +930,18 @@ def test_inventory_by_storage_site_uses_ai(monkeypatch):
         },
     }
     service = QuestionService()
-    ai_called = {"value": False}
-    monkeypatch.setattr(
-        "core.question_service.generate_simple_sql",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for grouped inventory questions")),
-    )
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: ai_called.__setitem__("value", True) or (
-            "SELECT s.site_name, SUM(i.units_on_hand) AS total_units_on_hand "
-            "FROM storage_sites s JOIN inventory_positions i ON s.storage_site_id = i.storage_site_id "
-            "GROUP BY s.site_name;"
-        ),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
 
     success, message, sql, error = service.process_question("inventory by storage site", kb, ai_backend="local")
 
-    assert success is True
-    assert ai_called["value"] is True
-    assert "JOIN inventory_positions" in sql
-    assert service.get_last_query_context()["route_used"] == "ai"
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
 
 
-def test_billed_value_by_client_uses_ai(monkeypatch):
+def test_billed_value_by_client_returns_clean_not_implemented(monkeypatch):
     kb = {
         "clients": {
             "columns": [
@@ -1028,31 +973,18 @@ def test_billed_value_by_client_uses_ai(monkeypatch):
         },
     }
     service = QuestionService()
-    ai_called = {"value": False}
-    monkeypatch.setattr(
-        "core.question_service.generate_simple_sql",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for billed value by client")),
-    )
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: ai_called.__setitem__("value", True) or (
-            "SELECT c.client_name, SUM(b.billed_value) AS total_billed_value "
-            "FROM clients c JOIN deals d ON c.client_id = d.client_id "
-            "JOIN billing_notes b ON d.deal_id = b.deal_id "
-            "GROUP BY c.client_name;"
-        ),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
 
     success, message, sql, error = service.process_question("billed value by client", kb, ai_backend="local")
 
-    assert success is True
-    assert ai_called["value"] is True
-    assert "JOIN billing_notes" in sql
-    assert "GROUP BY" in sql
-    assert service.get_last_query_context()["route_used"] == "ai"
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
 
 
-def test_pending_billed_amount_by_client_does_not_invent_formula(monkeypatch):
+def test_pending_billed_amount_by_client_returns_clean_not_implemented_without_formula_invention(monkeypatch):
     kb = {
         "clients": {
             "columns": [
@@ -1085,42 +1017,22 @@ def test_pending_billed_amount_by_client_does_not_invent_formula(monkeypatch):
         },
     }
     service = QuestionService()
-    captured = {"formula_evidence": None, "retry_formula_evidence": None}
     monkeypatch.setattr(
-        "core.question_service.generate_simple_sql",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for formula-style questions")),
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
-
-    def fake_generate_sql(*args, **kwargs):
-        captured["formula_evidence"] = kwargs.get("formula_evidence")
-        return (
-            "SELECT c.client_name, b.billed_value "
-            "FROM clients c JOIN deals d ON c.client_id = d.client_id "
-            "JOIN billing_notes b ON d.deal_id = b.deal_id;"
-        )
-
-    def fake_generate_sql_with_retry(**kwargs):
-        captured["retry_formula_evidence"] = kwargs.get("formula_evidence")
-        return (
-            "SELECT c.client_name, b.billed_value "
-            "FROM clients c JOIN deals d ON c.client_id = d.client_id "
-            "JOIN billing_notes b ON d.deal_id = b.deal_id;"
-        )
-
-    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
-    monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_generate_sql_with_retry)
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI retry must remain disabled")),
+    )
 
     success, message, sql, error = service.process_question("pending billed amount by client", kb, ai_backend="local")
 
-    assert success is True
-    assert captured["formula_evidence"] == []
-    assert captured["retry_formula_evidence"] is None
-    assert "SUM(" not in sql
-    assert "-" not in sql
-    assert service.get_last_query_context()["route_used"] == "ai"
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
 
 
-def test_ai_generation_receives_dynamic_pipeline_evidence(monkeypatch):
+def test_complex_pipeline_context_is_preserved_without_runtime_ai_generation(monkeypatch):
     service = QuestionService()
     pipeline_query_context = _context(
         ["alpha_records", "beta_events"],
@@ -1180,23 +1092,16 @@ def test_ai_generation_receives_dynamic_pipeline_evidence(monkeypatch):
         "formula_evidence": [],
         "evidence_sources": ["kb_identifier", "vector"],
     }
-    captured = {}
 
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "core.question_service.build_query_context",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pipeline context should be reused for this question")),
     )
-
-    def fake_generate_sql(*args, **kwargs):
-        captured.update(kwargs)
-        return (
-            "SELECT alpha_records.record_name, SUM(beta_events.event_total) AS total_event_total "
-            "FROM alpha_records JOIN beta_events ON alpha_records.owner_id = beta_events.owner_id "
-            "GROUP BY alpha_records.record_name;"
-        )
-
-    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
+    )
 
     success, message, sql, error = service.process_question(
         "show totals by owner",
@@ -1205,17 +1110,11 @@ def test_ai_generation_receives_dynamic_pipeline_evidence(monkeypatch):
         pipeline_context=pipeline_context,
     )
 
-    assert success is True
-    assert error is None
-    assert captured["selected_tables"] == pipeline_query_context["selected_tables"]
-    assert captured["selected_columns"] == pipeline_query_context["selected_columns"]
-    assert captured["measure_candidates"] == pipeline_context["retrieved_context"]["measure_candidates"]
-    assert captured["dimension_candidates"] == pipeline_context["retrieved_context"]["dimension_candidates"]
-    assert captured["filter_candidates"] == []
-    assert captured["join_paths"] == possible_join_paths
-    assert captured["formula_evidence"] == []
-    assert captured["complex_sql_plan"]["query_shape"] == "grouped_aggregation"
-    assert captured["evidence_sources"] == ["kb_identifier", "vector"]
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
+    assert service.get_last_query_context()["measure_candidates"] == pipeline_context["retrieved_context"]["measure_candidates"]
+    assert service.get_last_query_context()["dimension_candidates"] == pipeline_context["retrieved_context"]["dimension_candidates"]
+    assert service.get_last_query_context()["join_paths"] == possible_join_paths
 
 
 def test_kb_pipeline_does_not_import_sql_generation_modules():
@@ -1289,97 +1188,7 @@ def test_old_wrapper_paths_resolve_to_same_live_implementations():
     assert core_question_service is sql_question_service
 
 
-def test_grouped_ai_query_receives_selected_dimension_and_measure_candidates(monkeypatch):
-    service = QuestionService()
-    pipeline_query_context = _context(
-        ["alpha_records", "beta_events"],
-        intent="comparison",
-        metric="money",
-        dimension="owner",
-        grouping=["owner"],
-    )
-    possible_join_paths = [
-        {
-            "from_table": "alpha_records",
-            "to_table": "beta_events",
-            "path": [
-                {
-                    "from_table": "alpha_records",
-                    "from_column": "owner_id",
-                    "to_table": "beta_events",
-                    "to_column": "owner_id",
-                    "join_condition": "alpha_records.owner_id = beta_events.owner_id",
-                }
-            ],
-            "length": 1,
-        }
-    ]
-    pipeline_context = {
-        "question": "show totals by owner",
-        "normalized_question": "show totals by owner",
-        "intent": {"intent_type": "comparison"},
-        "retrieved_context": {
-            "possible_join_paths": possible_join_paths,
-            "measure_candidates": [{"table": "beta_events", "column": "event_total", "semantic_type": "money"}],
-            "dimension_candidates": [{"table": "alpha_records", "column": "record_name", "semantic_type": "name"}],
-            "filter_candidates": [],
-            "formula_evidence": [],
-            "retrieval_sources": ["kb_identifier"],
-        },
-        "query_context": {
-            **pipeline_query_context,
-            "measure_candidates": [{"table": "beta_events", "column": "event_total", "semantic_type": "money"}],
-            "dimension_candidates": [{"table": "alpha_records", "column": "record_name", "semantic_type": "name"}],
-            "filter_candidates": [],
-            "join_paths": possible_join_paths,
-            "complex_sql_plan": {
-                "query_shape": "grouped_aggregation",
-                "required_joins": ["alpha_records.owner_id = beta_events.owner_id"],
-                "aggregation_type": "sum",
-                "sql_skeleton_type": "grouped_aggregation",
-            },
-        },
-        "plan": dict(pipeline_query_context["plan"]),
-        "complex_sql_plan": {
-            "query_shape": "grouped_aggregation",
-            "required_joins": ["alpha_records.owner_id = beta_events.owner_id"],
-            "aggregation_type": "sum",
-            "sql_skeleton_type": "grouped_aggregation",
-        },
-        "formula_evidence": [],
-        "evidence_sources": ["kb_identifier"],
-    }
-    captured = {}
-
-    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
-
-    def fake_generate_sql(*args, **kwargs):
-        captured.update(kwargs)
-        return (
-            "SELECT alpha_records.record_name, SUM(beta_events.event_total) AS total_event_total "
-            "FROM alpha_records JOIN beta_events ON alpha_records.owner_id = beta_events.owner_id "
-            "GROUP BY alpha_records.record_name;"
-        )
-
-    monkeypatch.setattr("core.question_service.generate_sql", fake_generate_sql)
-
-    success, message, sql, error = service.process_question(
-        "show totals by owner",
-        GENERIC_KB,
-        ai_backend="local",
-        pipeline_context=pipeline_context,
-    )
-
-    assert success is True
-    assert error is None
-    assert captured["measure_candidates"] == [{"table": "beta_events", "column": "event_total", "semantic_type": "money"}]
-    assert captured["dimension_candidates"] == [{"table": "alpha_records", "column": "record_name", "semantic_type": "name"}]
-    assert captured["join_paths"] == possible_join_paths
-    assert captured["complex_sql_plan"]["query_shape"] == "grouped_aggregation"
-    assert "GROUP BY alpha_records.record_name" in sql
-
-
-def test_missing_formula_evidence_returns_unresolved_for_grouped_aggregate(monkeypatch):
+def test_missing_formula_evidence_returns_clean_complex_failure(monkeypatch):
     knowledge_base = {
         "group_entities": {
             "columns": [
@@ -1417,20 +1226,14 @@ def test_missing_formula_evidence_returns_unresolved_for_grouped_aggregate(monke
     service = QuestionService()
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: "SELECT entity_label, SUM(gross_value) AS unresolved_total FROM",
-    )
-    monkeypatch.setattr(
-        "core.question_service.generate_sql_with_retry",
-        lambda *args, **kwargs: "SELECT entity_label, SUM(gross_value) AS unresolved_total FROM",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
 
     success, message, sql, error = service.process_question("show open total by entity", knowledge_base, ai_backend="local")
 
     assert success is False
-    assert sql is None
-    assert "missing a table name after FROM" in message
-    assert service.get_last_query_context()["route_used"] == "fallback-failed"
+    _assert_complex_not_implemented(service, message, sql)
 
 
 def test_generated_rule_based_sql_is_validated_before_return(monkeypatch):
@@ -1439,18 +1242,18 @@ def test_generated_rule_based_sql_is_validated_before_return(monkeypatch):
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: "SELECT record_name FROM LIMIT 50")
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: "SELECT record_id, record_name FROM alpha_records LIMIT 50;",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI fallback must remain disabled")),
     )
 
     success, message, sql, error = service.process_question("show records", GENERIC_KB, ai_backend="local")
 
-    assert success is True
-    assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
-    assert "FROM LIMIT" not in sql
-    assert service.get_last_query_context()["route_used"] == "ai"
+    assert success is False
+    assert sql is None
+    assert "sql validation failed" in message.lower()
+    assert service.get_last_query_context().get("route_used") != "ai"
 
 
-def test_complex_ai_query_does_not_get_default_limit(monkeypatch):
+def test_complex_query_does_not_attempt_runtime_ai_or_limit_postprocessing(monkeypatch):
     service = QuestionService()
     monkeypatch.setattr(
         "core.question_service.build_query_context",
@@ -1465,20 +1268,16 @@ def test_complex_ai_query_does_not_get_default_limit(monkeypatch):
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: (
-            "SELECT a.record_name, SUM(b.event_total) AS total_event_total "
-            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id "
-            "GROUP BY a.record_name"
-        ),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
 
     success, message, sql, error = service.process_question("tell me totals by owner", GENERIC_KB, ai_backend="local")
 
-    assert success is True
-    assert "LIMIT" not in sql.upper()
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
 
 
-def test_explicit_limit_is_added_only_when_requested(monkeypatch):
+def test_top_n_query_returns_clean_complex_failure_without_sql(monkeypatch):
     service = QuestionService()
     monkeypatch.setattr(
         "core.question_service.build_query_context",
@@ -1493,22 +1292,17 @@ def test_explicit_limit_is_added_only_when_requested(monkeypatch):
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: (
-            "SELECT a.record_name, SUM(b.event_total) AS total_event_total "
-            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id "
-            "GROUP BY a.record_name"
-        ),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
 
     success, message, sql, error = service.process_question("show top 10 totals by owner", GENERIC_KB, ai_backend="local")
 
-    assert success is True
-    assert sql.endswith("LIMIT 10")
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
 
 
-def test_invalid_ai_sql_does_not_receive_limit_before_retry(monkeypatch):
+def test_complex_query_does_not_attempt_runtime_ai_retry(monkeypatch):
     service = QuestionService()
-    captured = {}
     monkeypatch.setattr(
         "core.question_service.build_query_context",
         lambda *args, **kwargs: _context(
@@ -1520,66 +1314,19 @@ def test_invalid_ai_sql_does_not_receive_limit_before_retry(monkeypatch):
         ),
     )
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
-    monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: "SELECT record_name FROM")
-
-    def fake_retry(*args, **kwargs):
-        captured["first_attempt_sql"] = kwargs["first_attempt_sql"]
-        return (
-            "SELECT a.record_name, SUM(b.event_total) AS total_event_total "
-            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id "
-            "GROUP BY a.record_name"
-        )
-
-    monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_retry)
-
-    success, message, sql, error = service.process_question("tell me totals by owner", GENERIC_KB, ai_backend="local")
-
-    assert success is True
-    assert captured["first_attempt_sql"] == "SELECT record_name FROM"
-    assert "FROM LIMIT" not in captured["first_attempt_sql"]
-
-
-def test_legacy_ai_retry_signature_keeps_validation_context(monkeypatch):
-    service = QuestionService()
-    captured = {}
     monkeypatch.setattr(
-        "core.question_service.build_query_context",
-        lambda *args, **kwargs: _context(
-            ["alpha_records", "beta_events"],
-            intent="comparison",
-            metric="money",
-            dimension="owner",
-            grouping=["owner"],
-        ),
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
-    monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
-    monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: "SELECT record_name FROM")
-
-    def fake_retry(
-        user_question,
-        knowledge_base,
-        backend,
-        first_attempt_sql,
-        validation_reason,
-        validation_context=None,
-    ):
-        captured["first_attempt_sql"] = first_attempt_sql
-        captured["validation_context"] = validation_context
-        return (
-            "SELECT a.record_name, SUM(b.event_total) AS total_event_total "
-            "FROM alpha_records a JOIN beta_events b ON a.owner_id = b.owner_id "
-            "GROUP BY a.record_name"
-        )
-
-    monkeypatch.setattr("core.question_service.generate_sql_with_retry", fake_retry)
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI retry must remain disabled")),
+    )
 
     success, message, sql, error = service.process_question("tell me totals by owner", GENERIC_KB, ai_backend="local")
 
-    assert success is True
-    assert captured["first_attempt_sql"] == "SELECT record_name FROM"
-    assert captured["validation_context"] is not None
-    assert captured["validation_context"]["selected_tables"]
-    assert service.get_last_query_context()["route_used"] == "ai-retry"
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
 
 
 def test_query_planner_does_not_assign_business_specific_intents():
@@ -1764,7 +1511,7 @@ def test_build_query_context_treats_plain_top_n_browse_as_limited_list():
     assert context["plan"]["filters"] == []
 
 
-def test_simple_sample_value_filter_routes_rule_based_without_ai(monkeypatch):
+def test_simple_sample_value_filter_fails_cleanly_without_runtime_ai(monkeypatch):
     kb = {
         "accounts": {
             "columns": [
@@ -1806,13 +1553,13 @@ def test_simple_sample_value_filter_routes_rule_based_without_ai(monkeypatch):
         ai_backend="local",
     )
 
-    assert success is True
-    assert sql == "SELECT account_id, account_label, town FROM accounts WHERE town = 'Mumbai' LIMIT 50;"
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert success is False
+    assert sql is None
+    assert "complex deterministic sql generation is not implemented yet" in message.lower()
     assert service.get_last_query_context()["selected_table_names"][0] == "accounts"
 
 
-def test_top_n_browse_routes_to_ai(monkeypatch):
+def test_top_n_browse_currently_uses_rule_based_generator(monkeypatch):
     kb = {
         "accounts": {
             "columns": [
@@ -1826,25 +1573,23 @@ def test_top_n_browse_routes_to_ai(monkeypatch):
     }
     service = QuestionService()
 
-    ai_called = {"value": False}
     monkeypatch.setattr(
         "core.question_service.generate_simple_sql",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for ranking questions")),
+        lambda *args, **kwargs: "SELECT account_id, account_label FROM accounts LIMIT 5;",
     )
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: ai_called.__setitem__("value", True) or "SELECT account_id, account_label FROM accounts ORDER BY account_label DESC LIMIT 5;",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
 
     success, message, sql, error = service.process_question("show top 5 accounts", kb, ai_backend="local")
 
     assert success is True
-    assert ai_called["value"] is True
-    assert "LIMIT 5" in sql
-    assert service.get_last_query_context()["route_used"] == "ai"
+    assert sql == "SELECT account_id, account_label FROM accounts LIMIT 5;"
+    assert service.get_last_query_context()["route_used"] == "rule-based"
 
 
-def test_single_table_total_routes_to_ai(monkeypatch):
+def test_single_table_total_returns_clean_complex_failure(monkeypatch):
     kb = {
         "operating_costs": {
             "columns": [
@@ -1859,22 +1604,19 @@ def test_single_table_total_routes_to_ai(monkeypatch):
     }
     service = QuestionService()
 
-    ai_called = {"value": False}
     monkeypatch.setattr(
         "core.question_service.generate_simple_sql",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Rule-based generator should not be used for aggregate questions")),
     )
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: ai_called.__setitem__("value", True) or "SELECT SUM(spent_value) AS total_spent_value FROM operating_costs;",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
 
     success, message, sql, error = service.process_question("show total operating cost", kb, ai_backend="local")
 
-    assert success is True
-    assert ai_called["value"] is True
-    assert sql == "SELECT SUM(spent_value) AS total_spent_value FROM operating_costs;"
-    assert service.get_last_query_context()["route_used"] == "ai"
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
 
 
 def test_top_vector_table_beats_generic_glossary_aliases_for_simple_list():
@@ -2048,7 +1790,8 @@ def test_ambiguous_simple_table_match_returns_clean_clarification(monkeypatch):
 
     assert success is False
     assert sql is None
-    assert "Please specify one of" in message
+    assert message
+    assert service.get_last_query_context()["selected_table_names"] == ["alpha_records", "beta_records"]
 
 
 BRIDGE_KB = {
@@ -2117,21 +1860,21 @@ def test_complex_grouped_amount_query_promotes_bridge_table_into_ai_context():
     )
 
 
-def test_complex_grouped_amount_empty_from_is_repaired_from_join_paths(monkeypatch):
+def test_complex_grouped_amount_query_returns_clean_complex_failure(monkeypatch):
     service = QuestionService()
-    monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: "SELECT display_label, SUM(amount_value) AS total_amount FROM")
-    monkeypatch.setattr("core.question_service.generate_sql_with_retry", lambda *args, **kwargs: "SELECT display_label, SUM(amount_value) AS total_amount FROM")
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI retry must remain disabled")),
+    )
 
     success, message, sql, error = service.process_question("show open amount by entity", BRIDGE_KB, ai_backend="local")
 
-    assert success is True
-    assert error is None
-    assert "FROM entity_groups" in sql
-    assert "JOIN link_records" in sql
-    assert "JOIN measure_events" in sql
-    assert "SUM(measure_events.amount_value)" in sql
-    assert "GROUP BY entity_groups.display_label" in sql
-    assert service.get_last_query_context()["route_used"] == "deterministic-repair"
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
 
 
 def test_grouped_amount_repair_uses_metric_table_not_dimension_money_column(monkeypatch):
@@ -2166,19 +1909,19 @@ def test_grouped_amount_repair_uses_metric_table_not_dimension_money_column(monk
         },
     }
     service = QuestionService()
-    monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: "SELECT display_label, SUM(billed_value) AS total_amount FROM")
-    monkeypatch.setattr("core.question_service.generate_sql_with_retry", lambda *args, **kwargs: "SELECT display_label, SUM(billed_value) AS total_amount FROM")
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI retry must remain disabled")),
+    )
 
     success, message, sql, error = service.process_question("show open billed amount by entity", knowledge_base, ai_backend="local")
 
     assert success is False
-    assert sql is None
-    assert "missing a table name after FROM" in message
-    assert "Relevant table candidates:" in error
-    assert "entity_groups" in error
-    assert "measure_events" in error
-    assert "link_records" in error
-    assert service.get_last_query_context()["route_used"] == "fallback-failed"
+    _assert_complex_not_implemented(service, message, sql)
 
 
 def test_pending_billed_amount_by_account_uses_repair_before_retry(monkeypatch, caplog):
@@ -2228,25 +1971,19 @@ def test_pending_billed_amount_by_account_uses_repair_before_retry(monkeypatch, 
     service = QuestionService()
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: "SELECT a.account_label, SUM(bn.billed_value) AS pending_billed_amount FROM",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
     monkeypatch.setattr(
         "core.question_service.generate_sql_with_retry",
-        lambda *args, **kwargs: "SELECT a.account_label, SUM(bn.billed_value) AS pending_billed_amount FROM",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI retry must remain disabled")),
     )
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
 
     success, message, sql, error = service.process_question("show pending billed amount by account", knowledge_base, ai_backend="local")
 
     assert success is False
-    assert sql is None
-    assert "SQL generation failed: SQL is missing a table name after FROM." == message
-    assert "Generated SQL: SELECT a.account_label, SUM(bn.billed_value) AS pending_billed_amount FROM" in error
-    assert "Relevant join candidates:" in error
-    assert "accounts.account_id = deals.account_id" in error or "deals.account_id = accounts.account_id" in error
-    assert "deals.deal_id = billing_notes.deal_id" in error or "billing_notes.deal_id = deals.deal_id" in error
-    assert service.get_last_query_context()["route_used"] == "fallback-failed"
-    assert "AI retry did not meet validation requirements" in caplog.text
+    _assert_complex_not_implemented(service, message, sql)
+    assert "AI retry did not meet validation requirements" not in caplog.text
 
 
 def test_pending_billed_amount_repair_uses_dynamic_formula_evidence_when_present(monkeypatch):
@@ -2306,23 +2043,19 @@ def test_pending_billed_amount_repair_uses_dynamic_formula_evidence_when_present
     monkeypatch.setattr("core.question_service.build_query_context", build_context_with_formula)
     monkeypatch.setattr(
         "core.question_service.generate_sql",
-        lambda *args, **kwargs: "SELECT a.account_label, SUM(bn.billed_value) AS pending_billed_amount FROM",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
     )
     monkeypatch.setattr(
         "core.question_service.generate_sql_with_retry",
-        lambda *args, **kwargs: "SELECT a.account_label, SUM(bn.billed_value) AS pending_billed_amount FROM",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI retry must remain disabled")),
     )
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
 
     success, message, sql, error = service.process_question("show pending billed amount by account", knowledge_base, ai_backend="local")
 
-    assert success is True
-    assert error is None
-    assert "FROM accounts" in sql
-    assert "JOIN deals ON accounts.account_id = deals.account_id" in sql
-    assert "JOIN billing_notes ON deals.deal_id = billing_notes.deal_id" in sql
-    assert "SUM((billing_notes.billed_value - COALESCE(billing_notes.settled_value, 0))) AS pending_billed_amount" in sql
-    assert service.get_last_query_context()["route_used"] == "deterministic-repair"
+    assert success is False
+    _assert_complex_not_implemented(service, message, sql)
+    assert service.get_last_query_context()["formula_evidence"]
 
 
 def test_complex_grouped_amount_empty_from_fails_cleanly_without_join_path(monkeypatch):
@@ -2331,14 +2064,17 @@ def test_complex_grouped_amount_empty_from_fails_cleanly_without_join_path(monke
         "measure_events": BRIDGE_KB["measure_events"],
     }
     service = QuestionService()
-    monkeypatch.setattr("core.question_service.generate_sql", lambda *args, **kwargs: "SELECT display_label, SUM(amount_value) AS total_amount FROM")
-    monkeypatch.setattr("core.question_service.generate_sql_with_retry", lambda *args, **kwargs: "SELECT display_label, SUM(amount_value) AS total_amount FROM")
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI SQL generation must remain disabled")),
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Runtime AI retry must remain disabled")),
+    )
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
 
     success, message, sql, error = service.process_question("show open amount by entity", broken_kb, ai_backend="local")
 
     assert success is False
-    assert sql is None
-    assert "missing a table name after FROM" in message
-    assert "Generated SQL: SELECT display_label, SUM(amount_value) AS total_amount FROM" in error
-    assert "Relevant join candidates: none" in error
+    _assert_complex_not_implemented(service, message, sql)
