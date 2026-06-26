@@ -1,18 +1,16 @@
 """
-db/connection.py
-================
-Provides two entry points for obtaining a validated SQLAlchemy engine:
+kb_pipeline/connection.py
+=========================
+Connection helpers for the active SQLSense runtime.
 
-* ``get_engine()``       — reads credentials from the ``.env`` file (original
-                           behaviour, used as fallback/default).
-* ``connect_engine()``   — builds an engine from caller-supplied parameters,
-                           supporting MySQL now and PostgreSQL/SQLite as stubs
-                           for future expansion.
+This module is intentionally MySQL-only in the current checkout. It provides
+two entry points for obtaining a validated SQLAlchemy engine:
 
-Both functions perform a ``SELECT 1`` connectivity test before returning so
-callers are guaranteed a live connection.
+* ``get_engine()`` reads credentials from environment variables.
+* ``connect_engine()`` builds an engine from caller-supplied parameters.
 
-Requirements covered: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7
+Both functions execute ``SELECT 1`` before returning so callers only receive a
+live connection.
 """
 
 import os
@@ -22,14 +20,10 @@ from dotenv import load_dotenv
 import sqlalchemy
 from sqlalchemy import text
 
-# Load .env once at module import time so all os.getenv() calls in this
-# module (and the rest of the process) see the values from the file.
+
 load_dotenv()
 
-# The four database variables that are unconditionally required by get_engine().
 _REQUIRED_DB_VARS = ("DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME")
-
-# Supported database types for connect_engine().
 SUPPORTED_DB_TYPES = ("mysql",)
 
 
@@ -57,47 +51,21 @@ def _mysql_connection_url(
 
 def get_engine() -> sqlalchemy.engine.Engine:
     """
-    Build and return a validated SQLAlchemy MySQL engine using ``.env`` values.
+    Build and return a validated SQLAlchemy MySQL engine using environment values.
 
-    Steps performed
-    ---------------
-    1. Read ``DB_HOST``, ``DB_USER``, ``DB_PASSWORD``, and ``DB_NAME`` from the
-       environment (populated from ``.env`` by ``python-dotenv``).
-    2. Raise ``ValueError`` for any variable that is missing or blank/whitespace-
-       only, naming the offending variable in the message.
-    3. Read ``LLM_BACKEND``; if its value is ``"openai"``, also validate that
-       ``OPENAI_API_KEY`` is present and non-blank.
-    4. Construct a ``mysql+pymysql://`` URL, create the engine, and run
-       ``SELECT 1`` to verify live connectivity.
-
-    Returns
-    -------
-    sqlalchemy.engine.Engine
-
-    Raises
-    ------
-    ValueError
-        If any required environment variable is missing/blank, or if
-        ``LLM_BACKEND=openai`` and ``OPENAI_API_KEY`` is absent/blank.
-    sqlalchemy.exc.SQLAlchemyError
-        If the database connection cannot be established.
+    Raises ``ValueError`` when required DB variables are missing or blank.
+    Raises ``sqlalchemy.exc.SQLAlchemyError`` when connectivity fails.
     """
-    # ── Validate required DB variables ──────────────────────────────────────
     for var in _REQUIRED_DB_VARS:
         value = os.getenv(var, "")
         if not value or not value.strip():
             raise ValueError(f"Missing required environment variable: {var}")
 
-    db_host = os.getenv("DB_HOST").strip()
-    db_user = os.getenv("DB_USER").strip()
-    db_password = os.getenv("DB_PASSWORD").strip()
-    db_name = os.getenv("DB_NAME").strip()
-
     connection_url = _mysql_connection_url(
-        host=db_host,
-        username=db_user,
-        password=db_password,
-        database=db_name,
+        host=os.getenv("DB_HOST", "").strip(),
+        username=os.getenv("DB_USER", "").strip(),
+        password=os.getenv("DB_PASSWORD", "").strip(),
+        database=os.getenv("DB_NAME", "").strip(),
     )
 
     engine = sqlalchemy.create_engine(connection_url)
@@ -121,20 +89,16 @@ def list_accessible_databases(
 
     engine = sqlalchemy.create_engine(
         _mysql_connection_url(
-            host=host,
+            host=str(host).strip(),
             port=port,
-            username=username,
+            username=str(username).strip(),
             password=password,
         )
     )
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("SHOW DATABASES"))
-            return [
-                str(row[0])
-                for row in rows
-                if row and row[0] is not None
-            ]
+            return [str(row[0]) for row in rows if row and row[0] is not None]
     finally:
         engine.dispose()
 
@@ -149,41 +113,14 @@ def connect_engine(
     sqlite_path: str = "",
 ) -> sqlalchemy.engine.Engine:
     """
-    Build and return a validated SQLAlchemy engine from caller-supplied
-    connection parameters.  Passwords are never written to disk.
+    Build and return a validated SQLAlchemy MySQL engine from caller-supplied
+    connection parameters.
 
-    Parameters
-    ----------
-    db_type : str
-        One of ``"mysql"``, ``"postgresql"``, or ``"sqlite"``.
-    host : str
-        Database server hostname or IP (not used for SQLite).
-    port : int | None
-        Server port; uses driver default when ``None``.
-    username : str
-        Database username (not used for SQLite).
-    password : str
-        Database password (not used for SQLite).  Accepted from the caller and
-        used only in-memory to build the connection URL — never persisted.
-    database : str
-        Database / schema name (not used for SQLite).
-    sqlite_path : str
-        File-system path to the SQLite database file (SQLite only).
-
-    Returns
-    -------
-    sqlalchemy.engine.Engine
-        A connected, validated engine.
-
-    Raises
-    ------
-    ValueError
-        For unsupported ``db_type``, missing required fields, or
-        unimplemented backends.
-    sqlalchemy.exc.SQLAlchemyError
-        If the database connection cannot be established.
+    ``sqlite_path`` is kept only for backward-compatible call signatures and is
+    ignored in the current MySQL-only runtime.
     """
-    db_type = db_type.strip().lower()
+    db_type = str(db_type or "").strip().lower()
+    del sqlite_path
 
     if db_type not in SUPPORTED_DB_TYPES:
         raise ValueError(
@@ -191,32 +128,16 @@ def connect_engine(
             f"Supported types: {', '.join(SUPPORTED_DB_TYPES)}"
         )
 
-    if db_type == "mysql":
-        # ── MySQL via PyMySQL ────────────────────────────────────────────────
-        for field, value in [("host", host), ("username", username), ("database", database)]:
-            if not value or not str(value).strip():
-                raise ValueError(f"'{field}' is required for MySQL connections.")
+    for field, value in (("host", host), ("username", username), ("database", database)):
+        if not value or not str(value).strip():
+            raise ValueError(f"'{field}' is required for MySQL connections.")
 
-        url = _mysql_connection_url(
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            database=database,
-        )
-        engine = sqlalchemy.create_engine(url)
-        return _test_and_return(engine)
-
-    if db_type == "postgresql":
-        # ── PostgreSQL — placeholder for future implementation ───────────────
-        raise ValueError(
-            "PostgreSQL support is not yet implemented. "
-            "Install 'psycopg2' and add the connection logic to db/connection.py."
-        )
-
-    if db_type == "sqlite":
-        # ── SQLite — placeholder for future implementation ───────────────────
-        raise ValueError(
-            "SQLite support is not yet implemented. "
-            "Add the SQLite connection logic to db/connection.py."
-        )
+    url = _mysql_connection_url(
+        host=str(host).strip(),
+        port=port,
+        username=str(username).strip(),
+        password=password,
+        database=str(database).strip(),
+    )
+    engine = sqlalchemy.create_engine(url)
+    return _test_and_return(engine)
