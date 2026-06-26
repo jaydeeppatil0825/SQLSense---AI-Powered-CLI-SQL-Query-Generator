@@ -136,6 +136,11 @@ def _explicit_metric_candidate_count(
     return explicit_count
 
 
+def _question_requests_multiple_metrics(question: str) -> bool:
+    normalized_question = _normalize(question)
+    return bool(re.search(r"\b(and|,)\b", normalized_question))
+
+
 def classify_query_shape(
     *,
     question: str,
@@ -182,7 +187,7 @@ def classify_query_shape(
         return "formula_query"
     if has_filters:
         return "filtered_query"
-    if explicit_metric_count > 1:
+    if explicit_metric_count > 1 and _question_requests_multiple_metrics(question):
         return "multi_metric_aggregate"
     if is_ranking:
         return "ranking_query"
@@ -1787,6 +1792,10 @@ def _build_query_context_from_retrieved_context(
         for entry in selected_tables
         for column_entry in entry.get("selected_columns", [])
     ]
+    effective_measure_candidates = list(measure_candidates or []) or _fallback_metric_candidates_from_selected_columns(
+        selected_columns,
+        question,
+    )
     filters = _structured_filter_entries(filter_candidates, requested_filters)
     confidence = float(retrieved_context.get("confidence") or 0.0)
     if not selected_table_names:
@@ -1814,7 +1823,7 @@ def _build_query_context_from_retrieved_context(
         "requested_metrics": requested_metrics,
         "requested_dimensions": requested_dimensions,
         "requested_filters": requested_filters,
-        "unresolved_metrics": requested_metrics if requested_metrics and not measure_candidates else [],
+        "unresolved_metrics": requested_metrics if requested_metrics and not effective_measure_candidates else [],
         "evidence_sources": list(retrieved_context.get("retrieval_sources") or []),
     }
 
@@ -1826,14 +1835,14 @@ def _build_query_context_from_retrieved_context(
     warnings = []
     if confidence < 0.5:
         warnings.append("Retrieved context is weak; planner confidence is low.")
-    if requested_metrics and not measure_candidates:
+    if requested_metrics and not effective_measure_candidates:
         warnings.append("Requested metric remains unresolved in dynamic context.")
 
     legacy_query_shape = _derive_complex_query_shape(
         plan,
         intent,
         selected_tables,
-        measure_candidates,
+        effective_measure_candidates,
         dimension_candidates,
         filters,
         join_paths,
@@ -1848,7 +1857,7 @@ def _build_query_context_from_retrieved_context(
         requested_metrics,
         requested_dimensions,
         requested_filters,
-        measure_candidates,
+        effective_measure_candidates,
         dimension_candidates,
         filters,
         retrieved_context.get("formula_evidence") or [],
@@ -1868,7 +1877,7 @@ def _build_query_context_from_retrieved_context(
         plan,
         selected_tables,
         selected_columns,
-        measure_candidates,
+        effective_measure_candidates,
         dimension_candidates,
         filters,
         join_paths,
@@ -1907,7 +1916,7 @@ def _build_query_context_from_retrieved_context(
         join_paths=join_paths,
         fk_relationships=_build_fk_relationship_graph(enriched_kb),
         matched_relationships=matched_relationships,
-        measure_candidates=measure_candidates,
+        measure_candidates=effective_measure_candidates,
         dimension_candidates=dimension_candidates,
         filter_candidates=filter_candidates,
         formula_evidence=list(retrieved_context.get("formula_evidence") or []),

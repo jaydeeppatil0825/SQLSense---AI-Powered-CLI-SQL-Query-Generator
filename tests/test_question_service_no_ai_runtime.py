@@ -5,6 +5,7 @@ Test to protect Phase 2 changes - ensures QuestionService does not import or cal
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -207,9 +208,142 @@ def test_single_table_aggregate_metric_ambiguity_returns_cannot_plan_safely(monk
 
     assert success is False
     assert sql is None
-    assert "cannot plan this query safely" in message.lower()
+    assert "cannot choose metric safely" in message.lower()
+    assert "amount_total" in message
+    assert "tax_total" in message
     assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
     assert service.get_last_query_context()["route_reason"] == "metric_ambiguous"
+
+
+def test_pipeline_single_table_aggregate_dispatch_uses_deterministic_generator(monkeypatch):
+    service = QuestionService()
+    pipeline_context = {
+        "normalized_question": "show total amount from bills",
+        "route_recommendation": "deterministic_sql_required",
+        "query_context": {
+            "route_recommendation": "deterministic_sql_required",
+            "query_shape": "single_table_aggregate",
+            "can_plan": True,
+            "missing_evidence": [],
+            "plan": {
+                "question": "show total amount from bills",
+                "intent": "total",
+            },
+            "selected_tables": [
+                {
+                    "table": "bills",
+                    "confidence": 0.9,
+                    "selected_columns": [
+                        {"column": "amount_total", "confidence": 0.8, "semantic_type": "numeric_candidate"}
+                    ],
+                }
+            ],
+            "selected_table_names": ["bills"],
+            "selected_columns": [
+                {"table": "bills", "column": "amount_total", "confidence": 0.8, "semantic_type": "numeric_candidate"}
+            ],
+            "metric_candidates": [
+                {"table": "bills", "column": "amount_total", "score": 0.92, "reason": "metric candidate"}
+            ],
+            "join_paths": [],
+            "complex_sql_plan": {
+                "query_shape": "single_table_aggregate",
+            },
+        },
+        "plan": {
+            "question": "show total amount from bills",
+            "intent": "total",
+        },
+        "retrieved_context": {},
+        "formula_evidence": [],
+        "evidence_sources": [],
+    }
+
+    monkeypatch.setattr(
+        "sql_pipeline.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Simple generator should not run for single-table aggregates")),
+    )
+    monkeypatch.setattr(
+        "sql_pipeline.question_service.generate_single_table_aggregate_sql",
+        lambda *args, **kwargs: SimpleNamespace(
+            status="generated",
+            sql="SELECT SUM(amount_total) AS sum_amount_total FROM bills;",
+            reason="single-table aggregate generated deterministically",
+        ),
+    )
+
+    success, message, sql, error = service.process_question(
+        "show total amount from bills",
+        {
+            "bills": {
+                "columns": [
+                    {"name": "bill_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                    {"name": "amount_total", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+                ],
+                "primary_keys": ["bill_id"],
+                "foreign_keys": [],
+                "relationships": [],
+            }
+        },
+        ai_backend="local",
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is True
+    assert sql == "SELECT SUM(amount_total) AS sum_amount_total FROM bills;"
+    assert service.get_last_query_context()["route_used"] == "deterministic-aggregate"
+
+
+def test_pipeline_blocked_unsafe_route_blocks_sql_generation(monkeypatch):
+    service = QuestionService()
+    pipeline_context = {
+        "normalized_question": "delete all bills",
+        "route_recommendation": "blocked_unsafe",
+        "query_context": {
+            "route_recommendation": "blocked_unsafe",
+            "query_shape": "blocked_unsafe",
+            "can_plan": False,
+            "missing_evidence": [],
+            "plan": {"question": "delete all bills", "intent": "list"},
+            "selected_tables": [{"table": "bills", "confidence": 0.8}],
+            "selected_table_names": ["bills"],
+            "selected_columns": [],
+            "join_paths": [],
+            "complex_sql_plan": {},
+        },
+        "plan": {"question": "delete all bills", "intent": "list"},
+        "retrieved_context": {},
+        "formula_evidence": [],
+        "evidence_sources": [],
+    }
+
+    monkeypatch.setattr(
+        "sql_pipeline.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Simple generator must not run for blocked unsafe routes")),
+    )
+    monkeypatch.setattr(
+        "sql_pipeline.question_service.generate_single_table_aggregate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Aggregate generator must not run for blocked unsafe routes")),
+    )
+
+    success, message, sql, error = service.process_question(
+        "delete all bills",
+        {
+            "bills": {
+                "columns": [{"name": "bill_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"}],
+                "primary_keys": ["bill_id"],
+                "foreign_keys": [],
+                "relationships": [],
+            }
+        },
+        ai_backend="local",
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is False
+    assert sql is None
+    assert "unsafe request blocked" in message.lower()
+    assert service.get_last_query_context()["route_used"] == "blocked_unsafe"
 
 
 def test_runtime_ai_sql_helpers_are_blocked():
@@ -237,3 +371,60 @@ def test_runtime_insight_generation_is_disabled():
     assert "disabled" in message.lower()
     assert service.get_last_insights() is None
     assert service.get_last_insights_skipped() is True
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_sql"),
+    [
+        ("show sum billed value from bills", "SELECT SUM(billed_value) AS sum_billed_value FROM bills;"),
+        ("show total billed value from bills", "SELECT SUM(billed_value) AS sum_billed_value FROM bills;"),
+        ("average billed value from bills", "SELECT AVG(billed_value) AS avg_billed_value FROM bills;"),
+        ("highest paid value from bills", "SELECT MAX(paid_value) AS max_paid_value FROM bills;"),
+        ("lowest billed value from bills", "SELECT MIN(billed_value) AS min_billed_value FROM bills;"),
+    ],
+)
+def test_clear_metric_single_table_aggregates_dispatch_deterministically(question, expected_sql):
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+                {"name": "paid_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+    service = QuestionService()
+
+    success, message, sql, error = service.process_question(question, knowledge_base, ai_backend="local")
+
+    assert success is True
+    assert sql == expected_sql
+    assert service.get_last_query_context()["route_used"] == "deterministic-aggregate"
+
+
+def test_sum_amount_from_bills_stays_ambiguous_without_sql():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+                {"name": "paid_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+    service = QuestionService()
+
+    success, message, sql, error = service.process_question("show sum amount from bills", knowledge_base, ai_backend="local")
+
+    assert success is False
+    assert sql is None
+    assert "cannot choose metric safely" in message.lower()
+    assert "billed_value" in message
+    assert "paid_value" in message
+    assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"

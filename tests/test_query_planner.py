@@ -217,6 +217,124 @@ def test_qp6_show_sum_amount_from_bills_routes_to_deterministic_sql():
     assert context["route_recommendation"] == "deterministic_sql_required"
 
 
+def test_qp6_metric_fallback_from_selected_columns_keeps_aggregate_route_safe():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {
+                    "name": "amount_total",
+                    "type": "DECIMAL(12,2)",
+                    "semantic_type": "numeric_candidate",
+                    "planner_roles": {
+                        "measure_candidate": True,
+                        "dimension_candidate": False,
+                        "filter_candidate": False,
+                        "join_candidate": False,
+                        "date_candidate": False,
+                        "sort_candidate": True,
+                    },
+                },
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    intent = {
+        "user_goal": "show sum amount from bills",
+        "intent_type": "aggregate",
+        "business_operation": "summarize",
+        "requested_metrics": ["amount"],
+        "requested_dimensions": [],
+        "requested_filters": [],
+        "requested_sort": {},
+        "aggregate_function": "sum",
+        "source_scope": ["bills"],
+        "limit": None,
+        "needs_grouping": False,
+        "needs_aggregation": True,
+        "needs_join": False,
+        "raw_business_terms": ["amount", "bills"],
+        "confidence": 0.72,
+        "source": "fallback",
+    }
+    retrieved_context = {
+        "query_terms": ["amount", "bills"],
+        "matched_tables": [{"table": "bills", "score": 1.0, "matched_terms": ["bills"], "source": "kb_identifier"}],
+        "matched_columns": [
+            {
+                "table": "bills",
+                "column": "amount_total",
+                "semantic_type": "numeric_candidate",
+                "core_semantic_type": "numeric_candidate",
+                "is_measure": True,
+                "is_dimension": False,
+                "is_date": False,
+                "score": 0.91,
+                "matched_terms": ["amount"],
+                "evidence_sources": ["runtime_column_name"],
+                "source": "kb_identifier",
+            }
+        ],
+        "matched_glossary_terms": [],
+        "matched_relationships": [],
+        "possible_join_paths": [],
+        "measure_candidates": [],
+        "dimension_candidates": [],
+        "filter_candidates": [],
+        "retrieval_sources": ["kb_identifier"],
+        "confidence": 0.91,
+    }
+
+    context = build_query_context(
+        "show sum amount from bills",
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=False,
+        intent=intent,
+        retrieved_context=retrieved_context,
+    )
+
+    assert context["selected_table_names"] == ["bills"]
+    assert context["query_shape"] == "single_table_aggregate"
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["can_plan"] is True
+    assert context["missing_evidence"] == []
+    assert any(candidate["column"] == "amount_total" for candidate in context["metric_candidates"])
+
+
+def test_qp6_show_sum_billed_value_from_bills_keeps_single_table_aggregate_contract():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+                {"name": "paid_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    glossary = generate_business_glossary(knowledge_base, use_ai_enrichment=True)
+
+    context = build_query_context(
+        "show sum billed value from bills",
+        knowledge_base,
+        business_glossary=glossary,
+        use_vector_retrieval=False,
+    )
+
+    assert context["query_shape"] == "single_table_aggregate"
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["can_plan"] is True
+    assert context["selected_table_names"] == ["bills"]
+    assert context["missing_evidence"] == []
+    assert any(candidate["column"] == "billed_value" for candidate in context["metric_candidates"])
+    assert context["route_reason"]
+
+
 def test_qp3_multi_metric_aggregate_classification():
     knowledge_base = {
         "bills": {

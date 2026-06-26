@@ -18,10 +18,7 @@ import inspect
 import re
 
 from query_pipeline.query_planner import build_query_context
-from sql_pipeline.deterministic_sql_generator import (
-    generate_single_table_aggregate_sql,
-    looks_like_single_table_aggregate_request,
-)
+from sql_pipeline.deterministic_sql_generator import generate_single_table_aggregate_sql
 from sql_pipeline.simple_query_generator import generate_simple_sql
 from sql_pipeline.sql_generator import (
     generate_sql as _blocked_generate_sql,
@@ -489,12 +486,134 @@ def _route_recommendation(query_context: dict[str, Any]) -> str:
 
 
 def _planning_block_message(query_context: dict[str, Any], route_recommendation: str) -> str:
+    if route_recommendation == "blocked_unsafe":
+        return "Unsafe request blocked. Only SELECT questions are allowed."
     if route_recommendation == "needs_clarification":
         return _clarification_message(query_context)
     return (
         "Question could not be planned safely from the current schema context. "
         "Please be more specific or rebuild the knowledge base."
     )
+
+
+def _numeric_field_candidates(query_context: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for entry in (query_context.get("metric_candidates") or []):
+        column_name = str(entry.get("column") or "").strip()
+        if not column_name:
+            continue
+        key = column_name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(column_name)
+
+    for entry in (query_context.get("selected_columns") or []):
+        column_name = str(entry.get("column") or "").strip()
+        if not column_name:
+            continue
+        semantic_type = str(entry.get("semantic_type") or "").strip().lower()
+        core_semantic_type = str(entry.get("core_semantic_type") or "").strip().lower()
+        if semantic_type in {"id", "date", "boolean"} or core_semantic_type in {"id", "date", "boolean"}:
+            continue
+        if semantic_type not in {"numeric_candidate", "money", "quantity", "percentage"} and core_semantic_type != "numeric_candidate":
+            continue
+        key = column_name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(column_name)
+
+    selected_knowledge_base = query_context.get("selected_knowledge_base")
+    if isinstance(selected_knowledge_base, dict):
+        for table_name in (query_context.get("selected_table_names") or []):
+            table_data = selected_knowledge_base.get(table_name)
+            if not isinstance(table_data, dict):
+                continue
+            for column in (table_data.get("columns") or []):
+                if not isinstance(column, dict):
+                    continue
+                column_name = str(column.get("name") or "").strip()
+                if not column_name:
+                    continue
+                semantic_type = str(column.get("semantic_type") or "").strip().lower()
+                ai_metadata = column.get("ai_metadata") if isinstance(column.get("ai_metadata"), dict) else {}
+                ai_semantic_type = str(ai_metadata.get("ai_semantic_type") or ai_metadata.get("semantic_type") or "").strip().lower()
+                if semantic_type in {"id", "date", "boolean"}:
+                    continue
+                if semantic_type not in {"numeric_candidate", "money", "quantity", "percentage"} and ai_semantic_type not in {"money", "quantity", "percentage"}:
+                    continue
+                key = column_name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(column_name)
+
+    return candidates
+
+
+def _deterministic_aggregate_failure_message(query_context: dict[str, Any], reason: str) -> str:
+    normalized_reason = str(reason or "").strip().lower()
+    if normalized_reason == "metric_ambiguous":
+        candidates = _numeric_field_candidates(query_context)
+        if candidates:
+            preview = ", ".join(candidates[:6])
+            return f"Cannot choose metric safely. I found multiple possible numeric fields: {preview}. Please specify one."
+        return "Cannot choose metric safely. I found multiple possible numeric fields. Please specify one."
+    if normalized_reason == "metric_not_found":
+        candidates = _numeric_field_candidates(query_context)
+        if len(candidates) > 1:
+            preview = ", ".join(candidates[:6])
+            return f"Cannot choose metric safely. I found multiple possible numeric fields: {preview}. Please specify one."
+        return "Cannot choose metric safely. I could not find one clear numeric field for this aggregate on the selected table."
+    if normalized_reason == "selected_table_missing":
+        return "Cannot choose metric safely because the planner did not isolate one table."
+    if normalized_reason == "table_schema_missing":
+        return "Cannot choose metric safely because schema details for the selected table are missing."
+    return "Cannot plan this query safely from available schema evidence."
+
+
+def _has_generic_aggregate_request(query_context: dict[str, Any]) -> bool:
+    plan = query_context.get("plan") if isinstance(query_context.get("plan"), dict) else {}
+    question = str(
+        plan.get("question")
+        or query_context.get("normalized_question")
+        or query_context.get("question")
+        or ""
+    ).strip()
+    if not question:
+        return False
+    return bool(re.search(r"\b(total|sum|average|avg|highest|maximum|max|lowest|minimum|min)\b", question, re.IGNORECASE))
+
+
+def _is_single_table_aggregate_candidate(
+    query_context: dict[str, Any],
+    route_recommendation: str,
+) -> bool:
+    selected_tables = [entry for entry in (query_context.get("selected_tables") or []) if isinstance(entry, dict)]
+    if len(selected_tables) != 1:
+        return False
+    if query_context.get("join_paths"):
+        return False
+
+    plan = query_context.get("plan") if isinstance(query_context.get("plan"), dict) else {}
+    if plan.get("filters") or plan.get("date_range"):
+        return False
+    if plan.get("grouping") or plan.get("dimension"):
+        return False
+    if query_context.get("formula_evidence"):
+        return False
+
+    query_shape = str(query_context.get("query_shape") or "").strip()
+    if query_shape == "single_table_aggregate":
+        return True
+
+    if route_recommendation in {"deterministic_sql_required", "cannot_plan_safely"} and _has_generic_aggregate_request(query_context):
+        return True
+
+    return False
 
 
 def _should_try_rule_based_from_pipeline(query_context: dict[str, Any]) -> tuple[bool, str]:
@@ -1231,6 +1350,19 @@ class QuestionService:
         self.last_query_context = None
 
         if _UNSAFE_NL_RE.search(question):
+            self.last_query_context = {
+                "route_recommendation": "blocked_unsafe",
+                "route_used": "blocked_unsafe",
+                "route_reason": "unsafe natural-language request blocked before planning",
+                "query_shape": "blocked_unsafe",
+                "selected_tables": [],
+                "selected_table_names": [],
+                "selected_columns": [],
+                "join_paths": [],
+                "vector_results": {},
+                "retrieved_context": {},
+                "plan": {"question": question},
+            }
             return False, "Unsafe request blocked. Only SELECT questions are allowed.", None, None
 
         business_glossary = _scope_glossary_to_knowledge_base(business_glossary, knowledge_base)
@@ -1301,13 +1433,23 @@ class QuestionService:
             bool(query_context.get("complex_sql_plan")),
         )
         route_recommendation = _route_recommendation(query_context)
-        if isinstance(pipeline_context, dict) and route_recommendation in {"needs_clarification", "cannot_plan_safely"}:
+        if (
+            isinstance(pipeline_context, dict)
+            and route_recommendation in {"blocked_unsafe", "needs_clarification", "cannot_plan_safely"}
+            and not (
+                route_recommendation == "cannot_plan_safely"
+                and _is_single_table_aggregate_candidate(query_context, route_recommendation)
+            )
+        ):
             route_reason = (
-                "query pipeline requested clarification before SQL generation"
+                "query pipeline blocked this request as unsafe"
+                if route_recommendation == "blocked_unsafe"
+                else "query pipeline requested clarification before SQL generation"
                 if route_recommendation == "needs_clarification"
                 else "query pipeline could not plan this question safely from runtime evidence"
             )
-            _set_route(query_context, "fallback-failed", route_reason)
+            route_used = "blocked_unsafe" if route_recommendation == "blocked_unsafe" else "fallback-failed"
+            _set_route(query_context, route_used, route_reason)
             return False, _planning_block_message(query_context, route_recommendation), None, None
         if _needs_simple_table_clarification(query_context):
             _set_route(
@@ -1321,8 +1463,11 @@ class QuestionService:
         intent = query_context.get("intent") or {}
         plan = query_context.get("plan") or {}
         retrieved_context = query_context.get("retrieved_context") or {}
-        route_recommendation = query_context.get("route_recommendation") or {}
+        route_recommendation = str(query_context.get("route_recommendation") or "").strip()
         complex_sql_plan = query_context.get("complex_sql_plan") or {}
+        query_shape = str(query_context.get("query_shape") or "").strip()
+        can_plan = bool(query_context.get("can_plan"))
+        missing_evidence = list(query_context.get("missing_evidence") or [])
         if not isinstance(intent, dict):
             intent = {"intent_type": str(intent or plan.get("intent") or "").strip().lower()}
 
@@ -1330,9 +1475,23 @@ class QuestionService:
         route = (
             query_context.get("route")
             or query_context.get("route_used")
-            or (route_recommendation if isinstance(route_recommendation, str) else route_recommendation.get("route") if isinstance(route_recommendation, dict) else None)
+            or route_recommendation
             or plan.get("route")
         )
+
+        is_single_table_aggregate_candidate = _is_single_table_aggregate_candidate(query_context, route_recommendation)
+
+        if route == "blocked_unsafe":
+            _set_route(query_context, "blocked_unsafe", "planner blocked this request before SQL generation")
+            return False, _planning_block_message(query_context, route), None, None
+
+        if route in {"needs_clarification", "cannot_plan_safely"} and not is_single_table_aggregate_candidate:
+            _set_route(
+                query_context,
+                "fallback-failed",
+                "Cannot plan safely from available evidence",
+            )
+            return False, _planning_block_message(query_context, route), None, None
         
         # Simple single-table guard (Phase 2 Bug Fix)
         # Route simple list/count queries before complex_sql_plan block
@@ -1341,6 +1500,7 @@ class QuestionService:
         is_simple_list_count = (
             len(selected_tables) == 1
             and intent_type in {"list", "count"}
+            and query_shape in {"single_table_list", "single_table_count"}
             and not query_context.get("join_paths")
         )
         
@@ -1348,42 +1508,6 @@ class QuestionService:
             logger.info(f"Simple single-table list/count detected: intent={intent_type}, table={selected_tables[0].get('table') if selected_tables else 'unknown'}")
             route = "simple_rule_based"
 
-        is_phase1a_aggregate = looks_like_single_table_aggregate_request(query_context)
-
-        if is_phase1a_aggregate:
-            deterministic_aggregate = generate_single_table_aggregate_sql(
-                query_context=query_context,
-                knowledge_base=knowledge_base,
-            )
-            if deterministic_aggregate.status == "generated" and deterministic_aggregate.sql:
-                safety_ok, safety_reason = validate_sql(deterministic_aggregate.sql)
-                struct_ok, struct_reason = validate_sql_structure(deterministic_aggregate.sql, knowledge_base)
-                if safety_ok and struct_ok:
-                    _set_route(query_context, "deterministic-aggregate", deterministic_aggregate.reason)
-                    self.conversation_memory.add_turn(
-                        user_question=question,
-                        is_follow_up=is_follow_up,
-                        rewritten_question=rewritten_question,
-                        generated_sql=deterministic_aggregate.sql,
-                    )
-                    return True, "SQL generated successfully (deterministic aggregate)", deterministic_aggregate.sql, None
-                fail_reason = safety_reason if not safety_ok else struct_reason
-                return False, f"SQL validation failed: {fail_reason}", None, None
-            if deterministic_aggregate.status == "cannot_plan_safely":
-                _set_route(query_context, "cannot_plan_safely", deterministic_aggregate.reason)
-                return False, "Cannot plan this query safely from available schema evidence.", None, None
-        
-        # Block complex queries (Phase 2 Step 6)
-        if complex_sql_plan and not is_simple_list_count:
-            _set_route(query_context, "complex_deterministic_not_ready", "Complex SQL not implemented in Phase 2")
-            return False, "Complex deterministic SQL generation is not implemented for this query type yet.", None, None
-        
-        # Block unsafe/missing evidence
-        if route in {"needs_clarification", "cannot_plan_safely"}:
-            _set_route(query_context, route, "Cannot plan safely from available evidence")
-            return False, "Cannot plan this query safely from available schema evidence.", None, None
-        
-        # Simple query path - use simple_query_generator only (Phase 2 Step 5)
         if route in {"simple_rule_based", "simple_rule_ok", "rule_based", "simple"}:
             try:
                 simple_sql = generate_simple_sql(
@@ -1416,6 +1540,34 @@ class QuestionService:
             except Exception as e:
                 logger.error(f"Simple SQL generation failed: {e}")
                 return False, f"Simple SQL generation failed: {str(e)}", None, None
+
+        if is_single_table_aggregate_candidate:
+            deterministic_aggregate = generate_single_table_aggregate_sql(
+                query_context=query_context,
+                knowledge_base=knowledge_base,
+            )
+            if deterministic_aggregate.status == "generated" and deterministic_aggregate.sql:
+                safety_ok, safety_reason = validate_sql(deterministic_aggregate.sql)
+                struct_ok, struct_reason = validate_sql_structure(deterministic_aggregate.sql, knowledge_base)
+                if safety_ok and struct_ok:
+                    _set_route(query_context, "deterministic-aggregate", deterministic_aggregate.reason)
+                    self.conversation_memory.add_turn(
+                        user_question=question,
+                        is_follow_up=is_follow_up,
+                        rewritten_question=rewritten_question,
+                        generated_sql=deterministic_aggregate.sql,
+                    )
+                    return True, "SQL generated successfully (deterministic aggregate)", deterministic_aggregate.sql, None
+                fail_reason = safety_reason if not safety_ok else struct_reason
+                return False, f"SQL validation failed: {fail_reason}", None, None
+            if deterministic_aggregate.status == "cannot_plan_safely":
+                _set_route(query_context, "cannot_plan_safely", deterministic_aggregate.reason)
+                return False, _deterministic_aggregate_failure_message(query_context, deterministic_aggregate.reason), None, None
+
+        # Block complex queries (Phase 2 Step 6)
+        if complex_sql_plan or route_recommendation == "deterministic_sql_required":
+            _set_route(query_context, "complex_deterministic_not_ready", "Complex SQL not implemented in Phase 2")
+            return False, "Complex deterministic SQL generation is not implemented for this query type yet.", None, None
 
         # Default: complex query not implemented
         _set_route(query_context, "complex_deterministic_not_ready", "Complex SQL not implemented in Phase 2")

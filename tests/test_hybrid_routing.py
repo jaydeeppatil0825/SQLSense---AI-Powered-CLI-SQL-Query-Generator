@@ -584,7 +584,7 @@ def test_count_clients_uses_clients_only_without_join(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "rule-based"
 
 
-def test_top_5_clients_by_deal_value_keeps_join_path_for_ai():
+def test_top_5_clients_by_deal_value_keeps_join_path_for_deterministic_sql():
     context = build_query_context("top 5 clients by deal value", CLIENTS_RELATIONSHIP_KB, use_vector_retrieval=False)
 
     assert "clients" in context["selected_table_names"]
@@ -599,10 +599,10 @@ def test_top_5_clients_by_deal_value_keeps_join_path_for_ai():
         "agreements.client_id = clients.client_id" in join_conditions
         or "clients.client_id = agreements.client_id" in join_conditions
     )
-    assert context["route_recommendation"] == "ai_sql_required"
+    assert context["route_recommendation"] == "deterministic_sql_required"
 
 
-def test_billed_value_by_client_keeps_invoice_join_path_for_ai():
+def test_billed_value_by_client_keeps_invoice_join_path_for_deterministic_sql():
     context = build_query_context("billed value by client", CLIENTS_RELATIONSHIP_KB, use_vector_retrieval=False)
 
     assert "clients" in context["selected_table_names"]
@@ -617,7 +617,7 @@ def test_billed_value_by_client_keeps_invoice_join_path_for_ai():
         "invoices.client_id = clients.client_id" in join_conditions
         or "clients.client_id = invoices.client_id" in join_conditions
     )
-    assert context["route_recommendation"] == "ai_sql_required"
+    assert context["route_recommendation"] == "deterministic_sql_required"
 
 
 def test_show_all_agreements_uses_rule_based_and_succeeds(monkeypatch):
