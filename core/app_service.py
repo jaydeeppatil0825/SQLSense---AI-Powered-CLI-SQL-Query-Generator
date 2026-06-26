@@ -311,58 +311,101 @@ class AppService:
             ai_backend=backend,
         )
         self.last_pipeline_result = pipeline_result
-        query_context = _safe_dict(self.question_service.get_last_query_context() or {})
-        success = False
-        message = ""
-        generated_sql: Optional[str] = None
-        error: Optional[str] = None
+
+        query_context: Dict[str, Any] = {}
         route = ""
         validation_result: Dict[str, Any] = {}
+        pipeline_context: Optional[Dict[str, Any]] = None
+        pipeline_error: Optional[str] = None
 
         if pipeline_result is None:
-            message = "Question processing returned no result"
-            error = "Internal error: question processing returned no result."
+            pipeline_error = "Internal error: query pipeline returned no result."
             route = "cannot_plan_safely"
-        elif isinstance(pipeline_result, tuple):
-            success = bool(pipeline_result[0]) if len(pipeline_result) > 0 else False
-            message = str(pipeline_result[1] or "") if len(pipeline_result) > 1 else ""
-            generated_sql = pipeline_result[2] if len(pipeline_result) > 2 else None
-            error = pipeline_result[3] if len(pipeline_result) > 3 else None
         elif isinstance(pipeline_result, dict):
-            success = bool(pipeline_result.get("success"))
-            message = str(pipeline_result.get("message") or "")
-            generated_sql = pipeline_result.get("generated_sql") or pipeline_result.get("sql")
-            error = pipeline_result.get("error")
-            route = str(pipeline_result.get("route") or pipeline_result.get("route_used") or "")
-            validation_result = _safe_dict(pipeline_result.get("validation_result"))
-            if isinstance(pipeline_result.get("query_context"), dict) and not query_context:
-                query_context = _safe_dict(pipeline_result["query_context"])
+            query_context = _safe_dict(pipeline_result.get("query_context"))
+            route = str(
+                pipeline_result.get("route")
+                or pipeline_result.get("route_used")
+                or pipeline_result.get("route_recommendation")
+                or ""
+            )
+            pipeline_context = {
+                "question": question,
+                "normalized_question": str(pipeline_result.get("normalized_question") or question).strip(),
+                "intent": _safe_dict(pipeline_result.get("intent")),
+                "retrieved_context": _safe_dict(pipeline_result.get("retrieved_context")),
+                "query_context": query_context,
+                "plan": _safe_dict(pipeline_result.get("plan")),
+                "route_recommendation": str(pipeline_result.get("route_recommendation") or route).strip(),
+                "complex_sql_plan": _safe_dict(pipeline_result.get("complex_sql_plan")),
+                "formula_evidence": list(pipeline_result.get("formula_evidence") or []),
+                "evidence_sources": list(pipeline_result.get("evidence_sources") or []),
+            }
+        elif hasattr(pipeline_result, "to_pipeline_context"):
+            payload = pipeline_result.to_dict() if hasattr(pipeline_result, "to_dict") else {}
+            query_context = _safe_dict(payload.get("query_context"))
+            route = str(
+                payload.get("route")
+                or payload.get("route_used")
+                or payload.get("route_recommendation")
+                or ""
+            )
+            pipeline_context = pipeline_result.to_pipeline_context()
         elif hasattr(pipeline_result, "to_dict"):
             payload = pipeline_result.to_dict()
             if isinstance(payload, dict):
-                success = bool(payload.get("success"))
-                message = str(payload.get("message") or "")
-                generated_sql = payload.get("generated_sql") or payload.get("sql")
-                error = payload.get("error")
+                query_context = _safe_dict(payload.get("query_context"))
                 route = str(
                     payload.get("route")
                     or payload.get("route_used")
                     or payload.get("route_recommendation")
                     or ""
                 )
-                validation_result = _safe_dict(payload.get("validation_result"))
-                if isinstance(payload.get("query_context"), dict) and not query_context:
-                    query_context = _safe_dict(payload["query_context"])
+                pipeline_context = {
+                    "question": question,
+                    "normalized_question": str(payload.get("normalized_question") or question).strip(),
+                    "intent": _safe_dict(payload.get("intent")),
+                    "retrieved_context": _safe_dict(payload.get("retrieved_context")),
+                    "query_context": query_context,
+                    "plan": _safe_dict(payload.get("plan")),
+                    "route_recommendation": str(payload.get("route_recommendation") or route).strip(),
+                    "complex_sql_plan": _safe_dict(payload.get("complex_sql_plan")),
+                    "formula_evidence": list(payload.get("formula_evidence") or []),
+                    "evidence_sources": list(payload.get("evidence_sources") or []),
+                }
             else:
-                message = "Question processing returned an invalid structured result"
-                error = "Internal error: question processing returned an invalid structured result."
+                pipeline_error = "Internal error: query pipeline returned an invalid structured result."
                 route = "cannot_plan_safely"
         else:
-            message = "Question processing returned an unsupported result type"
-            error = "Internal error: question processing returned an unsupported result type."
+            pipeline_error = "Internal error: query pipeline returned an unsupported result type."
             route = "cannot_plan_safely"
 
+        if pipeline_error:
+            return self._build_question_result(
+                question=question,
+                success=False,
+                message="Question processing returned no result",
+                error=pipeline_error,
+                route=route,
+                validation_result=validation_result,
+                query_context=query_context,
+            )
+
+        success, message, generated_sql, error = self.question_service.process_question(
+            question=question,
+            knowledge_base=knowledge_base,
+            business_glossary=business_glossary,
+            vector_retriever=vector_retriever,
+            ai_backend=backend,
+            pipeline_context=pipeline_context,
+        )
+        query_context = _safe_dict(self.question_service.get_last_query_context() or query_context)
         route = route or str(query_context.get("route_used") or query_context.get("route") or "")
+        if generated_sql:
+            is_valid, reason = self.question_service.validate_sql(generated_sql, query_context.get("selected_knowledge_base") or knowledge_base)
+            validation_result = {"is_valid": is_valid, "reason": reason}
+        elif error or message:
+            validation_result = {"is_valid": False, "reason": error or message}
 
         if success and generated_sql:
             self.result_service.last_sql = generated_sql

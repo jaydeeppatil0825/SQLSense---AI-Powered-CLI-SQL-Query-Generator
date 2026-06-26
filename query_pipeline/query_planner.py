@@ -328,7 +328,7 @@ def _extract_requested_filters(question: str) -> list[str]:
     """Extract filter terms from question in a schema-agnostic way."""
     normalized = _normalize(question)
     filters = []
-    
+      
     # Look for preposition patterns that suggest filters
     filter_patterns = [
         r"\b(?:from|in)\s+([a-z][a-z0-9_ ]*)",
@@ -345,7 +345,7 @@ def _extract_requested_filters(question: str) -> list[str]:
     
     return list(set(filters))
 
-
+ 
 def _compute_intent_confidence(question: str, intent: dict[str, Any]) -> float:
     """Compute confidence score for the intent based on question clarity."""
     normalized = _normalize(question)
@@ -363,7 +363,7 @@ def _compute_intent_confidence(question: str, intent: dict[str, Any]) -> float:
     # Higher confidence if question has explicit dimensions
     if intent.get("requested_dimensions"):
         confidence += 0.1
-    
+  
     # Higher confidence if question has explicit limit
     if intent.get("limit"):
         confidence += 0.1
@@ -1934,12 +1934,27 @@ def _detect_missing_evidence(
 ) -> dict[str, Any]:
     """Detect missing evidence for planning."""
     missing_evidence: dict[str, Any] = {
+        "missing_table": False,
         "missing_metric": False,
         "missing_dimension": False,
         "missing_join_path": False,
         "missing_filter_column": False,
         "missing_formula_evidence": False,
     }
+
+    if not selected_tables:
+        missing_evidence["missing_table"] = True
+    elif (
+        query_shape in {"unknown", "single_table_list", "single_table_count", "single_table_aggregate", "filtered_query"}
+        and len(selected_tables) != 1
+    ):
+        missing_evidence["missing_table"] = True
+    elif len(selected_tables) > 1 and not join_paths and query_shape == "unknown":
+        missing_evidence["missing_table"] = True
+    elif len(selected_tables) > 1 and not join_paths and not requested_dimensions and not requested_filters:
+        missing_evidence["missing_table"] = True
+    elif len(selected_tables) > 1 and not join_paths and requested_metrics and not requested_dimensions:
+        missing_evidence["missing_table"] = True
 
     if requested_metrics and not measure_candidates and not formula_evidence:
         missing_evidence["missing_metric"] = True
@@ -2064,8 +2079,6 @@ def _derive_complex_query_shape(
     if has_join:
         return "multi_table_lookup"
     return None
-
-
 def _required_join_predicates(join_paths: list[dict[str, Any]]) -> list[str]:
     predicates: list[str] = []
     seen: set[str] = set()
@@ -2221,6 +2234,8 @@ def _route_recommendation_from_contract(
     if query_shape == "blocked_unsafe":
         return "blocked_unsafe", "question contains blocked SQL operation wording"
 
+    if missing_evidence_flags.get("missing_table"):
+        return "cannot_plan_safely", "table evidence is missing or ambiguous"
     if missing_evidence_flags.get("missing_join_path"):
         return "cannot_plan_safely", "required join path evidence is missing"
     if missing_evidence_flags.get("missing_formula_evidence"):
@@ -2263,6 +2278,7 @@ def _required_evidence_for_query_shape(query_shape: str) -> list[str]:
 
 def _missing_evidence_list(missing_evidence_flags: dict[str, Any]) -> list[str]:
     ordered = [
+        "missing_table",
         "missing_metric",
         "missing_dimension",
         "missing_join_path",
@@ -2884,18 +2900,6 @@ def build_query_context(
     logger.debug(f"[DEBUG] Selected tables after join-path promotion: {selected_names}")
     logger.debug(f"[DEBUG] Recomputed {len(join_paths)} join paths after promotion")
 
-    if not selected_names:
-        selected_names = list(enriched_kb.keys())
-        selected_tables = [
-            {
-                "table": table_name,
-                "confidence": 0.55,
-                "reason": "fell back to full schema because no table scored above the selection threshold",
-                "selected_columns": [],
-            }
-            for table_name, table_data in enriched_kb.items()
-        ]
-
     reduced_kb = {table_name: deepcopy(enriched_kb[table_name]) for table_name in selected_names}
     warnings = []
     if len(reduced_kb) < len(enriched_kb):
@@ -2904,6 +2908,8 @@ def build_query_context(
         warnings.append("Read-only row limits stay enabled for list-style questions.")
     if vector_results and not vector_results.get("used_vector"):
         warnings.append("Vector retrieval was unavailable; using KB and glossary rules only.")
+    if not selected_names:
+        warnings.append("Planner could not isolate a table safely from the available schema evidence.")
 
     overall_confidence = round(
         sum(entry["confidence"] for entry in selected_tables) / max(len(selected_tables), 1),

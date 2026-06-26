@@ -94,8 +94,10 @@ def test_query_planner_returns_low_confidence_when_business_context_is_weak():
         use_vector_retrieval=False,
     )
 
-    assert set(context["selected_table_names"]) == {"alpha_records", "beta_events"}
-    assert context["confidence"] == 0.55
+    assert context["selected_table_names"] == []
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert "missing_table" in context["missing_evidence"]
+    assert context["confidence"] <= 0.55
     assert context["plan"]["metric"] is None
 
 
@@ -482,7 +484,8 @@ def test_qp5_vague_metric_only_question_stays_unplanned_without_table_evidence()
 
     assert context["route_recommendation"] == "cannot_plan_safely"
     assert context["query_shape"] == "unknown"
-    assert set(context["selected_table_names"]) == {"bills", "invoices"}
+    assert "missing_table" in context["missing_evidence"]
+    assert context["route_reason"] == "table evidence is missing or ambiguous"
     assert "table_selection" in context["ambiguities"] or context["confidence"] <= 0.55
 
 
@@ -538,8 +541,10 @@ def test_query_planner_does_not_use_module_field_for_scoring():
         use_vector_retrieval=False,
     )
 
-    assert set(context["selected_table_names"]) == {"alpha_records", "beta_records"}
-    assert context["confidence"] == 0.55
+    assert context["selected_table_names"] == []
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert "missing_table" in context["missing_evidence"]
+    assert context["confidence"] <= 0.55
     assert all("module" not in entry for entry in context["selected_tables"])
 
 

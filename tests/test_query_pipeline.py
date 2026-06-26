@@ -19,9 +19,13 @@ KNOWLEDGE_BASE = {
 }
 
 
-def test_query_pipeline_returns_structured_debug_fields(monkeypatch):
-    question_service = QuestionService()
-    pipeline = QueryPipeline(question_service)
+class _FailingQuestionService:
+    def process_question(self, **kwargs):
+        raise AssertionError("QueryPipeline must not call QuestionService")
+
+
+def test_query_pipeline_returns_structured_debug_fields_without_calling_question_service(monkeypatch):
+    pipeline = QueryPipeline(_FailingQuestionService())
     built_intent = {
         "user_goal": "show accounts",
         "intent_type": "list",
@@ -75,19 +79,14 @@ def test_query_pipeline_returns_structured_debug_fields(monkeypatch):
             "glossary_terms": [],
         },
         "route_used": "rule-based",
+        "query_shape": "single_table_list",
+        "route_reason": "single-table deterministic browse/count query",
+        "can_plan": True,
     }
 
     monkeypatch.setattr("core.query_pipeline.build_intent", lambda *args, **kwargs: built_intent)
     monkeypatch.setattr("core.query_pipeline.retrieve_context", lambda *args, **kwargs: retrieved_context)
     monkeypatch.setattr("core.query_pipeline.build_query_context", lambda *args, **kwargs: preview_context)
-    captured = {}
-
-    def fake_process_question(**kwargs):
-        captured["pipeline_context"] = kwargs.get("pipeline_context")
-        question_service.last_query_context = preview_context
-        return True, "SQL generated successfully (rule-based)", "SELECT account_id, account_label FROM accounts LIMIT 50;", None
-
-    monkeypatch.setattr(question_service, "process_question", fake_process_question)
 
     result = pipeline.run(
         question="  show   all accounts ",
@@ -102,27 +101,27 @@ def test_query_pipeline_returns_structured_debug_fields(monkeypatch):
     assert result.intent == built_intent
     assert result.retrieved_context == retrieved_context
     assert result.plan["intent"] == "list"
-    assert result.generated_sql == "SELECT account_id, account_label FROM accounts LIMIT 50;"
-    assert result.validation_result == {"is_valid": True, "reason": "SQL is valid"}
-    assert result.route == "rule-based"
+    assert result.generated_sql is None
+    assert result.validation_result == {}
+    assert result.route == "simple_rule_based"
+    assert result.query_shape == "single_table_list"
+    assert result.route_reason == "single-table deterministic browse/count query"
+    assert result.can_plan is True
     debug_payload = result.to_dict()
     assert debug_payload["formula_evidence"] == []
     assert debug_payload["evidence_sources"] == ["kb_identifier"]
-    assert "rows" not in debug_payload
-    assert "executed_sql" not in debug_payload
-    assert "executed_rows" not in debug_payload
-    assert captured["pipeline_context"]["intent"] == built_intent
-    assert captured["pipeline_context"]["retrieved_context"] == retrieved_context
-    assert captured["pipeline_context"]["plan"]["intent"] == "list"
-    assert captured["pipeline_context"]["route_recommendation"] == "simple_rule_based"
-    assert captured["pipeline_context"]["complex_sql_plan"] is None
-    assert captured["pipeline_context"]["formula_evidence"] == []
-    assert captured["pipeline_context"]["evidence_sources"] == ["kb_identifier"]
+    pipeline_context = result.to_pipeline_context()
+    assert pipeline_context["intent"] == built_intent
+    assert pipeline_context["retrieved_context"] == retrieved_context
+    assert pipeline_context["plan"]["intent"] == "list"
+    assert pipeline_context["route_recommendation"] == "simple_rule_based"
+    assert pipeline_context["complex_sql_plan"] == {}
+    assert pipeline_context["formula_evidence"] == []
+    assert pipeline_context["evidence_sources"] == ["kb_identifier"]
 
 
-def test_query_pipeline_reports_validation_failure_when_sql_generation_fails(monkeypatch):
-    question_service = QuestionService()
-    pipeline = QueryPipeline(question_service)
+def test_query_pipeline_reports_cannot_plan_safely_without_calling_question_service(monkeypatch):
+    pipeline = QueryPipeline(_FailingQuestionService())
     built_intent = {
         "user_goal": "show accounts",
         "intent_type": "list",
@@ -162,20 +161,17 @@ def test_query_pipeline_reports_validation_failure_when_sql_generation_fails(mon
         "selected_columns": [],
         "selected_tables": [{"table": "accounts", "confidence": 0.52}],
         "join_paths": [],
-        "complex_sql_plan": None,
+        "complex_sql_plan": {},
         "vector_results": {},
-        "route_used": "fallback-failed",
+        "route_recommendation": "cannot_plan_safely",
+        "query_shape": "unknown",
+        "route_reason": "table evidence is missing or ambiguous",
+        "can_plan": False,
     }
 
     monkeypatch.setattr("core.query_pipeline.build_intent", lambda *args, **kwargs: built_intent)
     monkeypatch.setattr("core.query_pipeline.retrieve_context", lambda *args, **kwargs: retrieved_context)
     monkeypatch.setattr("core.query_pipeline.build_query_context", lambda *args, **kwargs: failed_context)
-
-    def fake_process_question(**kwargs):
-        question_service.last_query_context = failed_context
-        return False, "Could not generate a valid SQL query for this question.", None, "validation failed"
-
-    monkeypatch.setattr(question_service, "process_question", fake_process_question)
 
     result = pipeline.run(
         question="show all accounts",
@@ -187,8 +183,10 @@ def test_query_pipeline_reports_validation_failure_when_sql_generation_fails(mon
 
     assert result.success is False
     assert result.generated_sql is None
-    assert result.validation_result == {"is_valid": False, "reason": "validation failed"}
-    assert result.route == "fallback-failed"
+    assert result.validation_result == {}
+    assert result.route == "cannot_plan_safely"
+    assert result.route_reason == "table evidence is missing or ambiguous"
+    assert result.query_shape == "unknown"
 
 
 def test_pipeline_architecture_document_exists():
@@ -249,6 +247,38 @@ def test_query_planner_returns_empty_vector_results_when_vector_is_unavailable()
     assert context.get("vector_used") is False
     assert context["vector_results"]["used_vector"] is False
     assert context["vector_results"]["error"] == "vector retriever unavailable"
+
+
+def test_intent_builder_has_no_sql_pipeline_dependency():
+    text = Path("query_pipeline/intent_builder.py").read_text(encoding="utf-8")
+
+    assert "from sql_pipeline" not in text
+    assert "import sql_pipeline" not in text
+
+
+def test_conversation_helpers_do_not_contain_hardcoded_business_words():
+    forbidden_words = [
+        "customers",
+        "orders",
+        "products",
+        "employees",
+        "payments",
+        "support_tickets",
+        "paid",
+        "unpaid",
+        "pending",
+        "cancelled",
+    ]
+    helper_paths = [
+        Path("query_pipeline/conversation/followup_detector.py"),
+        Path("query_pipeline/conversation/question_rewriter.py"),
+        Path("query_pipeline/conversation/action_detector.py"),
+    ]
+
+    for path in helper_paths:
+        text = path.read_text(encoding="utf-8").lower()
+        for word in forbidden_words:
+            assert word not in text, f"{path} should not contain hardcoded business word '{word}'"
 
 
 def test_sql_generation_modules_do_not_build_vector_index_directly():

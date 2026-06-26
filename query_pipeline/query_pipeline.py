@@ -5,10 +5,9 @@ Query Planning Pipeline entry point.
 
 This module belongs to the User Question Understanding pipeline. It
 normalizes the question, builds intent, retrieves dynamic KB evidence,
-previews the query plan, and passes that structured context into the SQL
-generation pipeline.
+builds the planner context, and returns planner output only.
 
-It must not generate SQL directly.
+It must not generate SQL directly or call SQL runtime orchestration.
 """
 
 from __future__ import annotations
@@ -41,10 +40,29 @@ class QueryPipelineResult:
     complex_sql_plan: Optional[Dict[str, Any]]
     formula_evidence: list[Dict[str, Any]]
     evidence_sources: list[str]
+    query_context: Dict[str, Any]
+    query_shape: str
+    route_reason: str
+    can_plan: bool
 
     def to_process_tuple(self) -> tuple[bool, str, Optional[str], Optional[str]]:
-        """Return the legacy tuple used by the CLI service layer."""
+        """Return a legacy-compatible tuple without performing SQL generation."""
         return self.success, self.message, self.sql, self.error
+
+    def to_pipeline_context(self) -> Dict[str, Any]:
+        """Build the context payload consumed later by QuestionService."""
+        return {
+            "question": self.query_context.get("plan", {}).get("question") or self.normalized_question,
+            "normalized_question": self.normalized_question,
+            "intent": dict(self.intent or {}),
+            "retrieved_context": dict(self.retrieved_context or {}),
+            "query_context": dict(self.query_context or {}),
+            "plan": dict(self.plan or {}),
+            "route_recommendation": self.route_recommendation,
+            "complex_sql_plan": dict(self.complex_sql_plan or {}),
+            "formula_evidence": list(self.formula_evidence or []),
+            "evidence_sources": list(self.evidence_sources or []),
+        }
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the pipeline result for debugging or tests."""
@@ -52,9 +70,10 @@ class QueryPipelineResult:
 
 
 class QueryPipeline:
-    """Stage-oriented planning wrapper that passes evidence into SQL generation."""
+    """Stage-oriented planning wrapper that returns deterministic planner output."""
 
-    def __init__(self, question_service: Any):
+    def __init__(self, question_service: Any | None = None):
+        # Retained for backward compatibility with existing constructors.
         self.question_service = question_service
 
     def run(
@@ -66,7 +85,9 @@ class QueryPipeline:
         ai_backend: str = "local",
     ) -> QueryPipelineResult:
         # ai_backend is accepted only for backward compatibility.
-        # Query pipeline must not call AI at runtime.
+        # Query pipeline must not call AI or SQL runtime orchestration.
+        del ai_backend
+
         normalized_question, _ = normalize_question(question)
         intent = build_intent(normalized_question)
         retrieved_context = retrieve_context(
@@ -76,7 +97,7 @@ class QueryPipeline:
             business_glossary=business_glossary,
             vector_retriever=vector_retriever,
         )
-        preview_context = self._build_context_preview(
+        query_context = self._build_context_preview(
             normalized_question,
             knowledge_base,
             intent=intent,
@@ -84,49 +105,37 @@ class QueryPipeline:
             business_glossary=business_glossary,
             vector_retriever=vector_retriever,
         )
-        formula_evidence = self._extract_formula_evidence(preview_context, retrieved_context)
-        evidence_sources = self._extract_evidence_sources(preview_context, retrieved_context)
-        pipeline_context = {
-            "question": question,
-            "normalized_question": normalized_question,
-            "intent": intent,
-            "retrieved_context": retrieved_context,
-            "query_context": preview_context,
-            "plan": dict(preview_context.get("plan") or {}),
-            "route_recommendation": preview_context.get("route_recommendation"),
-            "complex_sql_plan": preview_context.get("complex_sql_plan"),
-            "formula_evidence": formula_evidence,
-            "evidence_sources": evidence_sources,
-        }
+        formula_evidence = self._extract_formula_evidence(query_context, retrieved_context)
+        evidence_sources = self._extract_evidence_sources(query_context, retrieved_context)
 
-        success, message, sql, error = self.question_service.process_question(
-            question=question,
-            knowledge_base=knowledge_base,
-            business_glossary=business_glossary,
-            vector_retriever=vector_retriever,
-            ai_backend=ai_backend,
-            pipeline_context=pipeline_context,
-        )
-
-        final_context = self.question_service.get_last_query_context() or preview_context
-        validation_result = self._build_validation_result(sql, final_context, knowledge_base, error, message)
+        route_recommendation = str(query_context.get("route_recommendation") or "").strip()
+        route_reason = str(query_context.get("route_reason") or "").strip()
+        query_shape = str(query_context.get("query_shape") or "unknown").strip()
+        can_plan = bool(query_context.get("can_plan"))
+        success = route_recommendation in {"simple_rule_based", "deterministic_sql_required"}
+        message = self._pipeline_message(route_recommendation, route_reason)
+        error = None if success else message
 
         return QueryPipelineResult(
             success=success,
             message=message,
-            sql=sql,
+            sql=None,
             error=error,
             normalized_question=normalized_question,
             intent=intent,
             retrieved_context=retrieved_context,
-            plan=dict((final_context or preview_context or {}).get("plan") or {}),
-            generated_sql=sql,
-            validation_result=validation_result,
-            route=(final_context or {}).get("route_used"),
-            route_recommendation=(final_context or preview_context or {}).get("route_recommendation"),
-            complex_sql_plan=(final_context or preview_context or {}).get("complex_sql_plan"),
+            plan=dict(query_context.get("plan") or {}),
+            generated_sql=None,
+            validation_result={},
+            route=route_recommendation,
+            route_recommendation=route_recommendation,
+            complex_sql_plan=dict(query_context.get("complex_sql_plan") or {}),
             formula_evidence=formula_evidence,
             evidence_sources=evidence_sources,
+            query_context=query_context,
+            query_shape=query_shape,
+            route_reason=route_reason,
+            can_plan=can_plan,
         )
 
     def _build_context_preview(
@@ -150,35 +159,35 @@ class QueryPipeline:
             )
         except Exception as exc:
             return {
-                "plan": {"question": question},
+                "normalized_question": question,
+                "intent": dict(intent or {}),
+                "query_shape": "unknown",
+                "route_recommendation": "cannot_plan_safely",
+                "route_reason": "query pipeline could not build planner context",
                 "selected_table_names": [],
                 "selected_columns": [],
                 "selected_tables": [],
-                "join_paths": [],
+                "metric_candidates": [],
+                "dimension_candidates": [],
+                "filter_candidates": [],
+                "join_candidates": [],
+                "required_joins": [],
+                "group_by_candidates": [],
+                "order_by_candidates": [],
+                "limit": None,
+                "complex_sql_plan": {},
+                "required_evidence": ["selected_table"],
+                "missing_evidence": ["pipeline_preview_error"],
+                "ambiguities": [],
+                "can_plan": False,
+                "debug_trace": [{"stage": "pipeline_preview_error", "value": str(exc)}],
                 "vector_results": {},
+                "vector_used": False,
+                "plan": {"question": question},
+                "join_paths": [],
+                "warnings": [],
                 "pipeline_preview_error": str(exc),
             }
-
-    def _build_validation_result(
-        self,
-        sql: Optional[str],
-        query_context: Dict[str, Any],
-        knowledge_base: Dict[str, Any],
-        error: Optional[str],
-        message: str,
-    ) -> Dict[str, Any]:
-        if not sql:
-            return {
-                "is_valid": False,
-                "reason": error or message,
-            }
-
-        scoped_knowledge_base = query_context.get("selected_knowledge_base") or knowledge_base
-        is_valid, reason = self.question_service.validate_sql(sql, scoped_knowledge_base)
-        return {
-            "is_valid": is_valid,
-            "reason": reason,
-        }
 
     def _extract_formula_evidence(
         self,
@@ -217,3 +226,18 @@ class QueryPipeline:
             seen.add(key)
             deduped.append(source)
         return deduped
+
+    def _pipeline_message(self, route_recommendation: str, route_reason: str) -> str:
+        if route_recommendation == "simple_rule_based":
+            return "Query planned successfully for simple deterministic SQL generation."
+        if route_recommendation == "deterministic_sql_required":
+            return "Query planned successfully for deterministic SQL generation."
+        if route_recommendation == "blocked_unsafe":
+            return "Unsafe request blocked before SQL generation."
+        if route_recommendation == "unsupported_query_shape":
+            if route_reason:
+                return f"Planner identified an unsupported query shape: {route_reason}"
+            return "Planner identified an unsupported deterministic query shape."
+        if route_reason:
+            return f"Planner could not route the question safely: {route_reason}"
+        return "Planner could not route the question safely."

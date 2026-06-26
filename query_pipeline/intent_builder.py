@@ -13,7 +13,6 @@ import re
 from typing import Any, Dict, Optional
 from utils.logger import get_logger
 from query_pipeline.question_normalizer import normalize_question
-from sql_pipeline.sql_validator import extract_requested_limit
 
 logger = get_logger()
 _ALLOWED_INTENT_TYPES = {
@@ -87,6 +86,22 @@ def build_intent(question: str, ai_backend: str = "local") -> Dict[str, Any]:
     intent = _normalize_simple_target_entity_usage(intent, normalized_question)
     intent["source"] = "deterministic"
     return intent
+
+
+def extract_requested_limit(question: str) -> Optional[int]:
+    """Extract an explicit row limit from generic query wording."""
+    normalized_question, _ = normalize_question(question)
+    for pattern in (_TOP_RE, _FIRST_RE, _LIMIT_RE):
+        match = pattern.search(normalized_question)
+        if not match:
+            continue
+        try:
+            value = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
 
 
 

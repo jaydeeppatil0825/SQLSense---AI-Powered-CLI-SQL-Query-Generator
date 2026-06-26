@@ -1,14 +1,14 @@
 """
 conversation/question_rewriter.py
 ===================================
-Rewrites follow-up questions into standalone questions using rule-based patterns.
+Rewrites follow-up questions into standalone questions using generic,
+schema-agnostic patterns.
 
-AI-based rewriting is disabled in Phase 1.
+AI-based rewriting is disabled at runtime.
 """
 
 from __future__ import annotations
 
-import os
 import re
 
 from utils.logger import get_logger
@@ -23,125 +23,77 @@ def rewrite_follow_up_question(
 ) -> str:
     """
     Rewrite a follow-up question into a complete standalone question.
-    
-    Args:
-        user_question: The user's follow-up question
-        conversation_memory: The ConversationMemory instance
-        knowledge_base: The knowledge base
-        business_glossary: Optional business glossary
-        ai_backend: The AI backend to use (kept for backward compatibility, not used)
-    
-    Returns:
-        Rewritten standalone question
+
+    The rewrite must stay generic and must not inject table names, column
+    names, statuses, or business meaning.
     """
+    del knowledge_base, business_glossary, ai_backend
+
     logger = get_logger()
-    
     context = conversation_memory.get_last_context()
     last_question = context.get("last_rewritten_question") or context.get("last_user_question")
-    
+
     if not last_question:
         logger.warning("No previous question found, returning original question")
         return user_question
-    
-    # Use rule-based rewriting only (AI disabled in Phase 1)
+
     rewritten = _rewrite_with_rules(user_question, last_question)
     logger.info(f"Rule-based rewrite: '{user_question}' -> '{rewritten}'")
     return rewritten
 
 
 def _rewrite_with_rules(user_question: str, last_question: str) -> str:
-    """
-    Rewrite the question using rule-based patterns.
-    
-    Args:
-        user_question: The user's follow-up question
-        last_question: The previous question
-    
-    Returns:
-        Rewritten question
-    """
     question_lower = user_question.lower().strip()
-    
-    # Pattern: "where do they live" after customers
-    if re.search(r"where do (they|them) live", question_lower):
-        if "customer" in last_question.lower():
-            return "Show customer names and cities from customers"
-        elif "employee" in last_question.lower():
-            return "Show employee names and cities from employees"
-        else:
-            return f"{last_question} with location information"
-    
-    # Pattern: "make it top N"
-    match = re.search(r"make it top (\d+)", question_lower)
-    if match:
-        new_limit = match.group(1)
-        return re.sub(r"top \d+", f"top {new_limit}", last_question, flags=re.IGNORECASE)
-    
-    # Pattern: "make it N"
-    match = re.search(r"make it (\d+)", question_lower)
-    if match:
-        new_limit = match.group(1)
-        # Try to find and replace a number in the last question
-        if re.search(r"\d+", last_question):
-            return re.sub(r"\d+", new_limit, last_question, count=1)
-        else:
-            return f"Show top {new_limit} {last_question}"
-    
-    # Pattern: "now only [city/filter]"
-    match = re.search(r"now only (\w+)", question_lower)
-    if match:
-        filter_value = match.group(1)
-        return f"{last_question} for {filter_value}"
-    
-    # Pattern: "only [status]"
-    match = re.search(r"only (\w+)", question_lower)
-    if match:
-        filter_value = match.group(1)
-        if "paid" in filter_value:
-            return f"{last_question} where payment_status = 'Paid'"
-        elif "unpaid" in filter_value:
-            return f"{last_question} where payment_status = 'Pending'"
-        elif "pending" in filter_value:
-            return f"{last_question} where status = 'Pending'"
-        elif "cancelled" in filter_value:
-            return f"{last_question} where status = 'Cancelled'"
-        elif "delivered" in filter_value:
-            return f"{last_question} where order_status = 'Delivered'"
-        elif "shipped" in filter_value:
-            return f"{last_question} where order_status = 'Shipped'"
-        elif "active" in filter_value:
-            return f"{last_question} where status = 'Active'"
-        elif "inactive" in filter_value:
-            return f"{last_question} where status = 'Inactive'"
-        else:
-            return f"{last_question} filtered by {filter_value}"
-    
-    # Pattern: "sort it by highest/lowest"
-    if "sort highest first" in question_lower or "sort it highest" in question_lower:
-        return f"{last_question} sorted by highest value first"
-    elif "sort lowest first" in question_lower or "sort it lowest" in question_lower:
-        return f"{last_question} sorted by lowest value first"
-    elif "sort it" in question_lower:
+
+    top_match = re.search(r"\bmake it top (\d+)\b", question_lower)
+    if top_match:
+        new_limit = top_match.group(1)
+        if re.search(r"\btop \d+\b", last_question, re.IGNORECASE):
+            return re.sub(r"\btop \d+\b", f"top {new_limit}", last_question, count=1, flags=re.IGNORECASE)
+        if re.search(r"\blimit \d+\b", last_question, re.IGNORECASE):
+            return re.sub(r"\blimit \d+\b", f"limit {new_limit}", last_question, count=1, flags=re.IGNORECASE)
+        return f"{last_question} limit {new_limit}"
+
+    limit_match = re.search(r"\bmake it (\d+)\b", question_lower)
+    if limit_match:
+        new_limit = limit_match.group(1)
+        if re.search(r"\b(?:top|first|limit) \d+\b", last_question, re.IGNORECASE):
+            return re.sub(r"\b(?:top|first|limit) \d+\b", lambda m: re.sub(r"\d+", new_limit, m.group(0)), last_question, count=1, flags=re.IGNORECASE)
+        return f"{last_question} limit {new_limit}"
+
+    only_match = re.search(r"\b(?:now\s+)?only\s+(.+)$", question_lower)
+    if only_match:
+        filter_value = only_match.group(1).strip(" .")
+        return f"{last_question} filtered by {filter_value}"
+
+    sort_match = re.search(r"\b(?:sort|order) (?:it|them|this)(?: by (.+))?$", question_lower)
+    if sort_match:
+        sort_value = str(sort_match.group(1) or "").strip(" .")
+        if sort_value:
+            return f"{last_question} sorted by {sort_value}"
         return f"{last_question} sorted"
-    
-    # Pattern: "compare with [value]"
-    match = re.search(r"compare with (\w+)", question_lower)
-    if match:
-        compare_value = match.group(1)
+
+    compare_match = re.search(r"\bcompare with (.+)$", question_lower)
+    if compare_match:
+        compare_value = compare_match.group(1).strip(" .")
         return f"{last_question} compared with {compare_value}"
-    
-    # Pattern: "what about [term]"
-    match = re.search(r"what about (\w+)", question_lower)
-    if match:
-        term = match.group(1)
-        # Replace the main entity in the last question
-        return re.sub(r"\b(customers|orders|products|employees)\b", term, last_question, flags=re.IGNORECASE)
-    
-    # Pattern: "show their [attribute]"
-    match = re.search(r"show (their|their) (\w+)", question_lower)
-    if match:
-        attribute = match.group(2)
-        return f"Show {attribute} from {last_question}"
-    
-    # Default: append to last question
-    return f"{last_question} {user_question}"
+
+    what_about_match = re.search(r"\bwhat about (.+)$", question_lower)
+    if what_about_match:
+        focus_value = what_about_match.group(1).strip(" .")
+        return f"{last_question} focused on {focus_value}"
+
+    show_attribute_match = re.search(r"\bshow (?:their|its|those|these) (.+)$", question_lower)
+    if show_attribute_match:
+        attribute = show_attribute_match.group(1).strip(" .")
+        return f"{last_question} with {attribute}"
+
+    next_match = re.search(r"\bnext\b", question_lower)
+    if next_match:
+        return f"{last_question} next"
+
+    previous_match = re.search(r"\bprevious\b", question_lower)
+    if previous_match:
+        return f"{last_question} previous"
+
+    return f"{last_question} {user_question}".strip()
