@@ -212,7 +212,7 @@ def test_single_table_aggregate_metric_ambiguity_returns_cannot_plan_safely(monk
     assert "amount_total" in message
     assert "tax_total" in message
     assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
-    assert service.get_last_query_context()["route_reason"] == "metric_ambiguous"
+    assert service.get_last_query_context()["route_reason"] == "metric evidence is ambiguous"
 
 
 def test_pipeline_single_table_aggregate_dispatch_uses_deterministic_generator(monkeypatch):

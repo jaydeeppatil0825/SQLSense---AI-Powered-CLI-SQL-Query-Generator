@@ -189,7 +189,7 @@ def classify_query_shape(
         return "filtered_query"
     if explicit_metric_count > 1 and _question_requests_multiple_metrics(question):
         return "multi_metric_aggregate"
-    if aggregate_hint and table_count == 1 and has_metric and not has_grouping and not has_join:
+    if aggregate_hint and table_count == 1 and not has_grouping and not has_join:
         return "single_table_aggregate"
     if is_ranking:
         return "ranking_query"
@@ -2427,6 +2427,7 @@ def _fallback_metric_candidates_from_selected_columns(
 
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
+    question_terms = set(_content_terms(question))
     for entry in selected_columns or []:
         table_name = str(entry.get("table") or "").strip()
         column_name = str(entry.get("column") or "").strip()
@@ -2442,6 +2443,8 @@ def _fallback_metric_candidates_from_selected_columns(
         if key in seen:
             continue
         seen.add(key)
+        column_terms = [term for term in _tokenize(column_name) if term not in {"id", "total", "amount", "value"}]
+        matched_terms = [_humanize(column_name)] if column_terms and set(column_terms) <= question_terms else []
         candidates.append(
             {
                 "table": table_name,
@@ -2449,7 +2452,7 @@ def _fallback_metric_candidates_from_selected_columns(
                 "semantic_type": semantic_type or core_semantic_type or "numeric_candidate",
                 "core_semantic_type": core_semantic_type or semantic_type or "numeric_candidate",
                 "score": float(entry.get("confidence") or 0.55),
-                "matched_terms": _content_terms(question),
+                "matched_terms": matched_terms,
                 "source": "selected_columns_fallback",
                 "reason": "metric candidate derived from numeric selected column aggregate fallback",
             }
@@ -2595,7 +2598,11 @@ def _normalize_planner_output(
     missing_evidence = _missing_evidence_list(missing_evidence_flags)
     ambiguities = _ambiguities_for_contract(selected_tables, effective_measure_candidates, dimension_candidates)
     blocking_ambiguities: set[str] = set()
-    if "table_selection" in ambiguities:
+    if (
+        "table_selection" in ambiguities
+        and not join_paths
+        and query_shape in {"unknown", "single_table_list", "single_table_count", "single_table_aggregate", "filtered_query"}
+    ):
         blocking_ambiguities.add("table_selection")
     if (
         query_shape == "single_table_aggregate"

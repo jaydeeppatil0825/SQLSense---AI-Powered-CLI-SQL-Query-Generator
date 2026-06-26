@@ -1478,8 +1478,20 @@ class QuestionService:
         plan = query_context.get("plan") or {}
         route_recommendation = str(query_context.get("route_recommendation") or "").strip()
         query_shape = str(query_context.get("query_shape") or "").strip()
+        complex_sql_plan = query_context.get("complex_sql_plan") or {}
         if not isinstance(intent, dict):
             intent = {"intent_type": str(intent or plan.get("intent") or "").strip().lower()}
+
+        selected_tables = query_context.get("selected_tables") or []
+        if not query_shape:
+            if len(selected_tables) == 1 and intent.get("intent_type") in {"list", "count"} and not query_context.get("join_paths"):
+                query_shape = "single_table_count" if intent.get("intent_type") == "count" else "single_table_list"
+            elif _is_single_table_aggregate_candidate(query_context, route_recommendation):
+                query_shape = "single_table_aggregate"
+            elif isinstance(complex_sql_plan, dict) and str(complex_sql_plan.get("query_shape") or "").strip():
+                query_shape = str(complex_sql_plan.get("query_shape") or "").strip()
+            if query_shape:
+                query_context["query_shape"] = query_shape
 
         route = (
             query_context.get("route")
@@ -1592,6 +1604,15 @@ class QuestionService:
                 f"deterministic SQL generation for {query_shape} is not implemented yet",
             )
             return False, _not_implemented_query_shape_message(query_shape), None, None
+
+        if complex_sql_plan:
+            fallback_shape = query_shape or str(complex_sql_plan.get("query_shape") or "unknown").strip() or "unknown"
+            _set_route(
+                query_context,
+                "deterministic_sql_required",
+                f"deterministic SQL generation for {fallback_shape} is not implemented yet",
+            )
+            return False, _not_implemented_query_shape_message(fallback_shape), None, None
 
         _set_route(
             query_context,

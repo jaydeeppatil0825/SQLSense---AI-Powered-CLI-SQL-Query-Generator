@@ -1555,7 +1555,10 @@ def test_simple_sample_value_filter_fails_cleanly_without_runtime_ai(monkeypatch
 
     assert success is False
     assert sql is None
-    assert "complex deterministic sql generation is not implemented for this query type yet" in message.lower()
+    assert (
+        message
+        == "This query was understood, but deterministic SQL generation for this query shape is not implemented yet: filtered_query."
+    )
     assert service.get_last_query_context()["selected_table_names"][0] == "accounts"
 
 
@@ -2078,4 +2081,6 @@ def test_complex_grouped_amount_empty_from_fails_cleanly_without_join_path(monke
     success, message, sql, error = service.process_question("show open amount by entity", broken_kb, ai_backend="local")
 
     assert success is False
-    _assert_complex_not_implemented(service, message, sql)
+    assert sql is None
+    assert "could not be planned safely" in message.lower()
+    assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
