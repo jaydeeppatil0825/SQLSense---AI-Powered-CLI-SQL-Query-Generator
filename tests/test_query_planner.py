@@ -145,7 +145,7 @@ def test_query_planner_prefers_unique_direct_singular_table_match_for_simple_bro
 
     assert context["selected_table_names"] == ["clients"]
     assert context["join_paths"] == []
-    assert context["route_recommendation"] == "simple_rule_based"
+    assert context["route_recommendation"] == "deterministic_sql_required"
     assert context["query_shape"] == "single_table_list"
     assert context["complex_sql_plan"] == {}
 
@@ -333,6 +333,63 @@ def test_qp6_show_sum_billed_value_from_bills_keeps_single_table_aggregate_contr
     assert context["missing_evidence"] == []
     assert any(candidate["column"] == "billed_value" for candidate in context["metric_candidates"])
     assert context["route_reason"]
+
+
+def test_qp6_show_sum_paid_value_from_bills_keeps_single_table_aggregate_contract():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+                {"name": "paid_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    glossary = generate_business_glossary(knowledge_base, use_ai_enrichment=True)
+
+    context = build_query_context(
+        "show sum paid value from bills",
+        knowledge_base,
+        business_glossary=glossary,
+        use_vector_retrieval=False,
+    )
+
+    assert context["query_shape"] == "single_table_aggregate"
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["can_plan"] is True
+    assert any(candidate["column"] == "paid_value" for candidate in context["metric_candidates"])
+
+
+def test_qp6_show_sum_amount_from_bills_is_cannot_plan_safely_when_metric_is_ambiguous():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+                {"name": "paid_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    glossary = generate_business_glossary(knowledge_base, use_ai_enrichment=True)
+
+    context = build_query_context(
+        "show sum amount from bills",
+        knowledge_base,
+        business_glossary=glossary,
+        use_vector_retrieval=False,
+    )
+
+    assert context["query_shape"] == "single_table_aggregate"
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert context["can_plan"] is False
+    assert "metric_selection" in context["ambiguities"]
+    assert context["route_reason"] == "metric evidence is ambiguous"
 
 
 def test_qp3_multi_metric_aggregate_classification():
@@ -1221,8 +1278,8 @@ def test_qp1_missing_formula_evidence_detection_requires_dynamic_context():
     assert context["missing_evidence_flags"]["missing_formula_evidence"] is False
 
 
-def test_qp1_route_recommendation_simple_rule_based():
-    """Test that simple_rule_based is recommended for strong evidence with single table."""
+def test_qp1_route_recommendation_deterministic_for_single_table_browse():
+    """Test that deterministic_sql_required is recommended for strong evidence with single table."""
     knowledge_base = {
         "accounts": {
             "columns": [
@@ -1243,7 +1300,7 @@ def test_qp1_route_recommendation_simple_rule_based():
         use_vector_retrieval=False,
     )
 
-    assert context["route_recommendation"] == "simple_rule_based"
+    assert context["route_recommendation"] == "deterministic_sql_required"
     assert context["query_shape"] == "single_table_list"
     assert context["complex_sql_plan"] == {}
 
@@ -1280,6 +1337,30 @@ def test_qp1_route_recommendation_deterministic_sql_required():
 
     assert context["route_recommendation"] == "deterministic_sql_required"
     assert context["query_shape"] in {"joined_lookup", "grouped_aggregate"}
+
+
+def test_qp1_active_planner_routes_do_not_emit_simple_or_unsupported_labels():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "bill_name", "type": "VARCHAR(100)", "semantic_type": "name"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+
+    context = build_query_context(
+        "show all bills",
+        knowledge_base,
+        business_glossary={},
+        use_vector_retrieval=False,
+    )
+
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["route_recommendation"] not in {"simple_rule_based", "unsupported_query_shape"}
 
 
 def test_qp1_route_recommendation_cannot_plan_for_weak_evidence():

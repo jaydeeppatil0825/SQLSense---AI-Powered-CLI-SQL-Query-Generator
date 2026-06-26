@@ -91,7 +91,7 @@ def test_show_all_client_singular_uses_rule_based_without_joins():
     context = service.get_last_query_context()
     assert context["selected_table_names"] == ["clients"]
     assert context["join_paths"] == []
-    assert context["route_used"] == "rule-based"
+    assert context["route_used"] == "deterministic_sql_required"
 
 
 def test_count_client_singular_uses_rule_based_without_joins():
@@ -105,7 +105,7 @@ def test_count_client_singular_uses_rule_based_without_joins():
     context = service.get_last_query_context()
     assert context["selected_table_names"] == ["clients"]
     assert context["join_paths"] == []
-    assert context["route_used"] == "rule-based"
+    assert context["route_used"] == "deterministic_sql_required"
 
 
 def test_single_table_total_uses_deterministic_aggregate_without_runtime_ai(monkeypatch):
@@ -135,7 +135,7 @@ def test_single_table_total_uses_deterministic_aggregate_without_runtime_ai(monk
 
     assert success is True
     assert sql == "SELECT SUM(amount_total) AS sum_amount_total FROM bills;"
-    assert service.get_last_query_context()["route_used"] == "deterministic-aggregate"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 @pytest.mark.parametrize(
@@ -177,7 +177,7 @@ def test_single_table_aggregate_variants_use_deterministic_aggregate_without_run
 
     assert success is True
     assert sql == expected_sql
-    assert service.get_last_query_context()["route_used"] == "deterministic-aggregate"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_single_table_aggregate_metric_ambiguity_returns_cannot_plan_safely(monkeypatch):
@@ -291,7 +291,7 @@ def test_pipeline_single_table_aggregate_dispatch_uses_deterministic_generator(m
 
     assert success is True
     assert sql == "SELECT SUM(amount_total) AS sum_amount_total FROM bills;"
-    assert service.get_last_query_context()["route_used"] == "deterministic-aggregate"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_pipeline_blocked_unsafe_route_blocks_sql_generation(monkeypatch):
@@ -378,6 +378,7 @@ def test_runtime_insight_generation_is_disabled():
     [
         ("show sum billed value from bills", "SELECT SUM(billed_value) AS sum_billed_value FROM bills;"),
         ("show total billed value from bills", "SELECT SUM(billed_value) AS sum_billed_value FROM bills;"),
+        ("show sum paid value from bills", "SELECT SUM(paid_value) AS sum_paid_value FROM bills;"),
         ("average billed value from bills", "SELECT AVG(billed_value) AS avg_billed_value FROM bills;"),
         ("highest paid value from bills", "SELECT MAX(paid_value) AS max_paid_value FROM bills;"),
         ("lowest billed value from bills", "SELECT MIN(billed_value) AS min_billed_value FROM bills;"),
@@ -402,7 +403,7 @@ def test_clear_metric_single_table_aggregates_dispatch_deterministically(questio
 
     assert success is True
     assert sql == expected_sql
-    assert service.get_last_query_context()["route_used"] == "deterministic-aggregate"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_sum_amount_from_bills_stays_ambiguous_without_sql():
@@ -428,3 +429,46 @@ def test_sum_amount_from_bills_stays_ambiguous_without_sql():
     assert "billed_value" in message
     assert "paid_value" in message
     assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
+
+
+def test_grouped_aggregate_shape_returns_not_implemented_capability_message():
+    knowledge_base = {
+        "partners": {
+            "columns": [
+                {"name": "partner_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "partner_name", "type": "VARCHAR(100)", "nullable": False, "semantic_type": "name"},
+            ],
+            "primary_keys": ["partner_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "partner_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [
+                {"column": "partner_id", "referenced_table": "partners", "referenced_column": "partner_id"},
+            ],
+            "relationships": [],
+        },
+    }
+    service = QuestionService()
+
+    success, message, sql, error = service.process_question(
+        "total billed value by partner",
+        knowledge_base,
+        ai_backend="local",
+    )
+
+    assert success is False
+    assert sql is None
+    assert message == (
+        "This query was understood, but deterministic SQL generation for this query shape "
+        "is not implemented yet: grouped_aggregate."
+    )
+    assert service.get_last_query_context()["route_recommendation"] == "deterministic_sql_required"
+    assert service.get_last_query_context()["query_shape"] == "grouped_aggregate"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"

@@ -268,8 +268,8 @@ def _context(
 
 def _assert_complex_not_implemented(service, message, sql):
     assert sql is None
-    assert "complex deterministic sql generation is not implemented for this query type yet" in message.lower()
-    assert service.get_last_query_context()["route_used"] == "complex_deterministic_not_ready"
+    assert "deterministic sql generation for this query shape is not implemented yet" in message.lower()
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_simple_table_listing_uses_rule_based(monkeypatch):
@@ -289,7 +289,7 @@ def test_simple_table_listing_uses_rule_based(monkeypatch):
 
     assert success is True
     assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_pipeline_context_bypasses_duplicate_context_build(monkeypatch):
@@ -328,18 +328,18 @@ def test_pipeline_context_bypasses_duplicate_context_build(monkeypatch):
 
     assert success is True
     assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
     assert service.get_last_query_context()["pipeline_context"] == pipeline_context
     assert isinstance(service.get_last_query_context().get("retrieved_context"), dict)
 
 
-def test_pipeline_route_needs_clarification_blocks_sql_generation(monkeypatch):
+def test_pipeline_route_cannot_plan_safely_for_ambiguous_tables_blocks_sql_generation(monkeypatch):
     service = QuestionService()
     pipeline_context = {
         "normalized_question": "show entries",
-        "route_recommendation": "needs_clarification",
+        "route_recommendation": "cannot_plan_safely",
         "query_context": {
-            "route_recommendation": "needs_clarification",
+            "route_recommendation": "cannot_plan_safely",
             "plan": {"question": "show entries", "intent": "list"},
             "selected_tables": [
                 {"table": "alpha_records", "confidence": 0.61},
@@ -374,7 +374,7 @@ def test_pipeline_route_needs_clarification_blocks_sql_generation(monkeypatch):
     assert success is False
     assert sql is None
     assert "ambiguous" in message.lower()
-    assert service.get_last_query_context()["route_used"] == "fallback-failed"
+    assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
 
 
 def test_pipeline_route_cannot_plan_safely_blocks_sql_generation(monkeypatch):
@@ -415,7 +415,7 @@ def test_pipeline_route_cannot_plan_safely_blocks_sql_generation(monkeypatch):
     assert success is False
     assert sql is None
     assert "could not be planned safely" in message.lower()
-    assert service.get_last_query_context()["route_used"] == "fallback-failed"
+    assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
 
 
 def test_simple_generator_with_current_signature_uses_rule_based(monkeypatch):
@@ -434,7 +434,7 @@ def test_simple_generator_with_current_signature_uses_rule_based(monkeypatch):
 
     assert success is True
     assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_count_query_uses_rule_based(monkeypatch):
@@ -450,7 +450,7 @@ def test_count_query_uses_rule_based(monkeypatch):
 
     assert success is True
     assert "COUNT(*)" in sql
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_show_all_clients_can_be_rule_based(monkeypatch):
@@ -475,7 +475,7 @@ def test_show_all_clients_can_be_rule_based(monkeypatch):
 
     assert success is True
     assert "FROM clients" in sql
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_count_clients_can_be_rule_based(monkeypatch):
@@ -500,7 +500,7 @@ def test_count_clients_can_be_rule_based(monkeypatch):
 
     assert success is True
     assert "COUNT(*)" in sql
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 CLIENTS_RELATIONSHIP_KB = {
@@ -564,7 +564,7 @@ def test_show_all_clients_uses_rule_based_without_join_or_ai(monkeypatch):
     assert "JOIN" not in sql.upper()
     assert service.get_last_query_context()["selected_table_names"] == ["clients"]
     assert service.get_last_query_context()["join_paths"] == []
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_count_clients_uses_clients_only_without_join(monkeypatch):
@@ -581,7 +581,7 @@ def test_count_clients_uses_clients_only_without_join(monkeypatch):
     assert sql == "SELECT COUNT(*) AS total_clients FROM clients;"
     assert service.get_last_query_context()["selected_table_names"] == ["clients"]
     assert service.get_last_query_context()["join_paths"] == []
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_top_5_clients_by_deal_value_keeps_join_path_for_deterministic_sql():
@@ -643,7 +643,7 @@ def test_show_all_agreements_uses_rule_based_and_succeeds(monkeypatch):
     assert success is True
     assert "FROM agreements" in sql
     assert "SELECT agreement_id, agreement_name" in sql
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_count_agreements_uses_rule_based_and_succeeds(monkeypatch):
@@ -668,18 +668,18 @@ def test_count_agreements_uses_rule_based_and_succeeds(monkeypatch):
 
     assert success is True
     assert "COUNT(*)" in sql
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
-def test_pipeline_ai_route_still_allows_rule_based_for_strong_simple_list(monkeypatch):
+def test_pipeline_deterministic_route_allows_strong_simple_list(monkeypatch):
     service = QuestionService()
     pipeline_context = {
         "normalized_question": "show all agreements",
-        "route_recommendation": "ai_sql_required",
+        "route_recommendation": "deterministic_sql_required",
         "intent": {"intent_type": "list"},
         "retrieved_context": {},
         "query_context": {
-            "route_recommendation": "ai_sql_required",
+            "route_recommendation": "deterministic_sql_required",
             "plan": {
                 "question": "show all agreements",
                 "intent": "list",
@@ -765,7 +765,7 @@ def test_pipeline_ai_route_still_allows_rule_based_for_strong_simple_list(monkey
 
     assert success is True
     assert "FROM agreements" in sql
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_simple_limit_query_uses_rule_based(monkeypatch):
@@ -783,7 +783,7 @@ def test_simple_limit_query_uses_rule_based(monkeypatch):
 
     assert success is True
     assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 10;"
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_simple_aggregate_query_returns_clean_not_implemented(monkeypatch):
@@ -1400,7 +1400,7 @@ def test_simple_list_query_routes_rule_based_despite_glossary_noise(monkeypatch)
 
     assert success is True
     assert sql == "SELECT record_id, record_name FROM alpha_records LIMIT 50;"
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_build_query_context_keeps_plain_table_browse_metric_free():
@@ -1586,7 +1586,7 @@ def test_top_n_browse_currently_uses_rule_based_generator(monkeypatch):
 
     assert success is True
     assert sql == "SELECT account_id, account_label FROM accounts LIMIT 5;"
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_single_table_total_uses_deterministic_aggregate(monkeypatch):
@@ -1617,7 +1617,7 @@ def test_single_table_total_uses_deterministic_aggregate(monkeypatch):
 
     assert success is True
     assert sql == "SELECT SUM(spent_value) AS sum_spent_value FROM operating_costs;"
-    assert service.get_last_query_context()["route_used"] == "deterministic-aggregate"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
 def test_top_vector_table_beats_generic_glossary_aliases_for_simple_list():
@@ -1743,7 +1743,7 @@ def test_show_all_client_routes_rule_based_without_ai(monkeypatch):
 
     assert success is True
     assert sql == "SELECT customer_id, customer_name FROM customer_registry LIMIT 50;"
-    assert service.get_last_query_context()["route_used"] == "rule-based"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
     assert service.get_last_query_context()["selected_table_names"] == ["customer_registry"]
 
 

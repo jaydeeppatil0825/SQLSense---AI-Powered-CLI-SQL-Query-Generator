@@ -61,7 +61,7 @@ def test_query_pipeline_returns_structured_debug_fields_without_calling_question
             "intent": "list",
             "question_terms": ["show", "all", "accounts"],
         },
-        "route_recommendation": "simple_rule_based",
+        "route_recommendation": "deterministic_sql_required",
         "selected_table_names": ["accounts"],
         "selected_columns": [
             {"table": "accounts", "column": "account_label", "confidence": 0.91},
@@ -78,7 +78,7 @@ def test_query_pipeline_returns_structured_debug_fields_without_calling_question
             "relationships": [],
             "glossary_terms": [],
         },
-        "route_used": "rule-based",
+        "route_used": "deterministic_sql_required",
         "query_shape": "single_table_list",
         "route_reason": "single-table deterministic browse/count query",
         "can_plan": True,
@@ -103,7 +103,7 @@ def test_query_pipeline_returns_structured_debug_fields_without_calling_question
     assert result.plan["intent"] == "list"
     assert result.generated_sql is None
     assert result.validation_result == {}
-    assert result.route == "simple_rule_based"
+    assert result.route == "deterministic_sql_required"
     assert result.query_shape == "single_table_list"
     assert result.route_reason == "single-table deterministic browse/count query"
     assert result.can_plan is True
@@ -114,7 +114,7 @@ def test_query_pipeline_returns_structured_debug_fields_without_calling_question
     assert pipeline_context["intent"] == built_intent
     assert pipeline_context["retrieved_context"] == retrieved_context
     assert pipeline_context["plan"]["intent"] == "list"
-    assert pipeline_context["route_recommendation"] == "simple_rule_based"
+    assert pipeline_context["route_recommendation"] == "deterministic_sql_required"
     assert pipeline_context["complex_sql_plan"] == {}
     assert pipeline_context["formula_evidence"] == []
     assert pipeline_context["evidence_sources"] == ["kb_identifier"]

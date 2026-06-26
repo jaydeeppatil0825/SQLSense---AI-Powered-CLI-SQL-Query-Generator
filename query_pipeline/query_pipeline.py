@@ -112,7 +112,7 @@ class QueryPipeline:
         route_reason = str(query_context.get("route_reason") or "").strip()
         query_shape = str(query_context.get("query_shape") or "unknown").strip()
         can_plan = bool(query_context.get("can_plan"))
-        success = route_recommendation in {"simple_rule_based", "deterministic_sql_required"}
+        success = route_recommendation == "deterministic_sql_required"
         message = self._pipeline_message(route_recommendation, route_reason)
         error = None if success else message
 
@@ -228,16 +228,10 @@ class QueryPipeline:
         return deduped
 
     def _pipeline_message(self, route_recommendation: str, route_reason: str) -> str:
-        if route_recommendation == "simple_rule_based":
-            return "Query planned successfully for simple deterministic SQL generation."
         if route_recommendation == "deterministic_sql_required":
             return "Query planned successfully for deterministic SQL generation."
         if route_recommendation == "blocked_unsafe":
             return "Unsafe request blocked before SQL generation."
-        if route_recommendation == "unsupported_query_shape":
-            if route_reason:
-                return f"Planner identified an unsupported query shape: {route_reason}"
-            return "Planner identified an unsupported deterministic query shape."
         if route_reason:
             return f"Planner could not route the question safely: {route_reason}"
         return "Planner could not route the question safely."

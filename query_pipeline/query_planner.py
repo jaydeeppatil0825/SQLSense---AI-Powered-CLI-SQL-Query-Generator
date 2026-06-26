@@ -189,6 +189,8 @@ def classify_query_shape(
         return "filtered_query"
     if explicit_metric_count > 1 and _question_requests_multiple_metrics(question):
         return "multi_metric_aggregate"
+    if aggregate_hint and table_count == 1 and has_metric and not has_grouping and not has_join:
+        return "single_table_aggregate"
     if is_ranking:
         return "ranking_query"
     if has_grouping and has_metric:
@@ -197,8 +199,6 @@ def classify_query_shape(
         return "joined_lookup"
     if is_count and table_count == 1:
         return "single_table_count"
-    if aggregate_hint and table_count == 1 and has_metric:
-        return "single_table_aggregate"
     if planner_intent == "list" and table_count == 1:
         return "single_table_list"
     return "unknown"
@@ -1996,6 +1996,9 @@ def _compute_route_recommendation(
     has_formula_gap = bool(missing_evidence.get("missing_formula_evidence"))
     is_complex_shape = bool(query_shape)
 
+    if str(query_shape or "").strip() == "blocked_unsafe":
+        return "blocked_unsafe"
+
     if (
         missing_evidence.get("missing_join_path")
         or missing_evidence.get("missing_formula_evidence")
@@ -2007,26 +2010,8 @@ def _compute_route_recommendation(
     if confidence < 0.3:
         return "cannot_plan_safely"
 
-    if confidence < 0.5:
-        return "needs_clarification"
-
-    has_single_direct_table_match = bool(
-        len(selected_tables) == 1
-        and "table name matches the question directly"
-        in str((selected_tables[0] or {}).get("reason") or "").lower()
-    )
-
-    if (
-        (confidence >= 0.7 or (has_single_direct_table_match and confidence >= 0.55))
-        and len(selected_tables) == 1
-        and intent in {"list", "count"}
-        and not has_grouping
-        and not is_complex_shape
-        and not has_formula_gap
-        and not missing_evidence.get("missing_metric")
-        and not missing_evidence.get("missing_dimension")
-    ):
-        return "simple_rule_ok"
+    if not selected_tables:
+        return "cannot_plan_safely"
 
     if (
         is_complex_shape
@@ -2036,9 +2021,9 @@ def _compute_route_recommendation(
         or missing_evidence.get("missing_metric")
         or intent not in {"list", "count"}
     ):
-        return "ai_sql_required"
+        return "deterministic_sql_required"
 
-    return "ai_sql_required"
+    return "deterministic_sql_required"
 
 
 def _derive_complex_query_shape(
@@ -2234,15 +2219,16 @@ def _route_recommendation_from_contract(
     confidence: float,
     missing_evidence_flags: dict[str, Any],
     selected_tables: list[dict[str, Any]],
+    ambiguities: list[str],
     can_plan: bool,
 ) -> tuple[str, str]:
-    has_direct_match = bool(
-        len(selected_tables) == 1
-        and "question directly" in str((selected_tables[0] or {}).get("reason") or "").lower()
-    )
     if query_shape == "blocked_unsafe":
         return "blocked_unsafe", "question contains blocked SQL operation wording"
 
+    if "table_selection" in ambiguities:
+        return "cannot_plan_safely", "table evidence is missing or ambiguous"
+    if "metric_selection" in ambiguities:
+        return "cannot_plan_safely", "metric evidence is ambiguous"
     if missing_evidence_flags.get("missing_table"):
         return "cannot_plan_safely", "table evidence is missing or ambiguous"
     if missing_evidence_flags.get("missing_join_path"):
@@ -2257,15 +2243,11 @@ def _route_recommendation_from_contract(
         return "cannot_plan_safely", "filter evidence is missing"
     if confidence < 0.3 or not selected_tables:
         return "cannot_plan_safely", "planner confidence is too low"
-    if query_shape in {"single_table_list", "single_table_count"}:
-        if confidence >= 0.7 or (has_direct_match and confidence >= 0.55):
-            return "simple_rule_based", "single-table deterministic browse/count query"
-        return "cannot_plan_safely", "single-table evidence is too weak for deterministic browse/count routing"
     if query_shape == "unknown":
         return "cannot_plan_safely", "planner could not derive a supported query shape with enough confidence"
     if not can_plan:
-        return "unsupported_query_shape", f"{query_shape} is not implemented for deterministic SQL generation yet"
-    return "deterministic_sql_required", f"{query_shape} requires deterministic SQL generation"
+        return "cannot_plan_safely", f"planner could not safely route query shape '{query_shape}' from current evidence"
+    return "deterministic_sql_required", f"{query_shape} can be generated deterministically from current evidence"
 
 
 def _required_evidence_for_query_shape(query_shape: str) -> list[str]:
@@ -2612,16 +2594,27 @@ def _normalize_planner_output(
     required_evidence = _required_evidence_for_query_shape(query_shape)
     missing_evidence = _missing_evidence_list(missing_evidence_flags)
     ambiguities = _ambiguities_for_contract(selected_tables, effective_measure_candidates, dimension_candidates)
+    blocking_ambiguities: set[str] = set()
+    if "table_selection" in ambiguities:
+        blocking_ambiguities.add("table_selection")
+    if (
+        query_shape == "single_table_aggregate"
+        and "metric_selection" in ambiguities
+        and _explicit_metric_candidate_count(question, effective_measure_candidates) != 1
+    ):
+        blocking_ambiguities.add("metric_selection")
     can_plan = bool(
         selected_table_names
         and query_shape not in {"unknown", "blocked_unsafe"}
         and not missing_evidence
+        and not blocking_ambiguities
     )
     route_recommendation, route_reason = _route_recommendation_from_contract(
         query_shape=query_shape,
         confidence=float(confidence or 0.0),
         missing_evidence_flags=missing_evidence_flags,
         selected_tables=selected_tables,
+        ambiguities=list(blocking_ambiguities),
         can_plan=can_plan,
     )
 
