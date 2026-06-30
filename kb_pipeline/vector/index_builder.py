@@ -39,6 +39,7 @@ class VectorIndexBuilder:
         """
         documents = []
         source_context = source_context or {}
+        indexed_relationships: set[tuple[str, str, str, str]] = set()
         
         for table_name, table_data in knowledge_base.items():
             # Add table document
@@ -59,6 +60,17 @@ class VectorIndexBuilder:
             
             # Add relationship documents
             for relationship in table_data.get("relationships", []):
+                if relationship.get("direction") == "incoming" or relationship.get("safe_for_planner") is False:
+                    continue
+                signature = (
+                    str(relationship.get("from_table") or table_name),
+                    str(relationship.get("from_column") or ""),
+                    str(relationship.get("to_table") or ""),
+                    str(relationship.get("to_column") or ""),
+                )
+                if not all(signature) or signature in indexed_relationships:
+                    continue
+                indexed_relationships.add(signature)
                 rel_doc = self._create_relationship_document(table_name, relationship, source_context=source_context)
                 documents.append(rel_doc)
 
@@ -363,16 +375,22 @@ class VectorIndexBuilder:
         to_column = relationship.get("to_column", "")
         confidence = relationship.get("confidence", 0.0)
         reason = relationship.get("reason", "")
+        relationship_type = relationship.get("relationship_type", "unknown")
+        evidence = list(relationship.get("evidence", []) or [])
+        evidence_reasons = list(relationship.get("evidence_reasons", []) or [])
         
         # Build searchable text
         text_parts = [
             f"Relationship: {from_table}.{from_column} to {to_table}.{to_column}",
             f"Direction: {direction}",
+            f"Type: {relationship_type}",
             f"Confidence: {confidence}",
         ]
         
         if reason:
             text_parts.append(f"Reason: {reason}")
+        if evidence:
+            text_parts.append(f"Evidence: {', '.join(str(item) for item in evidence)}")
         
         text = " ".join(text_parts)
         
@@ -389,6 +407,13 @@ class VectorIndexBuilder:
             "direction": direction,
             "confidence": confidence,
             "description": reason,
+            "relationship_type": relationship_type,
+            "relationship_source": relationship.get("source", ""),
+            "evidence": evidence,
+            "evidence_reasons": evidence_reasons,
+            "safe_for_planner": bool(relationship.get("safe_for_planner", True)),
+            "is_inferred": bool(relationship.get("is_inferred", False)),
+            "is_fallback": bool(relationship.get("is_fallback", False)),
             "join_condition": relationship.get("join_condition"),
             "table_name": table_name,
         }

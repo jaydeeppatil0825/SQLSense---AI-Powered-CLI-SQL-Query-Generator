@@ -27,6 +27,7 @@ CORE_SEMANTIC_TYPES = {
 
 _MEASURE_SEMANTIC_TYPES = {"money", "quantity", "percentage"}
 _DIMENSION_SEMANTIC_TYPES = {"status", "name", "text", "code", "reference"}
+FALLBACK_RELATIONSHIP_MIN_CONFIDENCE = 0.85
 
 
 def _normalize(text: str) -> str:
@@ -442,8 +443,42 @@ def _append_relationship(target: list[dict[str, Any]], relationship: dict[str, A
     target.append(dict(relationship))
 
 
-def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
+def real_foreign_key_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return canonical relationship evidence for real database FK constraints."""
     relationships: list[dict[str, Any]] = []
+    for table_name, table_data in (schema_data or {}).items():
+        for foreign_key in table_data.get("foreign_keys", []):
+            if foreign_key.get("inferred"):
+                continue
+            referenced_table = foreign_key.get("referenced_table") or foreign_key.get("to_table")
+            referenced_column = foreign_key.get("referenced_column") or foreign_key.get("to_column")
+            from_column = foreign_key.get("column") or foreign_key.get("from_column")
+            if not referenced_table or not referenced_column or not from_column:
+                continue
+            relationships.append(
+                {
+                    "from_table": table_name,
+                    "from_column": from_column,
+                    "to_table": referenced_table,
+                    "to_column": referenced_column,
+                    "direction": "many-to-one",
+                    "relationship_type": "foreign_key",
+                    "confidence": 1.0,
+                    "reason": "Database metadata declares this foreign key constraint.",
+                    "evidence": ["foreign_key_constraint"],
+                    "evidence_reasons": ["The database schema contains an explicit foreign key constraint."],
+                    "safe_for_planner": True,
+                    "is_inferred": False,
+                    "is_fallback": False,
+                    "source": "database_metadata",
+                }
+            )
+    return relationships
+
+
+def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Detect real and safe fallback edges during KB construction only."""
+    relationships = real_foreign_key_relationships(schema_data)
     table_names = set((schema_data or {}).keys())
 
     def _column_map(table_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -465,15 +500,19 @@ def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
             return "boolean"
         return "unknown"
 
-    def _is_primary_key_like(column_name: str, table_data: dict[str, Any], column: dict[str, Any] | None = None) -> bool:
+    def _has_key_evidence(column_name: str, table_data: dict[str, Any], column: dict[str, Any] | None = None) -> bool:
         if column_name in set(table_data.get("primary_keys", [])):
-            return True
-        normalized_name = _normalize_identifier(column_name)
-        if normalized_name == "id" or normalized_name.endswith("_id"):
             return True
         if column:
             structural = column.get("structural_facts")
             if isinstance(structural, dict) and structural.get("is_primary_key"):
+                return True
+            if column.get("unique") is True:
+                return True
+            profile = column_profile_facts(column)
+            non_null_count = int(profile.get("non_null_count") or 0)
+            unique_count = int(profile.get("unique_count") or 0)
+            if non_null_count > 0 and unique_count == non_null_count:
                 return True
         return False
 
@@ -486,26 +525,6 @@ def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
         if not overlap:
             return 0.0
         return round(len(overlap) / max(min(len(left_samples), len(right_samples)), 1), 4)
-
-    for table_name, table_data in (schema_data or {}).items():
-        for foreign_key in table_data.get("foreign_keys", []):
-            referenced_table = foreign_key.get("referenced_table")
-            referenced_column = foreign_key.get("referenced_column")
-            from_column = foreign_key.get("column")
-            if not referenced_table or not referenced_column or not from_column:
-                continue
-            relationships.append(
-                {
-                    "from_table": table_name,
-                    "from_column": from_column,
-                    "to_table": referenced_table,
-                    "to_column": referenced_column,
-                    "direction": "many-to-one",
-                    "confidence": 0.99,
-                    "reason": "Detected from a real foreign key constraint.",
-                    "source": "foreign_key",
-                }
-            )
 
     for table_name, table_data in (schema_data or {}).items():
         primary_keys = set(table_data.get("primary_keys", []))
@@ -547,42 +566,41 @@ def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
 
             source_column = table_columns.get(column_name, column)
             target_column_data = target_columns.get(target_column, {})
-            compatible_type = (
-                _column_type_family(source_column.get("type")) == "unknown"
-                or _column_type_family(target_column_data.get("type")) == "unknown"
-                or _column_type_family(source_column.get("type")) == _column_type_family(target_column_data.get("type"))
-            )
-            target_pk_like = _is_primary_key_like(target_column, target_table_data, target_column_data)
+            source_type_family = _column_type_family(source_column.get("type"))
+            target_type_family = _column_type_family(target_column_data.get("type"))
+            compatible_type = source_type_family != "unknown" and source_type_family == target_type_family
+            target_key_evidence = _has_key_evidence(target_column, target_table_data, target_column_data)
             overlap_score = _sample_overlap(source_column, target_column_data)
 
             evidence = ["naming_pattern"]
-            confidence = 0.58
+            confidence = 0.56
             if compatible_type:
                 evidence.append("compatible_data_type")
-                confidence += 0.12
-            if target_pk_like:
-                evidence.append("target_primary_key_like")
-                confidence += 0.12
+                confidence += 0.15
+            if target_key_evidence:
+                evidence.append("target_key_or_unique")
+                confidence += 0.15
             if overlap_score >= 0.5:
                 evidence.append("strong_sample_overlap")
-                confidence += 0.14
+                confidence += 0.08
             elif overlap_score > 0.0:
                 evidence.append("sample_overlap")
-                confidence += 0.08
+                confidence += 0.04
 
-            if not (compatible_type and target_pk_like):
+            if not (compatible_type and target_key_evidence):
                 continue
-            confidence = round(min(confidence, 0.94), 2)
-            if confidence < 0.78:
+            confidence = round(min(confidence, 0.95), 2)
+            if confidence < FALLBACK_RELATIONSHIP_MIN_CONFIDENCE:
                 continue
 
             evidence_reasons = {
                 "naming_pattern": "neutral *_id naming pattern aligns with the target table",
                 "compatible_data_type": "source and target column SQL types are compatible",
-                "target_primary_key_like": "target column is primary-key-like",
+                "target_key_or_unique": "target column is a declared primary key or profile-proven unique",
                 "strong_sample_overlap": "sample values overlap strongly between the columns",
                 "sample_overlap": "sample values overlap between the columns",
             }
+            reason_details = [evidence_reasons[item] for item in evidence]
             relationships.append(
                 {
                     "from_table": table_name,
@@ -590,14 +608,15 @@ def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
                     "to_table": matched_table,
                     "to_column": target_column,
                     "direction": "many-to-one",
+                    "relationship_type": "inferred",
                     "confidence": confidence,
-                    "reason": "Fallback relationship inferred from " + ", ".join(
-                        evidence_reasons[item] for item in evidence
-                    ) + ".",
+                    "reason": "Fallback relationship inferred during KB build from " + ", ".join(reason_details) + ".",
                     "evidence": evidence,
+                    "evidence_reasons": reason_details,
+                    "safe_for_planner": True,
                     "is_inferred": True,
                     "is_fallback": True,
-                    "source": "inferred_by_naming",
+                    "source": "kb_build_inference",
                 }
             )
 
@@ -767,11 +786,13 @@ __all__ = [
     "column_sample_values",
     "column_structural_facts",
     "detect_relationships",
+    "FALLBACK_RELATIONSHIP_MIN_CONFIDENCE",
     "enrich_knowledge_base_for_erp",
     "enrich_knowledge_base_schema_facts",
     "CORE_SEMANTIC_TYPES",
     "is_core_semantic_type",
     "resolved_semantic_type",
+    "real_foreign_key_relationships",
     "sanitize_business_purpose",
     "sanitize_short_text",
     "summarize_knowledge_base",

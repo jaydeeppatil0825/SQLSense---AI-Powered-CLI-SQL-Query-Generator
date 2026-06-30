@@ -134,7 +134,9 @@ def test_relationships_are_attached_to_both_related_tables():
     assert any(
         relationship["from_table"] == "purchase_records"
         and relationship["to_table"] == "supplier_directory"
-        and relationship["source"] == "inferred_by_naming"
+        and relationship["source"] == "kb_build_inference"
+        and relationship["relationship_type"] == "inferred"
+        and relationship["safe_for_planner"] is True
         for relationship in purchase_relationships
     )
     assert any(

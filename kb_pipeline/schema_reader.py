@@ -4,22 +4,6 @@ from __future__ import annotations
 
 from sqlalchemy import MetaData
 
-from kb_pipeline.schema_facts import detect_relationships
-
-
-def _relationship_exists(
-    foreign_keys: list[dict],
-    column: str,
-    referenced_table: str,
-    referenced_column: str,
-) -> bool:
-    return any(
-        foreign_key.get("column") == column
-        and foreign_key.get("referenced_table") == referenced_table
-        and foreign_key.get("referenced_column") == referenced_column
-        for foreign_key in foreign_keys
-    )
-
 
 def read_database_schema(engine) -> dict:
     """
@@ -53,27 +37,5 @@ def read_database_schema(engine) -> dict:
                 for foreign_key in table.foreign_keys
             ],
         }
-
-    for relationship in detect_relationships(schema_data):
-        if relationship.get("source") == "foreign_key":
-            continue
-
-        foreign_keys = schema_data[relationship["from_table"]]["foreign_keys"]
-        if _relationship_exists(
-            foreign_keys,
-            relationship["from_column"],
-            relationship["to_table"],
-            relationship["to_column"],
-        ):
-            continue
-
-        foreign_keys.append(
-            {
-                "column": relationship["from_column"],
-                "referenced_table": relationship["to_table"],
-                "referenced_column": relationship["to_column"],
-                "inferred": True,
-            }
-        )
 
     return schema_data

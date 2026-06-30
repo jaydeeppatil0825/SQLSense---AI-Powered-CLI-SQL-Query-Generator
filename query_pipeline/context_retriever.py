@@ -14,6 +14,7 @@ import re
 from typing import Any, Dict, Optional
 
 from kb_pipeline.schema_facts import (
+    FALLBACK_RELATIONSHIP_MIN_CONFIDENCE,
     column_ai_metadata,
     column_business_description,
     column_business_terms,
@@ -28,6 +29,19 @@ from utils.logger import get_logger
 from kb_pipeline.relationship_graph import build_relationship_graph, find_all_possible_join_paths
 
 logger = get_logger()
+
+
+def _relationship_is_safe(relationship: Dict[str, Any]) -> bool:
+    if relationship.get("safe_for_planner") is False:
+        return False
+    is_fallback = bool(
+        relationship.get("is_fallback")
+        or relationship.get("is_inferred")
+        or relationship.get("relationship_type") in {"inferred", "fallback"}
+    )
+    if not is_fallback:
+        return True
+    return float(relationship.get("confidence") or 0.0) >= FALLBACK_RELATIONSHIP_MIN_CONFIDENCE
 
 
 def retrieve_context(
@@ -612,7 +626,7 @@ def _vector_context(normalized_question: str, vector_retriever: Optional[Any]) -
                 "source": "vector",
             }
             for entry in relationships
-            if entry.get("from_table") and entry.get("to_table")
+            if entry.get("from_table") and entry.get("to_table") and _relationship_is_safe(entry)
         ],
         "retrieval_sources": ["vector"] if any([table_details, columns, glossary_terms, relationships]) else [],
     }
@@ -753,7 +767,7 @@ def _normalized_vector_context(
                 "source": "vector",
             }
             for entry in relationships
-            if entry.get("from_table") and entry.get("to_table")
+            if entry.get("from_table") and entry.get("to_table") and _relationship_is_safe(entry)
         ],
         "candidate_metrics": candidate_metrics,
         "candidate_dimensions": candidate_dimensions,
@@ -823,6 +837,8 @@ def _relationship_edges(knowledge_base: Dict[str, Any]) -> list[Dict[str, Any]]:
     seen = set()
     for table_name, table_data in knowledge_base.items():
         for foreign_key in table_data.get("foreign_keys", []) or []:
+            if foreign_key.get("inferred"):
+                continue
             from_column = foreign_key.get("column") or foreign_key.get("from_column")
             to_table = foreign_key.get("referenced_table") or foreign_key.get("to_table")
             to_column = foreign_key.get("referenced_column") or foreign_key.get("to_column")
@@ -837,10 +853,15 @@ def _relationship_edges(knowledge_base: Dict[str, Any]) -> list[Dict[str, Any]]:
                     "to_table": to_table,
                     "to_column": to_column,
                     "join_condition": f"{table_name}.{from_column} = {to_table}.{to_column}",
-                    "source": "fk_relationship",
+                    "source": "database_metadata",
+                    "relationship_type": "foreign_key",
+                    "confidence": 1.0,
+                    "safe_for_planner": True,
                 }
             )
         for relationship in table_data.get("relationships", []) or []:
+            if relationship.get("direction") == "incoming" or not _relationship_is_safe(relationship):
+                continue
             from_table = relationship.get("from_table") or table_name
             from_column = relationship.get("from_column")
             to_table = relationship.get("to_table")
@@ -856,7 +877,10 @@ def _relationship_edges(knowledge_base: Dict[str, Any]) -> list[Dict[str, Any]]:
                     "to_table": to_table,
                     "to_column": to_column,
                     "join_condition": relationship.get("join_condition") or f"{from_table}.{from_column} = {to_table}.{to_column}",
-                    "source": "relationship_metadata",
+                    "source": relationship.get("source", "relationship_metadata"),
+                    "relationship_type": relationship.get("relationship_type", "unknown"),
+                    "confidence": relationship.get("confidence", 0.0),
+                    "safe_for_planner": True,
                 }
             )
     return edges
@@ -883,14 +907,14 @@ def _match_relationships(
                     "score": support,
                     "evidence_sources": _unique(
                         [
-                            "fk_relationship_context" if edge.get("source") == "fk_relationship" else "relationship_context",
+                            "fk_relationship_context" if edge.get("relationship_type") == "foreign_key" else "relationship_context",
                             "matched_table_support",
                         ]
                     ),
                 }
             )
     for edge in vector_relationships:
-        if not edge.get("from_table") or not edge.get("to_table"):
+        if not edge.get("from_table") or not edge.get("to_table") or not _relationship_is_safe(edge):
             continue
         support = round(score_by_table.get(str(edge.get("from_table")), 0.0) + score_by_table.get(str(edge.get("to_table")), 0.0), 4)
         relationships.append(
@@ -983,7 +1007,7 @@ def _possible_join_paths(knowledge_base: Dict[str, Any], matched_tables: list[Di
     
     # Sort by: length (shorter first), total_confidence (higher first), FK preference
     def path_sort_key(item: Dict[str, Any]) -> tuple:
-        fk_count = sum(1 for source in item.get("edge_sources", []) if source == "foreign_key")
+        fk_count = sum(1 for source in item.get("edge_sources", []) if source in {"database_metadata", "foreign_key"})
         return (
             item["length"],
             -item.get("support_score", 0.0),
@@ -1009,6 +1033,8 @@ def _possible_join_paths_from_relationships(
         for table_name in selected_tables
     }
     for relationship in relationships:
+        if not _relationship_is_safe(relationship):
+            continue
         from_table = str(relationship.get("from_table") or "").strip()
         to_table = str(relationship.get("to_table") or "").strip()
         from_column = str(relationship.get("from_column") or "").strip()

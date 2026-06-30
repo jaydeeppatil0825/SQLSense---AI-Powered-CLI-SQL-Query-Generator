@@ -34,6 +34,8 @@ _JSON_METADATA_FIELDS = {
     "profile_facts",
     "planner_roles",
     "sources",
+    "evidence",
+    "evidence_reasons",
 }
 
 
@@ -458,6 +460,8 @@ class ChromaStore:
         seen: set[tuple[str, str, str, str]] = set()
         relationships: list[dict[str, Any]] = []
         for entry in self.search_relationships(query, top_k=top_k):
+            if entry.get("safe_for_planner") is False:
+                continue
             signature = (
                 _safe_text(entry.get("from_table")),
                 _safe_text(entry.get("from_column")),

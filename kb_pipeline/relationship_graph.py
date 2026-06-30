@@ -3,8 +3,9 @@ semantic/relationship_graph.py
 ==============================
 Dynamic relationship graph and BFS join path finding.
 
-Builds relationship graph from runtime database evidence and uses BFS
-to find shortest valid join paths between tables.
+Builds a graph from persisted KB relationship evidence and uses BFS to find
+shortest valid join paths between tables. Fallback discovery is opt-in for KB
+construction and never runs through the default runtime path.
 
 No hardcoding of DB/table/column names - uses only structural evidence.
 """
@@ -14,8 +15,53 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
+from kb_pipeline.schema_facts import (
+    FALLBACK_RELATIONSHIP_MIN_CONFIDENCE,
+    detect_relationships,
+    real_foreign_key_relationships,
+)
 
-def build_relationship_graph(schema_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+
+def _persisted_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
+    relationships = real_foreign_key_relationships(schema_data)
+    seen = {
+        (
+            item.get("from_table"),
+            item.get("from_column"),
+            item.get("to_table"),
+            item.get("to_column"),
+        )
+        for item in relationships
+    }
+    for table_name, table_data in (schema_data or {}).items():
+        for raw in table_data.get("relationships", []) or []:
+            if raw.get("direction") == "incoming" or raw.get("safe_for_planner") is False:
+                continue
+            relationship = dict(raw)
+            relationship.setdefault("from_table", table_name)
+            signature = (
+                relationship.get("from_table"),
+                relationship.get("from_column"),
+                relationship.get("to_table"),
+                relationship.get("to_column"),
+            )
+            if not all(signature) or signature in seen:
+                continue
+            is_fallback = bool(relationship.get("is_fallback") or relationship.get("is_inferred"))
+            if is_fallback and float(relationship.get("confidence") or 0.0) < FALLBACK_RELATIONSHIP_MIN_CONFIDENCE:
+                continue
+            relationship.setdefault("relationship_type", "inferred" if is_fallback else "foreign_key")
+            relationship.setdefault("safe_for_planner", True)
+            seen.add(signature)
+            relationships.append(relationship)
+    return relationships
+
+
+def build_relationship_graph(
+    schema_data: dict[str, Any],
+    *,
+    infer_relationships: bool = False,
+) -> dict[str, dict[str, Any]]:
     """
     Build a relationship graph from schema data.
     
@@ -23,15 +69,18 @@ def build_relationship_graph(schema_data: dict[str, Any]) -> dict[str, dict[str,
     has a list of edges (relationships) to other tables.
     
     Args:
-        schema_data: Dictionary of table schema data with relationships
+        schema_data: Dictionary of table schema data with persisted relationships.
+        infer_relationships: Enable fallback discovery only during KB construction.
         
     Returns:
         Dictionary mapping table names to their adjacency lists
     """
-    from kb_pipeline.schema_facts import detect_relationships
-    
     graph: dict[str, dict[str, Any]] = {}
-    relationships = detect_relationships(schema_data)
+    relationships = (
+        detect_relationships(schema_data)
+        if infer_relationships
+        else _persisted_relationships(schema_data)
+    )
     
     # Initialize graph with all tables
     for table_name in schema_data.keys():
@@ -57,6 +106,12 @@ def build_relationship_graph(schema_data: dict[str, Any]) -> dict[str, dict[str,
             "confidence": rel.get("confidence", 0.5),
             "source": rel.get("source", "unknown"),
             "reason": rel.get("reason", ""),
+            "relationship_type": rel.get("relationship_type", "unknown"),
+            "evidence": list(rel.get("evidence", []) or []),
+            "evidence_reasons": list(rel.get("evidence_reasons", []) or []),
+            "safe_for_planner": bool(rel.get("safe_for_planner", True)),
+            "is_inferred": bool(rel.get("is_inferred", False)),
+            "is_fallback": bool(rel.get("is_fallback", False)),
         })
         
         # Add reverse edge (to_table -> from_table) for bidirectional traversal
@@ -68,6 +123,12 @@ def build_relationship_graph(schema_data: dict[str, Any]) -> dict[str, dict[str,
             "confidence": rel.get("confidence", 0.5),
             "source": rel.get("source", "unknown"),
             "reason": rel.get("reason", ""),
+            "relationship_type": rel.get("relationship_type", "unknown"),
+            "evidence": list(rel.get("evidence", []) or []),
+            "evidence_reasons": list(rel.get("evidence_reasons", []) or []),
+            "safe_for_planner": bool(rel.get("safe_for_planner", True)),
+            "is_inferred": bool(rel.get("is_inferred", False)),
+            "is_fallback": bool(rel.get("is_fallback", False)),
         })
     
     return graph
@@ -189,7 +250,7 @@ def find_all_possible_join_paths(
     Returns multiple paths sorted by:
     1. Path length (shorter first)
     2. Total confidence (higher first)
-    3. Edge source preference (foreign_key > inferred_by_naming)
+    3. Edge source preference (database_metadata > KB-build inference)
     
     Args:
         graph: Relationship graph from build_relationship_graph()
@@ -265,7 +326,7 @@ def find_all_possible_join_paths(
     # Sort paths by preference
     def path_score(path: dict[str, Any]) -> tuple:
         # Prefer: shorter paths, higher confidence, FK edges
-        fk_count = sum(1 for source in path["edge_sources"] if source == "foreign_key")
+        fk_count = sum(1 for source in path["edge_sources"] if source in {"database_metadata", "foreign_key"})
         return (
             path["path_length"],  # Shorter is better
             -path["total_confidence"],  # Higher confidence is better

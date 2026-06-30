@@ -401,6 +401,52 @@ def test_context_retriever_fails_closed_when_normalized_runtime_evidence_is_unav
     assert "normalized_vector_evidence" in context["retrieval_sources"]
 
 
+def test_runtime_does_not_build_join_paths_from_unsafe_vector_relationships():
+    class FakeVectorRetriever:
+        def get_normalized_evidence_package(self, query, top_k=8):
+            return {
+                "candidate_tables": [
+                    {"table_name": "accounts", "score": 0.91},
+                    {"table_name": "deals", "score": 0.89},
+                ],
+                "candidate_columns": [],
+                "candidate_metrics": [],
+                "candidate_dimensions": [],
+                "candidate_dates": [],
+                "relationships": [
+                    {
+                        "from_table": "deals",
+                        "from_column": "account_id",
+                        "to_table": "accounts",
+                        "to_column": "account_id",
+                        "relationship_type": "inferred",
+                        "confidence": 0.4,
+                        "safe_for_planner": False,
+                        "score": 0.95,
+                    }
+                ],
+                "glossary_matches": [],
+                "source_metadata": {"backend": "chroma", "query": query},
+            }
+
+    context = retrieve_context(
+        "show deals by account",
+        {
+            "requested_dimensions": ["account"],
+            "requested_metrics": [],
+            "requested_filters": [],
+            "raw_business_terms": ["deals", "account"],
+        },
+        KB,
+        business_glossary=GLOSSARY,
+        vector_retriever=FakeVectorRetriever(),
+        require_normalized_vector_evidence=True,
+    )
+
+    assert context["matched_relationships"] == []
+    assert context["possible_join_paths"] == []
+
+
 def test_context_retriever_returns_fk_relationship_context_for_related_matches():
     intent = {
         "requested_dimensions": ["accounts"],

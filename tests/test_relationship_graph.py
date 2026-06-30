@@ -11,11 +11,15 @@ Tests verify:
 - No hardcoded table/column/business logic
 """
 
+from sqlalchemy import Column, Integer, MetaData, Table, create_engine
+
+from kb_pipeline.knowledge_base_builder import build_knowledge_base
 from semantic.relationship_graph import (
     build_relationship_graph,
     find_shortest_join_path,
     find_all_possible_join_paths,
 )
+from kb_pipeline.schema_facts import enrich_knowledge_base_schema_facts
 from query_pipeline import query_planner
 
 
@@ -64,8 +68,12 @@ def test_build_relationship_graph_from_fk_constraints():
     assert "orders" in graph
     assert len(graph["orders"]["edges"]) == 1
     assert graph["orders"]["edges"][0]["to_table"] == "customers"
-    assert graph["orders"]["edges"][0]["source"] == "foreign_key"
-    assert graph["orders"]["edges"][0]["confidence"] == 0.99
+    edge = graph["orders"]["edges"][0]
+    assert edge["source"] == "database_metadata"
+    assert edge["relationship_type"] == "foreign_key"
+    assert edge["confidence"] == 1.0
+    assert edge["safe_for_planner"] is True
+    assert edge["evidence"] == ["foreign_key_constraint"]
 
 
 def test_build_relationship_graph_from_inferred_naming():
@@ -86,15 +94,60 @@ def test_build_relationship_graph_from_inferred_naming():
         },
     }
     
-    graph = build_relationship_graph(schema_data)
+    knowledge_base = enrich_knowledge_base_schema_facts(schema_data)
+    graph = build_relationship_graph(knowledge_base)
     
     assert "customers" in graph
     assert "orders" in graph
     assert len(graph["orders"]["edges"]) == 1
     assert graph["orders"]["edges"][0]["to_table"] == "customers"
-    assert graph["orders"]["edges"][0]["source"] == "inferred_by_naming"
-    assert graph["orders"]["edges"][0]["confidence"] >= 0.78
-    assert "sample values overlap" in graph["orders"]["edges"][0]["reason"].lower()
+    edge = graph["orders"]["edges"][0]
+    assert edge["source"] == "kb_build_inference"
+    assert edge["relationship_type"] == "inferred"
+    assert edge["confidence"] >= 0.85
+    assert edge["safe_for_planner"] is True
+    assert edge["is_fallback"] is True
+    assert {"naming_pattern", "compatible_data_type", "target_key_or_unique", "strong_sample_overlap"} <= set(edge["evidence"])
+    assert "sample values overlap" in edge["reason"].lower()
+
+
+def test_fallback_relationship_is_created_during_fresh_kb_build():
+    engine = create_engine("sqlite:///:memory:")
+    metadata = MetaData()
+    customers = Table(
+        "customers",
+        metadata,
+        Column("customer_id", Integer, primary_key=True),
+    )
+    orders = Table(
+        "orders",
+        metadata,
+        Column("order_id", Integer, primary_key=True),
+        Column("customer_id", Integer, nullable=False),
+    )
+    metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(customers.insert(), [{"customer_id": 10}, {"customer_id": 20}])
+        connection.execute(
+            orders.insert(),
+            [
+                {"order_id": 1, "customer_id": 10},
+                {"order_id": 2, "customer_id": 20},
+            ],
+        )
+
+    knowledge_base = build_knowledge_base(engine)
+    relationship = next(
+        item
+        for item in knowledge_base["orders"]["relationships"]
+        if item.get("direction") == "many-to-one"
+    )
+
+    assert knowledge_base["orders"]["foreign_keys"] == []
+    assert relationship["relationship_type"] == "inferred"
+    assert relationship["source"] == "kb_build_inference"
+    assert relationship["safe_for_planner"] is True
+    assert "strong_sample_overlap" in relationship["evidence"]
 
 
 def test_find_shortest_join_path_direct_fk():
@@ -128,9 +181,9 @@ def test_find_shortest_join_path_direct_fk():
     assert result["path"] == ["orders", "customers"]
     assert result["path_length"] == 1
     assert result["join_columns"] == [("customer_id", "customer_id")]
-    assert result["edge_sources"] == ["foreign_key"]
-    assert result["confidences"] == [0.99]
-    assert result["total_confidence"] == 0.99
+    assert result["edge_sources"] == ["database_metadata"]
+    assert result["confidences"] == [1.0]
+    assert result["total_confidence"] == 1.0
 
 
 def test_find_shortest_join_path_multi_hop():
@@ -178,7 +231,7 @@ def test_find_shortest_join_path_multi_hop():
     assert result["path"] == ["order_items", "orders", "customers"]
     assert result["path_length"] == 2
     assert len(result["join_columns"]) == 2
-    assert result["edge_sources"] == ["foreign_key", "foreign_key"]
+    assert result["edge_sources"] == ["database_metadata", "database_metadata"]
 
 
 def test_find_shortest_join_path_no_path():
@@ -196,7 +249,8 @@ def test_find_shortest_join_path_no_path():
         },
     }
     
-    graph = build_relationship_graph(schema_data)
+    knowledge_base = enrich_knowledge_base_schema_facts(schema_data)
+    graph = build_relationship_graph(knowledge_base)
     result = find_shortest_join_path(graph, "customers", "products")
     
     assert result["resolved"] is False
@@ -264,8 +318,8 @@ def test_fk_path_preferred_over_inferred():
     best_path = paths[0]
     assert best_path["resolved"] is True
     assert best_path["path"] == ["orders", "customers"]
-    assert best_path["edge_sources"] == ["foreign_key"]
-    assert best_path["confidences"] == [0.99]
+    assert best_path["edge_sources"] == ["database_metadata"]
+    assert best_path["confidences"] == [1.0]
 
 
 def test_find_all_possible_join_paths_multiple_paths():
@@ -300,7 +354,8 @@ def test_find_all_possible_join_paths_multiple_paths():
         },
     }
     
-    graph = build_relationship_graph(schema_data)
+    knowledge_base = enrich_knowledge_base_schema_facts(schema_data)
+    graph = build_relationship_graph(knowledge_base)
     paths = find_all_possible_join_paths(graph, "invoices", "customers", max_paths=3)
     
     # Should find at least the direct inferred path
@@ -327,9 +382,31 @@ def test_inferred_relationship_requires_strong_generic_evidence():
         },
     }
 
-    graph = build_relationship_graph(schema_data)
+    knowledge_base = enrich_knowledge_base_schema_facts(schema_data)
+    graph = build_relationship_graph(knowledge_base)
 
     assert graph["orders"]["edges"] == []
+
+
+def test_runtime_graph_does_not_infer_from_matching_names_alone():
+    schema_data = {
+        "records": {
+            "columns": [{"name": "record_id", "type": "INTEGER"}],
+            "primary_keys": ["record_id"],
+            "foreign_keys": [],
+        },
+        "events": {
+            "columns": [{"name": "record_id", "type": "INTEGER"}],
+            "primary_keys": [],
+            "foreign_keys": [],
+        },
+    }
+
+    runtime_graph = build_relationship_graph(schema_data)
+    kb_build_graph = build_relationship_graph(schema_data, infer_relationships=True)
+
+    assert runtime_graph["events"]["edges"] == []
+    assert kb_build_graph["events"]["edges"]
 
 
 def test_no_hardcoded_table_names():

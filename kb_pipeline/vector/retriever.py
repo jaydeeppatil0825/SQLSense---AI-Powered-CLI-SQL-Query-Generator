@@ -334,6 +334,8 @@ class VectorRetriever:
 
         for result in results:
             metadata = self._result_entry(result)
+            if metadata.get("safe_for_planner") is False:
+                continue
             signature = (
                 metadata.get("from_table"),
                 metadata.get("from_column"),

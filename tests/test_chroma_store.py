@@ -6,6 +6,7 @@ import math
 from types import SimpleNamespace
 
 from kb_pipeline.vector.chroma_store import ChromaStore
+from kb_pipeline.schema_facts import enrich_knowledge_base_schema_facts
 from vector_store import EmbeddingService, VectorIndexBuilder
 from core.database_service import DatabaseService
 
@@ -264,6 +265,56 @@ def test_vector_index_builder_includes_specialized_foundation_evidence(monkeypat
     doc_types = {document["metadata"]["type"] for document in documents}
 
     assert {"table", "column", "relationship", "measure", "dimension", "date", "semantic_metadata", "ai_metadata"} <= doc_types
+
+
+def test_real_and_fallback_relationship_evidence_is_indexed_and_retrievable(monkeypatch, tmp_path):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    monkeypatch.setattr(
+        "kb_pipeline.vector.chroma_store.importlib.import_module",
+        lambda name: _fake_chromadb_module(),
+    )
+    schema_data = {
+        "customers": {
+            "columns": [{"name": "customer_id", "type": "INTEGER", "sample_values": [1, 2]}],
+            "primary_keys": ["customer_id"],
+            "foreign_keys": [],
+        },
+        "orders": {
+            "columns": [{"name": "customer_id", "type": "INTEGER", "sample_values": [1, 2]}],
+            "primary_keys": [],
+            "foreign_keys": [
+                {
+                    "column": "customer_id",
+                    "referenced_table": "customers",
+                    "referenced_column": "customer_id",
+                }
+            ],
+        },
+        "visits": {
+            "columns": [{"name": "customer_id", "type": "INTEGER", "sample_values": [1, 2]}],
+            "primary_keys": [],
+            "foreign_keys": [],
+        },
+    }
+    knowledge_base = enrich_knowledge_base_schema_facts(schema_data)
+    embedding_service = EmbeddingService()
+    builder = VectorIndexBuilder(embedding_service)
+    documents = builder.build_from_knowledge_base(knowledge_base, source_context=_source_context())
+    relationship_documents = [doc for doc in documents if doc["metadata"]["type"] == "relationship"]
+
+    assert {doc["metadata"]["relationship_type"] for doc in relationship_documents} == {"foreign_key", "inferred"}
+    real_document = next(doc for doc in relationship_documents if doc["metadata"]["relationship_type"] == "foreign_key")
+    fallback_document = next(doc for doc in relationship_documents if doc["metadata"]["relationship_type"] == "inferred")
+    assert real_document["metadata"]["confidence"] == 1.0
+    assert real_document["metadata"]["relationship_source"] == "database_metadata"
+    assert fallback_document["metadata"]["safe_for_planner"] is True
+    assert "strong_sample_overlap" in fallback_document["metadata"]["evidence"]
+
+    store = ChromaStore(embedding_service, persist_dir=tmp_path / "chroma")
+    store.build_or_refresh_chroma_index(documents, _source_context())
+    package = store.get_normalized_evidence_package("customer relationships", top_k=10)
+
+    assert {item["relationship_type"] for item in package["relationships"]} == {"foreign_key", "inferred"}
 
 
 def test_glossary_vector_document_indexes_profile_and_sample_evidence(monkeypatch):

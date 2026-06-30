@@ -41,7 +41,7 @@ def test_schema_reader_extracts_columns_primary_keys_and_foreign_keys():
     ]
 
 
-def test_schema_reader_infers_trusted_pcsoft_relationships_without_constraints():
+def test_schema_reader_does_not_infer_relationships_without_constraints():
     engine = create_engine("sqlite:///:memory:")
     metadata = MetaData()
     Table(
@@ -85,27 +85,4 @@ def test_schema_reader_infers_trusted_pcsoft_relationships_without_constraints()
 
     schema = read_database_schema(engine)
 
-    assert {
-        "column": "customer_id",
-        "referenced_table": "customers",
-        "referenced_column": "customer_id",
-        "inferred": True,
-    } in schema["orders"]["foreign_keys"]
-    assert {
-        "column": "product_id",
-        "referenced_table": "products",
-        "referenced_column": "product_id",
-        "inferred": True,
-    } in schema["order_items"]["foreign_keys"]
-    assert {
-        "column": "order_id",
-        "referenced_table": "orders",
-        "referenced_column": "order_id",
-        "inferred": True,
-    } in schema["payments"]["foreign_keys"]
-    assert {
-        "column": "customer_id",
-        "referenced_table": "customers",
-        "referenced_column": "customer_id",
-        "inferred": True,
-    } in schema["support_tickets"]["foreign_keys"]
+    assert all(not table_data["foreign_keys"] for table_data in schema.values())
