@@ -31,6 +31,9 @@ _JSON_METADATA_FIELDS = {
     "example_questions",
     "column_names",
     "sample_values",
+    "profile_facts",
+    "planner_roles",
+    "sources",
 }
 
 
@@ -407,6 +410,39 @@ class ChromaStore:
             columns.append(entry)
         return columns
 
+    def get_relevant_metrics(self, query: str, top_k: int = 8) -> list[dict[str, Any]]:
+        seen: set[tuple[str, str]] = set()
+        metrics: list[dict[str, Any]] = []
+        for entry in [self._result_entry(result) for result in self._query(query, top_k=top_k, doc_type="measure")]:
+            key = (_safe_text(entry.get("table_name")), _safe_text(entry.get("column_name")))
+            if not all(key) or key in seen:
+                continue
+            seen.add(key)
+            metrics.append(entry)
+        return metrics
+
+    def get_relevant_dimensions(self, query: str, top_k: int = 8) -> list[dict[str, Any]]:
+        seen: set[tuple[str, str]] = set()
+        dimensions: list[dict[str, Any]] = []
+        for entry in [self._result_entry(result) for result in self._query(query, top_k=top_k, doc_type="dimension")]:
+            key = (_safe_text(entry.get("table_name")), _safe_text(entry.get("column_name")))
+            if not all(key) or key in seen:
+                continue
+            seen.add(key)
+            dimensions.append(entry)
+        return dimensions
+
+    def get_relevant_dates(self, query: str, top_k: int = 8) -> list[dict[str, Any]]:
+        seen: set[tuple[str, str]] = set()
+        dates: list[dict[str, Any]] = []
+        for entry in [self._result_entry(result) for result in self._query(query, top_k=top_k, doc_type="date")]:
+            key = (_safe_text(entry.get("table_name")), _safe_text(entry.get("column_name")))
+            if not all(key) or key in seen:
+                continue
+            seen.add(key)
+            dates.append(entry)
+        return dates
+
     def get_relevant_glossary_terms(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         seen: set[str] = set()
         terms: list[dict[str, Any]] = []
@@ -472,6 +508,80 @@ class ChromaStore:
             hints.append(hint)
         return hints
 
+    def get_normalized_evidence_package(self, query: str, top_k: int = 8) -> dict[str, Any]:
+        candidate_tables = self.get_relevant_table_details(query, top_k=max(top_k, 6))
+        candidate_columns = self.get_relevant_columns(query, top_k=max(top_k + 2, 10))
+        candidate_metrics = self.get_relevant_metrics(query, top_k=max(top_k, 6))
+        candidate_dimensions = self.get_relevant_dimensions(query, top_k=max(top_k, 6))
+        candidate_dates = self.get_relevant_dates(query, top_k=max(top_k, 4))
+        relationships = self.get_relevant_relationships(query, top_k=max(top_k, 6))
+        glossary_matches = self.get_relevant_glossary_terms(query, top_k=max(top_k, 6))
+
+        def _top_score(entries: list[dict[str, Any]]) -> float:
+            return round(max((float(entry.get("score") or 0.0) for entry in entries), default=0.0), 4)
+
+        def _close_candidates(entries: list[dict[str, Any]], keys: tuple[str, ...]) -> list[dict[str, Any]]:
+            if len(entries) < 2:
+                return []
+            top_score = float(entries[0].get("score") or 0.0)
+            close = []
+            for entry in entries:
+                if top_score - float(entry.get("score") or 0.0) > 0.08:
+                    continue
+                close.append({key: entry.get(key) for key in keys if entry.get(key)})
+            return close[1:] if len(close) > 1 else []
+
+        evidence_scores = {
+            "tables": _top_score(candidate_tables),
+            "columns": _top_score(candidate_columns),
+            "metrics": _top_score(candidate_metrics),
+            "dimensions": _top_score(candidate_dimensions),
+            "dates": _top_score(candidate_dates),
+            "relationships": _top_score(relationships),
+            "glossary": _top_score(glossary_matches),
+        }
+        evidence_scores["overall"] = round(max(evidence_scores.values()) if evidence_scores else 0.0, 4)
+
+        return {
+            "candidate_tables": candidate_tables,
+            "candidate_columns": candidate_columns,
+            "candidate_metrics": candidate_metrics,
+            "candidate_dimensions": candidate_dimensions,
+            "candidate_dates": candidate_dates,
+            "relationships": relationships,
+            "glossary_matches": glossary_matches,
+            "evidence_scores": evidence_scores,
+            "source_metadata": {
+                **self.get_status(),
+                "query": query,
+            },
+            "ambiguity_candidates": {
+                "tables": _close_candidates(candidate_tables, ("table_name",)),
+                "metrics": _close_candidates(candidate_metrics, ("table_name", "column_name")),
+                "dimensions": _close_candidates(candidate_dimensions, ("table_name", "column_name")),
+            },
+            "missing_evidence_indicators": {
+                "tables_missing": not candidate_tables,
+                "columns_missing": not candidate_columns,
+                "metrics_missing": not candidate_metrics,
+                "dimensions_missing": not candidate_dimensions,
+                "dates_missing": not candidate_dates,
+                "relationships_missing": not relationships,
+                "glossary_missing": not glossary_matches,
+            },
+            "retrieval_sources": ["vector"] if any(
+                [
+                    candidate_tables,
+                    candidate_columns,
+                    candidate_metrics,
+                    candidate_dimensions,
+                    candidate_dates,
+                    relationships,
+                    glossary_matches,
+                ]
+            ) else [],
+        }
+
     def get_status(self) -> dict[str, Any]:
         return {
             "backend": "chroma" if self.is_ready() else "chroma_unavailable",
@@ -523,6 +633,15 @@ class HybridVectorRetriever:
     def get_relevant_columns(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         return self._dispatch("get_relevant_columns", query, top_k=top_k)
 
+    def get_relevant_metrics(self, query: str, top_k: int = 8) -> list[dict[str, Any]]:
+        return self._dispatch("get_relevant_metrics", query, top_k=top_k)
+
+    def get_relevant_dimensions(self, query: str, top_k: int = 8) -> list[dict[str, Any]]:
+        return self._dispatch("get_relevant_dimensions", query, top_k=top_k)
+
+    def get_relevant_dates(self, query: str, top_k: int = 8) -> list[dict[str, Any]]:
+        return self._dispatch("get_relevant_dates", query, top_k=top_k)
+
     def get_relevant_glossary_terms(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         return self._dispatch("get_relevant_glossary_terms", query, top_k=top_k)
 
@@ -534,6 +653,9 @@ class HybridVectorRetriever:
 
     def get_relevant_profiling_hints(self, query: str, top_k: int = 8) -> list[dict[str, Any]]:
         return self._dispatch("get_relevant_profiling_hints", query, top_k=top_k)
+
+    def get_normalized_evidence_package(self, query: str, top_k: int = 8) -> dict[str, Any]:
+        return self._dispatch("get_normalized_evidence_package", query, top_k=top_k)
 
     def get_status(self) -> dict[str, Any]:
         primary_status = self.chroma_store.get_status() if self.chroma_store else {}

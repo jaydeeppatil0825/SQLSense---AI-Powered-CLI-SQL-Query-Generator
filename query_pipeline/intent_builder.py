@@ -24,6 +24,7 @@ _ALLOWED_INTENT_TYPES = {
     "comparison",
     "sorted_list",
     "filter",
+    "unsafe",
     "unknown",
 }
 _ALLOWED_BUSINESS_OPERATIONS = {
@@ -34,6 +35,7 @@ _ALLOWED_BUSINESS_OPERATIONS = {
     "compare",
     "sort",
     "analyze",
+    "block",
 }
 
 _LEADING_ACTION_RE = re.compile(
@@ -67,10 +69,21 @@ _AGGREGATE_SUM_RE = re.compile(r"\b(?:total|sum)\b", re.IGNORECASE)
 _AGGREGATE_AVG_RE = re.compile(r"\b(?:average|avg)\b", re.IGNORECASE)
 _AGGREGATE_MAX_RE = re.compile(r"\b(?:maximum|max|highest)\b", re.IGNORECASE)
 _AGGREGATE_MIN_RE = re.compile(r"\b(?:minimum|min|lowest)\b", re.IGNORECASE)
+_UNSAFE_RE = re.compile(r"\b(delete|update|insert|drop|alter|truncate)\b", re.IGNORECASE)
 _STOPWORD_RE = re.compile(
     r"^(?:show|list|display|get|fetch|view|see|give|tell|me|all|the|a|an|of|for|to|with|by|from|in|where|per|each|group|filter)$",
     re.IGNORECASE,
 )
+_GENERIC_METRIC_TERMS = {
+    "amount",
+    "value",
+    "total",
+    "metric",
+    "number",
+    "quantity",
+    "qty",
+    "count",
+}
 
 
 def build_intent(question: str, ai_backend: str = "local") -> Dict[str, Any]:
@@ -134,12 +147,61 @@ def _sanitize_intent(payload: Dict[str, Any], question: str) -> Dict[str, Any]:
         "needs_join": _coerce_join_hint(payload.get("needs_join")),
         "raw_business_terms": _clean_list(payload.get("raw_business_terms")),
         "confidence": _coerce_confidence(payload.get("confidence")),
+        "unsafe": _coerce_bool(payload.get("unsafe")),
+        "unsafe_operation": _clean_scalar(payload.get("unsafe_operation")),
+        "target_entity_phrase": _clean_scalar(payload.get("target_entity_phrase")),
+        "metric_phrase": _clean_scalar(payload.get("metric_phrase")),
+        "metric_is_generic": _coerce_bool(payload.get("metric_is_generic")),
+        "source_scope_phrase": _clean_scalar(payload.get("source_scope_phrase")),
+        "filter_phrase": _clean_scalar(payload.get("filter_phrase")),
+        "grouping_phrase": _clean_scalar(payload.get("grouping_phrase")),
+        "ranking_phrase": _clean_scalar(payload.get("ranking_phrase")),
+        "limit_phrase": _clean_scalar(payload.get("limit_phrase")),
     }
     return _normalize_simple_target_entity_usage(sanitized, question)
 
 
 def _build_fallback_intent(question: str) -> Dict[str, Any]:
     normalized_question, _ = normalize_question(question)
+    unsafe_operation = _detect_unsafe_operation(normalized_question)
+    if unsafe_operation:
+        raw_terms = _extract_raw_business_terms(
+            normalized_question,
+            requested_metrics=[],
+            requested_dimensions=[],
+            requested_filters=[],
+            requested_sort={},
+            source_scope=[],
+        )
+        return {
+            "user_goal": normalized_question,
+            "intent_type": "unsafe",
+            "business_operation": "block",
+            "requested_metrics": [],
+            "requested_dimensions": [],
+            "requested_filters": [],
+            "requested_sort": {},
+            "aggregate_function": None,
+            "source_scope": [],
+            "limit": None,
+            "needs_grouping": False,
+            "needs_aggregation": False,
+            "needs_join": False,
+            "raw_business_terms": raw_terms,
+            "confidence": 0.99,
+            "unsafe": True,
+            "unsafe_operation": unsafe_operation,
+            "target_entity_phrase": _cleanup_phrase(_UNSAFE_RE.sub("", normalized_question).strip()),
+            "metric_phrase": "",
+            "metric_is_generic": False,
+            "source_scope_phrase": "",
+            "filter_phrase": "",
+            "grouping_phrase": "",
+            "ranking_phrase": "",
+            "limit_phrase": "",
+            "source": "fallback",
+        }
+
     body = _strip_leading_action(normalized_question)
     aggregate_function = _detect_aggregate_function(normalized_question)
     limit = extract_requested_limit(normalized_question)
@@ -164,6 +226,7 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     if _COUNT_RE.search(normalized_question):
         intent_type = "count"
         business_operation = "count"
+        aggregate_function = "count"
         requested_dimensions = [_cleanup_phrase(_COUNT_RE.sub("", normalized_question).strip())]
     elif _COMPARE_RE.search(normalized_question):
         intent_type = "comparison"
@@ -261,6 +324,20 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     elif intent_type == "list" and len(raw_business_terms) <= 1 and not source_scope and not requested_filters:
         confidence = min(confidence, 0.48)
 
+    target_entity_phrase = _target_entity_phrase(
+        intent_type=intent_type,
+        requested_dimensions=requested_dimensions,
+        source_scope=source_scope,
+        body_without_scope=body_without_scope,
+        question=normalized_question,
+    )
+    metric_phrase = requested_metrics[0] if requested_metrics else ""
+    grouping_phrase = requested_dimensions[0] if intent_type in {"grouped_summary", "ranking"} and requested_dimensions else ""
+    ranking_phrase = ""
+    if intent_type == "ranking":
+        ranking_phrase = requested_metrics[0] if requested_metrics else (requested_sort.get("terms") or "")
+    limit_phrase = _extract_limit_phrase(normalized_question)
+
     return _normalize_simple_target_entity_usage({
         "user_goal": user_goal,
         "intent_type": intent_type,
@@ -277,6 +354,16 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         "needs_join": needs_join,
         "raw_business_terms": raw_business_terms,
         "confidence": confidence,
+        "unsafe": False,
+        "unsafe_operation": "",
+        "target_entity_phrase": target_entity_phrase,
+        "metric_phrase": metric_phrase,
+        "metric_is_generic": _metric_is_generic_phrase(metric_phrase),
+        "source_scope_phrase": source_scope[0] if source_scope else "",
+        "filter_phrase": requested_filters[0] if requested_filters else "",
+        "grouping_phrase": grouping_phrase,
+        "ranking_phrase": ranking_phrase,
+        "limit_phrase": limit_phrase,
         "source": "fallback",
     }, normalized_question)
 
@@ -504,6 +591,11 @@ def _coerce_confidence(value: Any) -> float:
     return max(0.0, min(confidence, 1.0))
 
 
+def _detect_unsafe_operation(question: str) -> str:
+    match = _UNSAFE_RE.search(question)
+    return str(match.group(1) or "").strip().lower() if match else ""
+
+
 def _detect_aggregate_function(question: str) -> str | None:
     normalized = str(question or "")
     if _AGGREGATE_AVG_RE.search(normalized):
@@ -515,6 +607,44 @@ def _detect_aggregate_function(question: str) -> str | None:
     if _AGGREGATE_MIN_RE.search(normalized):
         return "min"
     return None
+
+
+def _metric_is_generic_phrase(metric_phrase: str) -> bool:
+    tokens = [token for token in re.split(r"[^a-z0-9_]+", _clean_scalar(metric_phrase).lower()) if token]
+    if not tokens:
+        return False
+    return all(token in _GENERIC_METRIC_TERMS for token in tokens)
+
+
+def _extract_limit_phrase(question: str) -> str:
+    for pattern in (_TOP_RE, _FIRST_RE, _LIMIT_RE):
+        match = pattern.search(question)
+        if match:
+            return _clean_scalar(match.group(0))
+    return ""
+
+
+def _target_entity_phrase(
+    *,
+    intent_type: str,
+    requested_dimensions: list[str],
+    source_scope: list[str],
+    body_without_scope: str,
+    question: str,
+) -> str:
+    if intent_type in {"list", "count", "sorted_list"} and requested_dimensions:
+        return requested_dimensions[0]
+    if source_scope:
+        return source_scope[0]
+    if intent_type == "aggregate":
+        body_without_metric = re.sub(
+            r"\b(?:total|sum|average|avg|maximum|max|highest|minimum|min|lowest)\b",
+            "",
+            body_without_scope,
+            flags=re.IGNORECASE,
+        )
+        return _cleanup_phrase(body_without_metric)
+    return _cleanup_phrase(body_without_scope) or _cleanup_phrase(question)
 
 
 def _extract_requested_filters(question: str) -> list[str]:
@@ -555,18 +685,34 @@ def _extract_source_scope(question: str) -> list[str]:
     match = _FROM_RE.search(question)
     if not match:
         return []
-    scope = re.split(
-        r"\s+(?:where|filter(?:ed)?(?:\s+by)?|before|after|between|greater\s+than|less\s+than|sorted|ordered|$)",
-        match.group(1),
-        maxsplit=1,
+    tail = match.group(1)
+    split_match = re.search(
+        r"\s+(?:where|filter(?:ed)?(?:\s+by)?|before|after|between|greater\s+than|less\s+than|sorted|ordered|by|per|each|group(?:ed)?\s+by)\b",
+        tail,
         flags=re.IGNORECASE,
-    )[0]
+    )
+    scope = tail[: split_match.start()] if split_match else tail
     cleaned = _cleanup_phrase(scope)
     return [cleaned] if cleaned else []
 
 
 def _remove_source_scope(question: str) -> str:
-    return _FROM_RE.sub("", question).strip()
+    match = _FROM_RE.search(question)
+    if not match:
+        return question.strip()
+
+    prefix = question[: match.start()].strip()
+    tail = match.group(1)
+    split_match = re.search(
+        r"\s+(?:where|filter(?:ed)?(?:\s+by)?|before|after|between|greater\s+than|less\s+than|sorted|ordered|by|per|each|group(?:ed)?\s+by)\b",
+        tail,
+        flags=re.IGNORECASE,
+    )
+    if not split_match:
+        return prefix
+
+    suffix = tail[split_match.start() :].strip()
+    return _clean_scalar(f"{prefix} {suffix}")
 
 
 def _remove_filter_clauses(question: str) -> str:

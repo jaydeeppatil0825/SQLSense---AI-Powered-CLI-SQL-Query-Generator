@@ -16,6 +16,22 @@ from semantic.relationship_graph import (
     find_shortest_join_path,
     find_all_possible_join_paths,
 )
+from query_pipeline import query_planner
+
+
+def test_runtime_planner_normalization_does_not_infer_relationships(monkeypatch):
+    captured = {}
+
+    def fake_enrich(knowledge_base, *, infer_relationships=True):
+        captured["infer_relationships"] = infer_relationships
+        return knowledge_base
+
+    monkeypatch.setattr(query_planner, "enrich_knowledge_base_schema_facts", fake_enrich)
+
+    normalized = query_planner._enriched_kb({"records": {"columns": []}})
+
+    assert normalized == {"records": {"columns": []}}
+    assert captured["infer_relationships"] is False
 
 
 def test_build_relationship_graph_from_fk_constraints():
@@ -56,14 +72,14 @@ def test_build_relationship_graph_from_inferred_naming():
     """Test that relationship graph includes inferred relationships from _id naming."""
     schema_data = {
         "customers": {
-            "columns": [{"name": "customer_id", "type": "INTEGER"}],
+            "columns": [{"name": "customer_id", "type": "INTEGER", "sample_values": [1, 2, 3]}],
             "primary_keys": ["customer_id"],
             "foreign_keys": [],
         },
         "orders": {
             "columns": [
                 {"name": "order_id", "type": "INTEGER"},
-                {"name": "customer_id", "type": "INTEGER"},
+                {"name": "customer_id", "type": "INTEGER", "sample_values": [1, 2, 3]},
             ],
             "primary_keys": ["order_id"],
             "foreign_keys": [],  # No FK constraint, but naming suggests relationship
@@ -77,7 +93,8 @@ def test_build_relationship_graph_from_inferred_naming():
     assert len(graph["orders"]["edges"]) == 1
     assert graph["orders"]["edges"][0]["to_table"] == "customers"
     assert graph["orders"]["edges"][0]["source"] == "inferred_by_naming"
-    assert graph["orders"]["edges"][0]["confidence"] == 0.82
+    assert graph["orders"]["edges"][0]["confidence"] >= 0.78
+    assert "sample values overlap" in graph["orders"]["edges"][0]["reason"].lower()
 
 
 def test_find_shortest_join_path_direct_fk():
@@ -291,6 +308,28 @@ def test_find_all_possible_join_paths_multiple_paths():
     assert all(path["resolved"] for path in paths)
     # Paths should be sorted by preference (shorter, higher confidence, more FK edges)
     assert paths[0]["path_length"] <= paths[-1]["path_length"] if len(paths) > 1 else True
+
+
+def test_inferred_relationship_requires_strong_generic_evidence():
+    schema_data = {
+        "customers": {
+            "columns": [{"name": "customer_id", "type": "INTEGER", "sample_values": [10, 20]}],
+            "primary_keys": ["customer_id"],
+            "foreign_keys": [],
+        },
+        "orders": {
+            "columns": [
+                {"name": "order_id", "type": "INTEGER"},
+                {"name": "customer_id", "type": "VARCHAR(20)", "sample_values": ["x-1", "x-2"]},
+            ],
+            "primary_keys": ["order_id"],
+            "foreign_keys": [],
+        },
+    }
+
+    graph = build_relationship_graph(schema_data)
+
+    assert graph["orders"]["edges"] == []
 
 
 def test_no_hardcoded_table_names():

@@ -11,7 +11,7 @@ import pytest
 
 from core.insight_service import InsightService
 from sql_pipeline.question_service import QuestionService
-from sql_pipeline.sql_generator import _call_ai_backend, generate_sql, generate_sql_with_retry
+from sql_pipeline.sql_generator import _call_ai_backend, _call_ollama, generate_sql, generate_sql_with_retry
 
 
 RELATIONSHIP_KB = {
@@ -347,6 +347,8 @@ def test_pipeline_blocked_unsafe_route_blocks_sql_generation(monkeypatch):
 
 
 def test_runtime_ai_sql_helpers_are_blocked():
+    with pytest.raises(RuntimeError):
+        _call_ollama([])
     with pytest.raises(RuntimeError):
         _call_ai_backend([], backend="local")
     with pytest.raises(RuntimeError):

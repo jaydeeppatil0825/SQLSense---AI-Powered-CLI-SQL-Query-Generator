@@ -276,6 +276,45 @@ def test_build_knowledge_base_keeps_generated_glossary_active_and_builds_vector_
     assert vector_status["persistence"]["database_name"] == "dynamic_runtime_db"
 
 
+def test_fresh_knowledge_base_build_persists_database_identity_and_schema_hash(monkeypatch, tmp_path):
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
+    engine = create_engine("sqlite:///:memory:")
+    metadata = MetaData()
+    Table(
+        "runtime_records",
+        metadata,
+        Column("record_id", Integer, primary_key=True),
+        Column("record_value", Integer, nullable=False),
+    )
+    metadata.create_all(engine)
+
+    service = DatabaseService()
+    service.engine = engine
+    service.db_config = {
+        "db_type": "sqlite",
+        "sqlite_path": "dynamic_runtime.sqlite",
+    }
+    persisted = {}
+
+    def capture_json(data, path):
+        persisted[path] = data
+
+    monkeypatch.setattr("core.database_service.save_json", capture_json)
+    monkeypatch.setattr("core.database_service.save_business_glossary", lambda glossary, path: None)
+    monkeypatch.setattr(service, "refresh_vector_index", lambda: None)
+
+    success, _, knowledge_base = service.build_knowledge_base(use_ai_enrichment=False)
+
+    assert success is True
+    assert "runtime_records" in knowledge_base
+    metadata_payload = persisted["semantic/knowledge_base.meta.json"]
+    assert metadata_payload["db_engine"] == "sqlite"
+    assert metadata_payload["db_name"] == "dynamic_runtime.sqlite"
+    assert metadata_payload["database_name"] == "dynamic_runtime.sqlite"
+    assert len(metadata_payload["schema_hash"]) == 64
+    assert metadata_payload["schema_fingerprint"] == metadata_payload["schema_hash"]
+
+
 def test_build_knowledge_base_exposes_module_summary_as_counts(monkeypatch, tmp_path):
     monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
     engine = create_engine("sqlite:///:memory:")

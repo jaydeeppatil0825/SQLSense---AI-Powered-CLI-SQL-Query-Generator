@@ -843,7 +843,10 @@ def _has_strong_glossary_table_match(
 def _enriched_kb(knowledge_base: dict) -> dict:
     if not knowledge_base:
         return {}
-    return enrich_knowledge_base_schema_facts(deepcopy(knowledge_base))
+    return enrich_knowledge_base_schema_facts(
+        deepcopy(knowledge_base),
+        infer_relationships=False,
+    )
 
 
 def _question_text_for_table(table_name: str, table_data: dict) -> str:

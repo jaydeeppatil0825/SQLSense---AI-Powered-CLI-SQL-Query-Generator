@@ -171,7 +171,12 @@ class VectorRetriever:
         Returns:
             List of table names sorted by relevance
         """
-        results = self.search(query, top_k=max(top_k, 8), min_score=0.2)
+        results = (
+            self.search(query, top_k=max(top_k, 6), doc_type="table", min_score=0.2)
+            + self.search(query, top_k=max(top_k, 6), doc_type="glossary", min_score=0.2)
+            + self.search(query, top_k=max(top_k, 4), doc_type="column", min_score=0.2)
+            + self.search(query, top_k=max(top_k, 4), doc_type="relationship", min_score=0.2)
+        )
         ranked_tables: list[tuple[str, float]] = []
         seen: set[str] = set()
 
@@ -228,6 +233,48 @@ class VectorRetriever:
                 seen.add((table_name, column_name))
         
         return columns
+
+    def get_relevant_metrics(self, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
+        results = self.search(query, top_k=top_k, doc_type="measure", min_score=0.2)
+        metrics = []
+        seen = set()
+
+        for result in results:
+            metadata = self._result_entry(result)
+            key = (metadata.get("table_name"), metadata.get("column_name"))
+            if not all(key) or key in seen:
+                continue
+            seen.add(key)
+            metrics.append(metadata)
+        return metrics
+
+    def get_relevant_dimensions(self, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
+        results = self.search(query, top_k=top_k, doc_type="dimension", min_score=0.2)
+        dimensions = []
+        seen = set()
+
+        for result in results:
+            metadata = self._result_entry(result)
+            key = (metadata.get("table_name"), metadata.get("column_name"))
+            if not all(key) or key in seen:
+                continue
+            seen.add(key)
+            dimensions.append(metadata)
+        return dimensions
+
+    def get_relevant_dates(self, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
+        results = self.search(query, top_k=top_k, doc_type="date", min_score=0.2)
+        dates = []
+        seen = set()
+
+        for result in results:
+            metadata = self._result_entry(result)
+            key = (metadata.get("table_name"), metadata.get("column_name"))
+            if not all(key) or key in seen:
+                continue
+            seen.add(key)
+            dates.append(metadata)
+        return dates
 
     def get_relevant_table_details(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """Return table documents with scores and descriptive metadata."""
@@ -352,6 +399,82 @@ class VectorRetriever:
             hints.append(hint)
 
         return hints
+
+    def get_normalized_evidence_package(self, query: str, top_k: int = 8) -> Dict[str, Any]:
+        candidate_tables = self.get_relevant_table_details(query, top_k=max(top_k, 6))
+        candidate_columns = self.get_relevant_columns(query, top_k=max(top_k + 2, 10))
+        candidate_metrics = self.get_relevant_metrics(query, top_k=max(top_k, 6))
+        candidate_dimensions = self.get_relevant_dimensions(query, top_k=max(top_k, 6))
+        candidate_dates = self.get_relevant_dates(query, top_k=max(top_k, 4))
+        relationships = self.get_relevant_relationships(query, top_k=max(top_k, 6))
+        glossary_matches = self.get_relevant_glossary_terms(query, top_k=max(top_k, 6))
+
+        score_groups = {
+            "tables": [float(entry.get("score") or 0.0) for entry in candidate_tables],
+            "columns": [float(entry.get("score") or 0.0) for entry in candidate_columns],
+            "metrics": [float(entry.get("score") or 0.0) for entry in candidate_metrics],
+            "dimensions": [float(entry.get("score") or 0.0) for entry in candidate_dimensions],
+            "dates": [float(entry.get("score") or 0.0) for entry in candidate_dates],
+            "relationships": [float(entry.get("score") or 0.0) for entry in relationships],
+            "glossary": [float(entry.get("score") or 0.0) for entry in glossary_matches],
+        }
+        evidence_scores = {
+            key: round(max(values), 4) if values else 0.0
+            for key, values in score_groups.items()
+        }
+        evidence_scores["overall"] = round(max(evidence_scores.values()) if evidence_scores else 0.0, 4)
+
+        def _close_candidates(entries: List[Dict[str, Any]], keys: tuple[str, ...]) -> List[Dict[str, Any]]:
+            if len(entries) < 2:
+                return []
+            top_score = float(entries[0].get("score") or 0.0)
+            candidates = []
+            for entry in entries:
+                score = float(entry.get("score") or 0.0)
+                if top_score - score > 0.08:
+                    continue
+                candidates.append({key: entry.get(key) for key in keys if entry.get(key)})
+            return candidates[1:] if len(candidates) > 1 else []
+
+        return {
+            "candidate_tables": candidate_tables,
+            "candidate_columns": candidate_columns,
+            "candidate_metrics": candidate_metrics,
+            "candidate_dimensions": candidate_dimensions,
+            "candidate_dates": candidate_dates,
+            "relationships": relationships,
+            "glossary_matches": glossary_matches,
+            "evidence_scores": evidence_scores,
+            "source_metadata": {
+                **self.get_status(),
+                "query": query,
+            },
+            "ambiguity_candidates": {
+                "tables": _close_candidates(candidate_tables, ("table_name",)),
+                "metrics": _close_candidates(candidate_metrics, ("table_name", "column_name")),
+                "dimensions": _close_candidates(candidate_dimensions, ("table_name", "column_name")),
+            },
+            "missing_evidence_indicators": {
+                "tables_missing": not candidate_tables,
+                "columns_missing": not candidate_columns,
+                "metrics_missing": not candidate_metrics,
+                "dimensions_missing": not candidate_dimensions,
+                "dates_missing": not candidate_dates,
+                "relationships_missing": not relationships,
+                "glossary_missing": not glossary_matches,
+            },
+            "retrieval_sources": ["vector"] if any(
+                [
+                    candidate_tables,
+                    candidate_columns,
+                    candidate_metrics,
+                    candidate_dimensions,
+                    candidate_dates,
+                    relationships,
+                    glossary_matches,
+                ]
+            ) else [],
+        }
 
     def get_status(self) -> Dict[str, Any]:
         """Return retriever status for CLI/debug reporting."""

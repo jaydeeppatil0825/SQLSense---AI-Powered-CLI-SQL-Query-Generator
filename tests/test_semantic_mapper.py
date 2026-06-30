@@ -81,7 +81,8 @@ def test_date_types_are_strong_facts_and_set_is_date():
 
     for column in result["events"]["columns"]:
         assert column["semantic_type"] == "date"
-        assert column["is_date"] is True
+        assert column["structural_facts"]["is_date"] is True
+        assert column["planner_roles"]["date_candidate"] is True
 
 
 def test_boolean_type_and_boolean_profile_values_are_strong_facts():
@@ -120,10 +121,11 @@ def test_id_columns_win_over_existing_ai_guesses():
     assert result["records"]["columns"][0]["semantic_type"] == "id"
     assert result["records"]["columns"][1]["semantic_type"] == "id"
     assert result["records"]["columns"][2]["semantic_type"] == "date"
-    assert result["records"]["columns"][2]["is_date"] is True
+    assert result["records"]["columns"][2]["structural_facts"]["is_date"] is True
+    assert result["records"]["columns"][2]["planner_roles"]["date_candidate"] is True
 
 
-def test_non_structural_ai_enrichment_can_remain_when_no_strong_fact_exists():
+def test_legacy_rich_types_do_not_replace_core_candidate_types():
     schema = {
         "orders": {
             "columns": [
@@ -135,5 +137,7 @@ def test_non_structural_ai_enrichment_can_remain_when_no_strong_fact_exists():
 
     result = add_semantic_mapping(schema)
 
-    assert result["orders"]["columns"][0]["semantic_type"] == "money"
-    assert result["orders"]["columns"][1]["semantic_type"] == "name"
+    assert result["orders"]["columns"][0]["semantic_type"] == "numeric_candidate"
+    assert result["orders"]["columns"][0]["planner_roles"]["measure_candidate"] is True
+    assert result["orders"]["columns"][1]["semantic_type"] == "text_candidate"
+    assert result["orders"]["columns"][1]["planner_roles"]["dimension_candidate"] is True

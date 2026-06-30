@@ -1,12 +1,10 @@
 """
 ai/sql_generator.py
 ====================
-Dispatches SQL generation requests to the configured AI backend and returns
-a clean, validated SQL string.
+Legacy SQL-generation compatibility boundary.
 
-This module belongs to the SQL Generation Pipeline. It must use only runtime
-schema/context evidence supplied by planning and must not invent tables,
-columns, joins, or formulas outside that evidence.
+Runtime AI SQL generation and retry are disabled. The public entry points are
+kept temporarily for compatibility and fail closed when called.
 """
 
 from __future__ import annotations
@@ -16,7 +14,7 @@ import re
 from dotenv import load_dotenv
 
 from sql_pipeline.prompt_builder import build_sql_prompt
-from core.ai_backend_service import call_ai_backend, check_ollama_status as _shared_check_ollama_status
+from core.ai_backend_service import check_ollama_status as _shared_check_ollama_status
 from utils.logger import get_logger
 from sql_pipeline.sql_validator import clean_sql_response, sanitize_ai_sql_output
 
@@ -124,13 +122,10 @@ def check_ollama_status(api_url: str | None = None, timeout: int = 5) -> tuple[b
 
 
 def _call_ollama(messages: list[dict], response_format: dict | str | None = None) -> str:
-    """Backward-compatible local backend wrapper used by existing tests."""
-    return call_ai_backend(
-        messages,
-        backend="local",
-        response_format=response_format,
-        temperature=0,
-        max_tokens=300,
+    """Block the legacy runtime Ollama SQL-generation entry point."""
+    del messages, response_format
+    raise RuntimeError(
+        "Runtime AI backend calls are disabled outside KB semantic enrichment."
     )
 
 

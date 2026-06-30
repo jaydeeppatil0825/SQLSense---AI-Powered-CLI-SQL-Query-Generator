@@ -96,6 +96,7 @@ class QueryPipeline:
             knowledge_base,
             business_glossary=business_glossary,
             vector_retriever=vector_retriever,
+            require_normalized_vector_evidence=True,
         )
         query_context = self._build_context_preview(
             normalized_question,

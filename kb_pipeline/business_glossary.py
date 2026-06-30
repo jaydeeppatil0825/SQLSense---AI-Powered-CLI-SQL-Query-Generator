@@ -15,7 +15,15 @@ from __future__ import annotations
 from typing import Dict, Any
 import re
 
-from kb_pipeline.schema_facts import column_ai_metadata, column_business_description, column_business_terms, column_structural_facts
+from kb_pipeline.schema_facts import (
+    column_ai_metadata,
+    column_business_description,
+    column_business_terms,
+    column_planner_roles,
+    column_profile_facts,
+    column_structural_facts,
+    resolved_semantic_type,
+)
 from utils.file_utils import save_json
 from utils.logger import get_logger
 
@@ -247,6 +255,21 @@ def _entry_sources(table_data: dict[str, Any], *, includes_ai: bool, includes_re
     return sources
 
 
+def _profile_evidence(column: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    profile = column_profile_facts(column)
+    sample_values = _unique_preserve_order(
+        [str(value)[:120] for value in profile.get("sample_values", []) if value is not None]
+    )[:5]
+    compact_profile = {
+        "null_count": int(profile.get("null_count", 0) or 0),
+        "non_null_count": int(profile.get("non_null_count", 0) or 0),
+        "unique_count": int(profile.get("unique_count", 0) or 0),
+        "min": profile.get("min"),
+        "max": profile.get("max"),
+    }
+    return compact_profile, sample_values
+
+
 def _primary_terms_from_entry(term: str, primary_terms: list[str] | None = None) -> list[str]:
     return _unique_preserve_order([_humanize(term), *(primary_terms or [])])
 
@@ -426,9 +449,10 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
 
     The glossary is built from:
     1. Humanized table names and descriptions
-    2. Humanized column names and metadata
-    3. AI-enriched business terms already attached to columns/tables
-    4. Real relationship context from foreign keys and relationship metadata
+    2. Humanized column names, semantic roles, and profile evidence
+    3. Sample values retained as evidence rather than primary business terms
+    4. AI-enriched business terms already attached to columns/tables
+    5. Real relationship context from foreign keys and relationship metadata
     """
     logger.info("Generating business glossary")
 
@@ -499,10 +523,15 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                 column_business_description(column)
                 or _generic_description_for_column(table_name, column)
             )
+            profile_evidence, sample_value_evidence = _profile_evidence(column)
             mapping = {
                 "table": table_name,
                 "column": column_name,
                 "type": column.get("type", ""),
+                "semantic_type": resolved_semantic_type(column),
+                "planner_roles": column_planner_roles(column),
+                "profile_facts": profile_evidence,
+                "sample_values": sample_value_evidence,
                 "confidence": "high" if column_business_terms(column) else "medium",
             }
             column_ai_terms = _clean_ai_terms(column_business_terms(column))
@@ -516,6 +545,11 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                 includes_ai=bool(column_ai_terms or table_ai_terms),
                 includes_relationships=bool(relationship_terms),
             )
+            column_sources.append("semantic_metadata")
+            if any(value not in (None, "", 0) for value in profile_evidence.values()):
+                column_sources.append("profiling")
+            if sample_value_evidence:
+                column_sources.append("sample_values")
             structural_facts = column_structural_facts(column)
             column_related_terms = relationship_terms if structural_facts.get("is_foreign_key") else []
             column_related_tables = related_tables if structural_facts.get("is_foreign_key") else []

@@ -97,8 +97,15 @@ def _sample_kb():
             "business_purpose": "Tracks stock levels by storage point",
             "columns": [
                 {"name": "stock_id", "type": "int", "semantic_type": "id"},
-                {"name": "item_label", "type": "varchar", "semantic_type": "text_candidate"},
-                {"name": "units_available", "type": "int", "semantic_type": "numeric_candidate"},
+                {
+                    "name": "item_label",
+                    "type": "varchar",
+                    "semantic_type": "text_candidate",
+                    "is_dimension": True,
+                    "ai_metadata": {"business_terms": ["item label"], "business_description": "Display item label."},
+                },
+                {"name": "units_available", "type": "int", "semantic_type": "numeric_candidate", "is_measure": True},
+                {"name": "snapshot_date", "type": "date", "semantic_type": "date", "is_date": True},
             ],
             "relationships": [
                 {
@@ -245,3 +252,69 @@ def test_stale_db_or_schema_collection_is_not_reused(monkeypatch, tmp_path):
     assert loaded_same is True
     assert loaded_other_db is False
     assert loaded_other_schema is False
+
+
+def test_vector_index_builder_includes_specialized_foundation_evidence(monkeypatch):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+
+    embedding_service = EmbeddingService()
+    builder = VectorIndexBuilder(embedding_service)
+    documents = builder.build_from_knowledge_base(_sample_kb(), source_context=_source_context())
+
+    doc_types = {document["metadata"]["type"] for document in documents}
+
+    assert {"table", "column", "relationship", "measure", "dimension", "date", "semantic_metadata", "ai_metadata"} <= doc_types
+
+
+def test_glossary_vector_document_indexes_profile_and_sample_evidence(monkeypatch):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    builder = VectorIndexBuilder(EmbeddingService())
+    glossary = {
+        "event state": {
+            "description": "Schema state column.",
+            "primary_terms": ["event state"],
+            "related_terms": [],
+            "sources": ["schema_identifier", "profiling", "sample_values"],
+            "mapped_columns": [
+                {
+                    "table": "event_records",
+                    "column": "event_state",
+                    "sample_values": ["Open", "Closed"],
+                    "profile_facts": {"unique_count": 2},
+                }
+            ],
+        }
+    }
+
+    document = builder.build_from_glossary(glossary, source_context=_source_context())[0]
+
+    assert "Sample value evidence: Open, Closed" in document["text"]
+    assert document["metadata"]["sample_values"] == ["Open", "Closed"]
+    assert document["metadata"]["profile_facts"] == [{"unique_count": 2}]
+
+
+def test_chroma_returns_normalized_evidence_package(monkeypatch, tmp_path):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    monkeypatch.setattr(
+        "kb_pipeline.vector.chroma_store.importlib.import_module",
+        lambda name: _fake_chromadb_module(),
+    )
+
+    embedding_service = EmbeddingService()
+    builder = VectorIndexBuilder(embedding_service)
+    store = ChromaStore(embedding_service, persist_dir=tmp_path / "chroma")
+    documents = builder.build_from_knowledge_base(_sample_kb(), source_context=_source_context())
+    documents += builder.build_from_glossary(_sample_glossary(), source_context=_source_context())
+    store.build_or_refresh_chroma_index(documents, _source_context())
+
+    package = store.get_normalized_evidence_package("show stock positions by item label", top_k=5)
+
+    assert package["candidate_tables"]
+    assert package["candidate_columns"]
+    assert package["candidate_metrics"]
+    assert package["candidate_dimensions"]
+    assert package["candidate_dates"]
+    assert package["relationships"]
+    assert package["glossary_matches"]
+    assert package["source_metadata"]["backend"] == "chroma"
+    assert package["retrieval_sources"] == ["vector"]

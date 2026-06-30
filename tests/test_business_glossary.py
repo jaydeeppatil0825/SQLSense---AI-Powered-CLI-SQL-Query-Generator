@@ -38,7 +38,7 @@ def test_generate_business_glossary_from_schema_facts_only():
     assert "total due" in glossary
     assert glossary["total due"]["mapped_columns"][0]["table"] == "invoice_headers"
     assert glossary["total due"]["mapped_columns"][0]["column"] == "total_due"
-    assert glossary["total due"]["sources"] == ["schema_identifier"]
+    assert glossary["total due"]["sources"] == ["schema_identifier", "semantic_metadata"]
     assert glossary["total due"]["target_type"] == "column"
     assert glossary["total due"]["usage_scope"] == "column_lookup"
     assert isinstance(glossary["total due"]["confidence"], float)
@@ -74,6 +74,45 @@ def test_generate_business_glossary_from_ai_metadata_only_when_present():
     assert glossary["payables open"]["mapped_columns"][0]["table"] == "invoice_headers"
     assert "ai_semantic_metadata" in glossary["payables open"]["sources"]
     assert glossary["payables open"]["business_terms"] == glossary["payables open"]["primary_terms"]
+
+
+def test_generate_business_glossary_preserves_profile_and_sample_evidence_without_promoting_values():
+    knowledge_base = {
+        "event_records": {
+            "relationships": [],
+            "columns": [
+                {
+                    "name": "event_state",
+                    "type": "VARCHAR(20)",
+                    "semantic_type": "category_candidate",
+                    "profile_facts": {
+                        "null_count": 1,
+                        "non_null_count": 4,
+                        "unique_count": 2,
+                        "sample_values": ["Open", "Closed"],
+                        "min": None,
+                        "max": None,
+                    },
+                    "planner_roles": {
+                        "dimension_candidate": True,
+                        "filter_candidate": True,
+                    },
+                }
+            ],
+        }
+    }
+
+    glossary = generate_business_glossary(knowledge_base, use_ai_enrichment=False)
+    entry = glossary["event state"]
+    mapping = entry["mapped_columns"][0]
+
+    assert mapping["sample_values"] == ["Open", "Closed"]
+    assert mapping["profile_facts"]["unique_count"] == 2
+    assert mapping["planner_roles"]["dimension_candidate"] is True
+    assert "profiling" in entry["sources"]
+    assert "sample_values" in entry["sources"]
+    assert "Open" not in entry["primary_terms"]
+    assert "Closed" not in entry["related_terms"]
 
 
 def test_generate_business_glossary_uses_relationship_context_without_inventing_aliases():

@@ -42,7 +42,7 @@ def _service_with_orders(monkeypatch, tmp_path):
 
 def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypatch, tmp_path):
     service = _service_with_orders(monkeypatch, tmp_path)
-    expected_sql = "SELECT SUM(final_amount) AS total_sales FROM orders;"
+    expected_sql = "SELECT order_id, final_amount FROM orders LIMIT 100;"
     monkeypatch.setattr(
         "core.question_service.generate_simple_sql",
         lambda *args, **kwargs: expected_sql,
@@ -56,7 +56,7 @@ def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypat
         lambda user_question, knowledge_base, backend, first_attempt_sql, validation_reason, query_plan=None, selected_tables=None: expected_sql,
     )
 
-    result = service.process_question("show total sales", ai_backend="local")
+    result = service.process_question("show all orders", ai_backend="local")
 
     assert result["success"] is True
     assert result["error"] is None
@@ -66,7 +66,7 @@ def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypat
     exec_success, exec_message, rows = service.execute_sql(service.get_last_sql(), revalidate=True)
 
     assert exec_success is True
-    assert rows == [{"total_sales": 100}]
+    assert rows == [{"order_id": 1, "final_amount": 100}]
     assert service.get_last_sql() == expected_sql
 
 
@@ -223,7 +223,7 @@ def test_invalid_generated_sql_never_becomes_last_executable_sql(monkeypatch, tm
     service = _service_with_orders(monkeypatch, tmp_path)
     monkeypatch.setattr("core.question_service.generate_simple_sql", lambda *args, **kwargs: None)
 
-    result = service.process_question("show total sales", ai_backend="local")
+    result = service.process_question("show all orders", ai_backend="local")
 
     assert result["success"] is False
     assert result["sql"] is None
@@ -376,7 +376,7 @@ def test_process_question_is_blocked_before_database_ready():
     assert "not ready" in (result.get("error") or "").lower()
 
 
-def test_process_question_normalizes_tuple_payload(monkeypatch, tmp_path):
+def test_process_question_rejects_legacy_tuple_pipeline_payload(monkeypatch, tmp_path):
     service = _service_with_orders(monkeypatch, tmp_path)
     service.question_service.last_query_context = {"route_used": "simple_rule_based"}
     monkeypatch.setattr(
@@ -387,11 +387,10 @@ def test_process_question_normalizes_tuple_payload(monkeypatch, tmp_path):
 
     result = service.process_question("show all orders", ai_backend="local")
 
-    assert result["success"] is True
-    assert result["sql"] == "SELECT order_id FROM orders;"
-    assert result["generated_sql"] == "SELECT order_id FROM orders;"
-    assert result["route"] == "rule-based"
-    assert result["route_used"] == "rule-based"
+    assert result["success"] is False
+    assert result["sql"] is None
+    assert result["route"] == "cannot_plan_safely"
+    assert "unsupported result type" in (result["error"] or "").lower()
 
 
 def test_process_question_normalizes_none_payload(monkeypatch, tmp_path):

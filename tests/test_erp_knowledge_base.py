@@ -43,6 +43,8 @@ def test_enrichment_adds_schema_facts_without_module_labels():
     assert relationships[0]["to_table"] == "client_directory"
     assert relationships[0]["confidence"] >= 0.8
     assert relationships[0]["reason"]
+    assert relationships[0]["is_inferred"] is True
+    assert "compatible_data_type" in relationships[0]["evidence"]
 
 
 def test_existing_module_field_is_removed_from_generated_schema_context():

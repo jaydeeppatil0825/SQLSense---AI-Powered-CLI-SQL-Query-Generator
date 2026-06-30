@@ -36,29 +36,40 @@ def retrieve_context(
     knowledge_base: Dict[str, Any],
     business_glossary: Optional[Dict[str, Any]] = None,
     vector_retriever: Optional[Any] = None,
+    require_normalized_vector_evidence: bool = False,
 ) -> Dict[str, Any]:
-    """Collect dynamic schema/glossary/vector evidence for the planner."""
+    """Collect evidence for the planner through the normalized vector boundary."""
     normalized_question = _normalize_text(normalized_question)
     query_terms = _query_terms(normalized_question, intent)
+    vector_context = _normalized_vector_context(
+        normalized_question,
+        vector_retriever,
+        require_normalized=require_normalized_vector_evidence,
+    )
+    use_vector_only = bool(vector_context.get("normalized_package_used"))
 
     glossary = business_glossary or {}
-    kb_table_matches = _match_tables(query_terms, knowledge_base)
+    kb_table_matches = [] if use_vector_only else _match_tables(query_terms, knowledge_base)
     matched_tables = list(kb_table_matches)
-    matched_columns = _match_columns(query_terms, knowledge_base)
-    matched_glossary_terms = _match_glossary_terms(query_terms, glossary)
-    glossary_table_boosts, glossary_column_boosts = _glossary_mappings(matched_glossary_terms)
-    vector_context = _vector_context(normalized_question, vector_retriever)
+    matched_columns = [] if use_vector_only else _match_columns(query_terms, knowledge_base)
+    matched_glossary_terms = vector_context.get("matched_glossary_terms", [])
 
-    matched_tables = _merge_table_candidates(
-        matched_tables,
-        glossary_table_boosts,
-        vector_context.get("matched_tables", []),
-    )
-    matched_columns = _merge_column_candidates(
-        matched_columns,
-        glossary_column_boosts,
-        vector_context.get("matched_columns", []),
-    )
+    if not use_vector_only:
+        matched_glossary_terms = _match_glossary_terms(query_terms, glossary)
+        glossary_table_boosts, glossary_column_boosts = _glossary_mappings(matched_glossary_terms)
+        matched_tables = _merge_table_candidates(
+            matched_tables,
+            glossary_table_boosts,
+            vector_context.get("matched_tables", []),
+        )
+        matched_columns = _merge_column_candidates(
+            matched_columns,
+            glossary_column_boosts,
+            vector_context.get("matched_columns", []),
+        )
+    else:
+        matched_tables = _merge_table_candidates(vector_context.get("matched_tables", []))
+        matched_columns = _merge_column_candidates(vector_context.get("matched_columns", []))
 
     strong_primary_table = _strong_direct_primary_table_match(
         normalized_question,
@@ -66,7 +77,7 @@ def retrieve_context(
         query_terms,
         kb_table_matches,
     )
-    if strong_primary_table:
+    if strong_primary_table and not use_vector_only:
         matched_tables = [
             entry for entry in matched_tables
             if str(entry.get("table") or "").strip() == strong_primary_table
@@ -83,21 +94,36 @@ def retrieve_context(
             )
         ]
 
-    matched_relationships = _match_relationships(
-        knowledge_base,
-        matched_tables,
-        vector_context.get("matched_relationships", []),
+    matched_relationships = (
+        vector_context.get("matched_relationships", [])
+        if use_vector_only
+        else _match_relationships(
+            knowledge_base,
+            matched_tables,
+            vector_context.get("matched_relationships", []),
+        )
     )
-    possible_join_paths = _possible_join_paths(knowledge_base, matched_tables)
+    possible_join_paths = (
+        _possible_join_paths_from_relationships(matched_relationships, matched_tables)
+        if use_vector_only
+        else _possible_join_paths(knowledge_base, matched_tables)
+    )
 
     measure_candidates = _candidate_columns(
         intent.get("requested_metrics") or [],
-        matched_columns,
+        _merge_column_candidates(
+            vector_context.get("candidate_metrics", []),
+            matched_columns,
+        ),
         require_measure=True,
     )
     dimension_candidates = _candidate_columns(
         intent.get("requested_dimensions") or [],
-        matched_columns,
+        _merge_column_candidates(
+            vector_context.get("candidate_dimensions", []),
+            vector_context.get("candidate_dates", []),
+            matched_columns,
+        ),
         require_dimension=True,
     )
     filter_candidates = _candidate_columns(
@@ -130,8 +156,13 @@ def retrieve_context(
         "measure_candidates": measure_candidates,
         "dimension_candidates": dimension_candidates,
         "filter_candidates": filter_candidates,
+        "date_candidates": list(vector_context.get("candidate_dates", [])),
         "retrieval_sources": retrieval_sources,
         "confidence": confidence,
+        "evidence_scores": vector_context.get("evidence_scores", {}),
+        "ambiguity_candidates": vector_context.get("ambiguity_candidates", {}),
+        "missing_evidence_indicators": vector_context.get("missing_evidence_indicators", {}),
+        "source_metadata": vector_context.get("source_metadata", {}),
     }
 
 
@@ -587,6 +618,157 @@ def _vector_context(normalized_question: str, vector_retriever: Optional[Any]) -
     }
 
 
+def _empty_normalized_vector_context(reason: str) -> Dict[str, Any]:
+    return {
+        "matched_tables": [],
+        "matched_columns": [],
+        "matched_glossary_terms": [],
+        "matched_relationships": [],
+        "candidate_metrics": [],
+        "candidate_dimensions": [],
+        "candidate_dates": [],
+        "evidence_scores": {
+            "tables": 0.0,
+            "columns": 0.0,
+            "metrics": 0.0,
+            "dimensions": 0.0,
+            "dates": 0.0,
+            "relationships": 0.0,
+            "glossary": 0.0,
+            "overall": 0.0,
+        },
+        "retrieval_sources": ["normalized_vector_evidence"],
+        "ambiguity_candidates": {},
+        "missing_evidence_indicators": {
+            "tables_missing": True,
+            "columns_missing": True,
+            "metrics_missing": True,
+            "dimensions_missing": True,
+            "dates_missing": True,
+            "relationships_missing": True,
+            "glossary_missing": True,
+        },
+        "source_metadata": {
+            "backend": "unavailable",
+            "error": reason,
+        },
+        "normalized_package_used": True,
+    }
+
+
+def _normalized_column_entries(entries: list[Dict[str, Any]], *, role: str = "") -> list[Dict[str, Any]]:
+    normalized = []
+    for entry in entries:
+        table_name = str(entry.get("table_name") or "").strip()
+        column_name = str(entry.get("column_name") or "").strip()
+        if not table_name or not column_name:
+            continue
+        business_terms = [
+            str(value).strip()
+            for value in (entry.get("business_terms") or [])
+            if str(value).strip()
+        ]
+        description = str(entry.get("description") or "").strip()
+        normalized.append(
+            {
+                "table": table_name,
+                "column": column_name,
+                "semantic_type": entry.get("semantic_type"),
+                "core_semantic_type": entry.get("core_semantic_type"),
+                "is_measure": bool(entry.get("is_measure")) or role == "measure",
+                "is_dimension": bool(entry.get("is_dimension")) or role == "dimension",
+                "is_date": bool(entry.get("is_date")) or role == "date",
+                "sample_values": list(entry.get("sample_values") or []),
+                "score": round(float(entry.get("score") or 0.0), 4),
+                "matched_terms": _unique([*business_terms, description]),
+                "evidence_sources": _unique(
+                    [
+                        "vector_retrieval",
+                        "normalized_evidence_package",
+                        str(entry.get("evidence_source") or ""),
+                    ]
+                ),
+                "source": "vector",
+            }
+        )
+    return normalized
+
+
+def _normalized_vector_context(
+    normalized_question: str,
+    vector_retriever: Optional[Any],
+    *,
+    require_normalized: bool = False,
+) -> Dict[str, Any]:
+    if vector_retriever is None or not hasattr(vector_retriever, "get_normalized_evidence_package"):
+        if require_normalized:
+            return _empty_normalized_vector_context("normalized vector evidence retriever is unavailable")
+        return _vector_context(normalized_question, vector_retriever)
+
+    try:
+        package = vector_retriever.get_normalized_evidence_package(normalized_question, top_k=8) or {}
+    except Exception as exc:
+        logger.debug(f"Normalized vector evidence retrieval failed: {exc}")
+        if require_normalized:
+            return _empty_normalized_vector_context(str(exc))
+        return _vector_context(normalized_question, vector_retriever)
+
+    candidate_tables = list(package.get("candidate_tables", []) or [])
+    candidate_columns = list(package.get("candidate_columns", []) or [])
+    glossary_matches = list(package.get("glossary_matches", []) or [])
+    relationships = list(package.get("relationships", []) or [])
+    candidate_metrics = _normalized_column_entries(
+        list(package.get("candidate_metrics", []) or []),
+        role="measure",
+    )
+    candidate_dimensions = _normalized_column_entries(
+        list(package.get("candidate_dimensions", []) or []),
+        role="dimension",
+    )
+    candidate_dates = _normalized_column_entries(
+        list(package.get("candidate_dates", []) or []),
+        role="date",
+    )
+
+    return {
+        "matched_tables": [
+            {
+                "table": entry.get("table_name"),
+                "score": round(float(entry.get("score") or 0.0), 4),
+                "matched_terms": [],
+                "evidence_sources": ["vector_retrieval", "normalized_evidence_package"],
+                "source": "vector",
+            }
+            for entry in candidate_tables
+            if entry.get("table_name")
+        ],
+        "matched_columns": _normalized_column_entries(candidate_columns),
+        "matched_glossary_terms": glossary_matches,
+        "matched_relationships": [
+            {
+                **entry,
+                "evidence_sources": _unique(
+                    ["vector_retrieval", "normalized_evidence_package", *(entry.get("evidence_sources") or [])]
+                ),
+                "source": "vector",
+            }
+            for entry in relationships
+            if entry.get("from_table") and entry.get("to_table")
+        ],
+        "candidate_metrics": candidate_metrics,
+        "candidate_dimensions": candidate_dimensions,
+        "candidate_dates": candidate_dates,
+        "evidence_scores": dict(package.get("evidence_scores", {}) or {}),
+        "retrieval_sources": _unique(
+            ["normalized_vector_evidence", *(package.get("retrieval_sources", []) or [])]
+        ),
+        "ambiguity_candidates": dict(package.get("ambiguity_candidates", {}) or {}),
+        "missing_evidence_indicators": dict(package.get("missing_evidence_indicators", {}) or {}),
+        "source_metadata": dict(package.get("source_metadata", {}) or {}),
+        "normalized_package_used": True,
+    }
+
+
 def _merge_table_candidates(*candidate_groups: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
     merged: dict[str, Dict[str, Any]] = {}
     for group in candidate_groups:
@@ -810,6 +992,123 @@ def _possible_join_paths(knowledge_base: Dict[str, Any], matched_tables: list[Di
         )
     
     paths.sort(key=path_sort_key)
+    return paths[:8]
+
+
+def _possible_join_paths_from_relationships(
+    relationships: list[Dict[str, Any]],
+    matched_tables: list[Dict[str, Any]],
+) -> list[Dict[str, Any]]:
+    """Build paths only from relationship evidence already present in the vector package."""
+    selected_tables = [entry.get("table") for entry in matched_tables[:4] if entry.get("table")]
+    if len(selected_tables) < 2 or not relationships:
+        return []
+
+    graph: dict[str, dict[str, Any]] = {
+        str(table_name): {"table_name": str(table_name), "edges": []}
+        for table_name in selected_tables
+    }
+    for relationship in relationships:
+        from_table = str(relationship.get("from_table") or "").strip()
+        to_table = str(relationship.get("to_table") or "").strip()
+        from_column = str(relationship.get("from_column") or "").strip()
+        to_column = str(relationship.get("to_column") or "").strip()
+        if not all((from_table, to_table, from_column, to_column)):
+            continue
+        graph.setdefault(from_table, {"table_name": from_table, "edges": []})
+        graph.setdefault(to_table, {"table_name": to_table, "edges": []})
+        confidence = float(
+            relationship.get("confidence")
+            or relationship.get("score")
+            or 0.5
+        )
+        source = str(
+            relationship.get("relationship_source")
+            or relationship.get("evidence_source")
+            or relationship.get("source")
+            or "relationship_evidence"
+        )
+        graph[from_table]["edges"].append(
+            {
+                "to_table": to_table,
+                "from_column": from_column,
+                "to_column": to_column,
+                "confidence": confidence,
+                "source": source,
+            }
+        )
+        graph[to_table]["edges"].append(
+            {
+                "to_table": from_table,
+                "from_column": to_column,
+                "to_column": from_column,
+                "confidence": confidence,
+                "source": source,
+            }
+        )
+
+    support_by_table = {
+        str(entry.get("table")): float(entry.get("score") or 0.0)
+        for entry in matched_tables
+        if entry.get("table")
+    }
+    paths: list[Dict[str, Any]] = []
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    for index, start_table in enumerate(selected_tables):
+        for target_table in selected_tables[index + 1:]:
+            for path_result in find_all_possible_join_paths(
+                graph,
+                str(start_table),
+                str(target_table),
+                max_paths=3,
+                max_hops=4,
+            ):
+                if not path_result.get("resolved"):
+                    continue
+                signature = (str(start_table), str(target_table), tuple(path_result.get("path") or []))
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                edges = []
+                for edge_index, (from_column, to_column) in enumerate(path_result.get("join_columns") or []):
+                    edge_from_table = path_result["path"][edge_index]
+                    edge_to_table = path_result["path"][edge_index + 1]
+                    edges.append(
+                        {
+                            "from_table": edge_from_table,
+                            "from_column": from_column,
+                            "to_table": edge_to_table,
+                            "to_column": to_column,
+                            "join_condition": f"{edge_from_table}.{from_column} = {edge_to_table}.{to_column}",
+                            "source": path_result["edge_sources"][edge_index],
+                            "confidence": path_result["confidences"][edge_index],
+                        }
+                    )
+                paths.append(
+                    {
+                        "from_table": start_table,
+                        "to_table": target_table,
+                        "path": edges,
+                        "length": path_result["path_length"],
+                        "total_confidence": path_result["total_confidence"],
+                        "support_score": round(
+                            sum(support_by_table.get(table_name, 0.0) for table_name in path_result["path"]),
+                            4,
+                        ),
+                        "edge_sources": list(path_result["edge_sources"]),
+                        "evidence_sources": _unique(
+                            ["join_path", "normalized_relationship_evidence", *path_result["edge_sources"]]
+                        ),
+                    }
+                )
+
+    paths.sort(
+        key=lambda item: (
+            item["length"],
+            -item.get("support_score", 0.0),
+            -item.get("total_confidence", 0.0),
+        )
+    )
     return paths[:8]
 
 

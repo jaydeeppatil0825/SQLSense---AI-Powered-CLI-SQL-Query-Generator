@@ -315,6 +315,92 @@ def test_context_retriever_resolves_filter_candidates_from_dynamic_column_eviden
     assert "filter" in filter_entry["reason"].lower()
 
 
+def test_context_retriever_consumes_normalized_vector_evidence_package():
+    class FakeVectorRetriever:
+        def get_normalized_evidence_package(self, query, top_k=8):
+            return {
+                "candidate_tables": [
+                    {"table_name": "accounts", "score": 0.91},
+                    {"table_name": "deals", "score": 0.88},
+                ],
+                "candidate_columns": [
+                    {"table_name": "accounts", "column_name": "account_label", "is_dimension": True, "score": 0.86},
+                    {"table_name": "deals", "column_name": "deal_value", "is_measure": True, "score": 0.89},
+                ],
+                "candidate_metrics": [
+                    {"table_name": "deals", "column_name": "deal_value", "score": 0.89},
+                ],
+                "candidate_dimensions": [
+                    {"table_name": "accounts", "column_name": "account_label", "score": 0.86},
+                ],
+                "candidate_dates": [],
+                "relationships": [
+                    {
+                        "from_table": "deals",
+                        "from_column": "account_id",
+                        "to_table": "accounts",
+                        "to_column": "account_id",
+                        "score": 0.83,
+                    }
+                ],
+                "glossary_matches": [{"term": "deal value", "score": 0.8}],
+                "retrieval_sources": ["vector"],
+                "ambiguity_candidates": {"tables": [{"table_name": "deals"}]},
+                "missing_evidence_indicators": {"dates_missing": True},
+                "source_metadata": {"backend": "chroma", "query": query},
+            }
+
+    intent = {
+        "requested_dimensions": ["accounts"],
+        "requested_metrics": ["deal value"],
+        "requested_filters": [],
+        "raw_business_terms": ["accounts", "deal value"],
+    }
+
+    context = retrieve_context(
+        "top 5 accounts by deal value",
+        intent,
+        KB,
+        business_glossary=GLOSSARY,
+        vector_retriever=FakeVectorRetriever(),
+    )
+
+    assert context["matched_tables"][0]["source"] == "vector"
+    assert context["measure_candidates"][0]["column"] == "deal_value"
+    assert context["dimension_candidates"][0]["column"] == "account_label"
+    assert context["matched_relationships"][0]["source"] == "vector"
+    assert context["possible_join_paths"]
+    assert "normalized_relationship_evidence" in context["possible_join_paths"][0]["evidence_sources"]
+    assert context["source_metadata"]["backend"] == "chroma"
+    assert context["ambiguity_candidates"]["tables"] == [{"table_name": "deals"}]
+
+
+def test_context_retriever_fails_closed_when_normalized_runtime_evidence_is_unavailable():
+    intent = {
+        "intent_type": "list",
+        "requested_dimensions": ["accounts"],
+        "requested_metrics": [],
+        "requested_filters": [],
+        "raw_business_terms": ["accounts"],
+    }
+
+    context = retrieve_context(
+        "show all accounts",
+        intent,
+        KB,
+        business_glossary=GLOSSARY,
+        vector_retriever=None,
+        require_normalized_vector_evidence=True,
+    )
+
+    assert context["matched_tables"] == []
+    assert context["matched_columns"] == []
+    assert context["possible_join_paths"] == []
+    assert context["missing_evidence_indicators"]["tables_missing"] is True
+    assert context["source_metadata"]["backend"] == "unavailable"
+    assert "normalized_vector_evidence" in context["retrieval_sources"]
+
+
 def test_context_retriever_returns_fk_relationship_context_for_related_matches():
     intent = {
         "requested_dimensions": ["accounts"],

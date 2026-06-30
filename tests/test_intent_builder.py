@@ -20,10 +20,12 @@ def test_fallback_intent_builder_handles_count_query():
 
     assert intent["intent_type"] == "count"
     assert intent["business_operation"] == "count"
+    assert intent["aggregate_function"] == "count"
     assert intent["requested_dimensions"] == []
     assert intent["requested_metrics"] == []
     assert intent["needs_aggregation"] is True
     assert intent["limit"] is None
+    assert intent["target_entity_phrase"] == "bills"
     assert "bills" in intent["raw_business_terms"]
 
 
@@ -67,7 +69,10 @@ def test_fallback_intent_builder_detects_generic_aggregate_queries(question, agg
     assert intent["intent_type"] == "aggregate"
     assert intent["aggregate_function"] == aggregate_function
     assert intent["requested_metrics"] == ["amount"]
+    assert intent["metric_phrase"] == "amount"
+    assert intent["metric_is_generic"] is True
     assert intent["source_scope"] == ["bills"]
+    assert intent["source_scope_phrase"] == "bills"
     assert intent["requested_filters"] == []
     assert intent["needs_grouping"] is False
     assert intent["needs_aggregation"] is True
@@ -100,6 +105,29 @@ def test_fallback_intent_builder_handles_stock_by_dimension_without_mapping():
 
     assert intent["requested_metrics"] == ["current stock"]
     assert intent["requested_dimensions"] == ["storage point"]
+    assert intent["grouping_phrase"] == "storage point"
     assert intent["needs_grouping"] is True
     assert intent["needs_aggregation"] is True
+
+
+def test_fallback_intent_builder_detects_unsafe_operations_early():
+    intent = build_intent("delete bills", ai_backend="local")
+
+    assert intent["intent_type"] == "unsafe"
+    assert intent["business_operation"] == "block"
+    assert intent["unsafe"] is True
+    assert intent["unsafe_operation"] == "delete"
+    assert intent["requested_metrics"] == []
+    assert intent["requested_dimensions"] == []
+
+
+def test_fallback_intent_builder_preserves_structured_phrases_for_grouped_aggregate():
+    intent = build_intent("show sum paid value from bills by partner", ai_backend="local")
+
+    assert intent["intent_type"] == "grouped_summary"
+    assert intent["aggregate_function"] == "sum"
+    assert intent["metric_phrase"] == "paid value"
+    assert intent["metric_is_generic"] is False
+    assert intent["source_scope_phrase"] == "bills"
+    assert intent["grouping_phrase"] == "partner"
 

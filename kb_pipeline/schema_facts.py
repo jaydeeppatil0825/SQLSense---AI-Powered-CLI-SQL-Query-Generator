@@ -228,7 +228,14 @@ def column_planner_roles(column: dict[str, Any]) -> dict[str, bool]:
     core_semantic_type = column_core_semantic_type(column)
     semantic_type = resolved_semantic_type(column)
     structural = column_structural_facts(column)
-    measure_candidate = bool(raw.get("measure_candidate", bool((column or {}).get("is_measure"))))
+    measure_candidate = bool(
+        raw.get(
+            "measure_candidate",
+            bool((column or {}).get("is_measure"))
+            or semantic_type in _MEASURE_SEMANTIC_TYPES
+            or core_semantic_type == "numeric_candidate",
+        )
+    )
     dimension_candidate = bool(
         raw.get(
             "dimension_candidate",
@@ -307,8 +314,6 @@ def apply_column_contract(
         "max_value",
         "business_description",
         "business_terms",
-        "confidence",
-        "reason",
         "ai_semantic_type",
         "metric_type",
         "is_measure",
@@ -365,11 +370,21 @@ def classify_semantic_type(
     if _type_contains("enum", "set"):
         return "category_candidate"
     if _type_contains("varchar", "char", "text", "string", "nvarchar", "nchar", "json"):
+        if any(token in normalized_name for token in ("status", "state", "type", "category", "kind", "mode", "code", "reference")):
+            return "category_candidate"
         if profiled_values:
             normalized_profile = [_normalize(value) for value in profiled_values if _normalize(value)]
             distinct_profile = list(dict.fromkeys(normalized_profile))
-            if 0 < len(distinct_profile) <= 12 and all(len(value) <= 40 for value in distinct_profile):
+            if 0 < len(distinct_profile) <= 20 and all(len(value) <= 40 for value in distinct_profile):
                 return "category_candidate"
+        return "text_candidate"
+
+    # Reflected or legacy schemas can omit a usable SQL type. Generic name
+    # shape is still candidate evidence, but it never supplies business meaning.
+    name_tokens = set(normalized_name.split("_"))
+    if name_tokens & {"status", "state", "type", "category", "kind", "mode", "code", "reference"}:
+        return "category_candidate"
+    if name_tokens & {"name", "label", "title", "description", "text"}:
         return "text_candidate"
 
     return "unknown"
@@ -431,6 +446,47 @@ def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
     relationships: list[dict[str, Any]] = []
     table_names = set((schema_data or {}).keys())
 
+    def _column_map(table_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {
+            str(column.get("name", "")): column
+            for column in table_data.get("columns", [])
+            if str(column.get("name", ""))
+        }
+
+    def _column_type_family(column_type: Any) -> str:
+        normalized = str(column_type or "").strip().lower()
+        if any(token in normalized for token in ("date", "datetime", "timestamp", "time")):
+            return "date"
+        if any(token in normalized for token in ("decimal", "numeric", "float", "double", "real", "int", "integer", "bigint", "smallint", "tinyint")):
+            return "numeric"
+        if any(token in normalized for token in ("char", "text", "string", "json", "enum", "set")):
+            return "text"
+        if any(token in normalized for token in ("bool", "bit")):
+            return "boolean"
+        return "unknown"
+
+    def _is_primary_key_like(column_name: str, table_data: dict[str, Any], column: dict[str, Any] | None = None) -> bool:
+        if column_name in set(table_data.get("primary_keys", [])):
+            return True
+        normalized_name = _normalize_identifier(column_name)
+        if normalized_name == "id" or normalized_name.endswith("_id"):
+            return True
+        if column:
+            structural = column.get("structural_facts")
+            if isinstance(structural, dict) and structural.get("is_primary_key"):
+                return True
+        return False
+
+    def _sample_overlap(left_column: dict[str, Any], right_column: dict[str, Any]) -> float:
+        left_samples = {_normalize(value) for value in column_sample_values(left_column) if _normalize(value)}
+        right_samples = {_normalize(value) for value in column_sample_values(right_column) if _normalize(value)}
+        if not left_samples or not right_samples:
+            return 0.0
+        overlap = left_samples & right_samples
+        if not overlap:
+            return 0.0
+        return round(len(overlap) / max(min(len(left_samples), len(right_samples)), 1), 4)
+
     for table_name, table_data in (schema_data or {}).items():
         for foreign_key in table_data.get("foreign_keys", []):
             referenced_table = foreign_key.get("referenced_table")
@@ -453,6 +509,7 @@ def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
 
     for table_name, table_data in (schema_data or {}).items():
         primary_keys = set(table_data.get("primary_keys", []))
+        table_columns = _column_map(table_data)
         for column in table_data.get("columns", []):
             column_name = str(column.get("name", ""))
             normalized_name = _normalize_identifier(column_name)
@@ -472,7 +529,9 @@ def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
             if not matched_table or matched_table == table_name:
                 continue
 
-            target_primary_keys = list((schema_data.get(matched_table) or {}).get("primary_keys", []))
+            target_table_data = schema_data.get(matched_table) or {}
+            target_columns = _column_map(target_table_data)
+            target_primary_keys = list(target_table_data.get("primary_keys", []))
             target_column = target_primary_keys[0] if target_primary_keys else column_name
             signature = (table_name, column_name, matched_table, target_column)
             if any(
@@ -486,6 +545,44 @@ def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
             ):
                 continue
 
+            source_column = table_columns.get(column_name, column)
+            target_column_data = target_columns.get(target_column, {})
+            compatible_type = (
+                _column_type_family(source_column.get("type")) == "unknown"
+                or _column_type_family(target_column_data.get("type")) == "unknown"
+                or _column_type_family(source_column.get("type")) == _column_type_family(target_column_data.get("type"))
+            )
+            target_pk_like = _is_primary_key_like(target_column, target_table_data, target_column_data)
+            overlap_score = _sample_overlap(source_column, target_column_data)
+
+            evidence = ["naming_pattern"]
+            confidence = 0.58
+            if compatible_type:
+                evidence.append("compatible_data_type")
+                confidence += 0.12
+            if target_pk_like:
+                evidence.append("target_primary_key_like")
+                confidence += 0.12
+            if overlap_score >= 0.5:
+                evidence.append("strong_sample_overlap")
+                confidence += 0.14
+            elif overlap_score > 0.0:
+                evidence.append("sample_overlap")
+                confidence += 0.08
+
+            if not (compatible_type and target_pk_like):
+                continue
+            confidence = round(min(confidence, 0.94), 2)
+            if confidence < 0.78:
+                continue
+
+            evidence_reasons = {
+                "naming_pattern": "neutral *_id naming pattern aligns with the target table",
+                "compatible_data_type": "source and target column SQL types are compatible",
+                "target_primary_key_like": "target column is primary-key-like",
+                "strong_sample_overlap": "sample values overlap strongly between the columns",
+                "sample_overlap": "sample values overlap between the columns",
+            }
             relationships.append(
                 {
                     "from_table": table_name,
@@ -493,8 +590,13 @@ def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
                     "to_table": matched_table,
                     "to_column": target_column,
                     "direction": "many-to-one",
-                    "confidence": 0.82,
-                    "reason": "Inferred from a neutral *_id naming pattern.",
+                    "confidence": confidence,
+                    "reason": "Fallback relationship inferred from " + ", ".join(
+                        evidence_reasons[item] for item in evidence
+                    ) + ".",
+                    "evidence": evidence,
+                    "is_inferred": True,
+                    "is_fallback": True,
                     "source": "inferred_by_naming",
                 }
             )
@@ -502,9 +604,13 @@ def detect_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
     return relationships
 
 
-def enrich_knowledge_base_schema_facts(knowledge_base: dict[str, Any]) -> dict[str, Any]:
+def enrich_knowledge_base_schema_facts(
+    knowledge_base: dict[str, Any],
+    *,
+    infer_relationships: bool = True,
+) -> dict[str, Any]:
     enriched = deepcopy(knowledge_base or {})
-    detected_relationships = detect_relationships(enriched)
+    detected_relationships = detect_relationships(enriched) if infer_relationships else []
 
     for table_name, table_data in enriched.items():
         table_data["table_name"] = table_name

@@ -49,6 +49,13 @@ class VectorIndexBuilder:
             for column in table_data.get("columns", []):
                 col_doc = self._create_column_document(table_name, column, source_context=source_context)
                 documents.append(col_doc)
+                documents.extend(
+                    self._create_specialized_column_documents(
+                        table_name,
+                        column,
+                        source_context=source_context,
+                    )
+                )
             
             # Add relationship documents
             for relationship in table_data.get("relationships", []):
@@ -166,6 +173,102 @@ class VectorIndexBuilder:
             "metadata": metadata,
         }
         return document
+
+    def _create_specialized_column_documents(
+        self,
+        table_name: str,
+        column: Dict[str, Any],
+        *,
+        source_context: Dict[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
+        column_name = str(column.get("name", "") or "")
+        if not column_name:
+            return []
+
+        documents: List[Dict[str, Any]] = []
+        semantic_type = resolved_semantic_type(column)
+        core_semantic_type = str(column.get("semantic_type", "unknown")).strip().lower() or "unknown"
+        ai_metadata = column_ai_metadata(column)
+        planner_roles = dict(column.get("planner_roles", {}) or {})
+        business_terms = ai_metadata.get("business_terms", [])
+        description = ai_metadata.get("business_description", "")
+
+        def _specialized_document(doc_type: str, *, evidence_source: str, text: str, extra_metadata: Dict[str, Any] | None = None) -> Dict[str, Any]:
+            metadata = {
+                **self._shared_metadata(
+                    source_type=doc_type,
+                    evidence_source=evidence_source,
+                    source_context=source_context,
+                ),
+                "table_name": table_name,
+                "column_name": column_name,
+                "semantic_type": semantic_type,
+                "core_semantic_type": core_semantic_type,
+                "column_type": column.get("type", ""),
+                "description": description,
+                "business_terms": list(business_terms),
+                "planner_roles": planner_roles,
+            }
+            if extra_metadata:
+                metadata.update(extra_metadata)
+            return {"text": text, "metadata": metadata}
+
+        if column_is_measure(column):
+            documents.append(
+                _specialized_document(
+                    "measure",
+                    evidence_source="measure_candidate",
+                    text=f"Measure evidence: {table_name}.{column_name} metric {semantic_type}.",
+                    extra_metadata={"is_measure": True},
+                )
+            )
+        if column_is_dimension(column):
+            documents.append(
+                _specialized_document(
+                    "dimension",
+                    evidence_source="dimension_candidate",
+                    text=f"Dimension evidence: {table_name}.{column_name} dimension {semantic_type}.",
+                    extra_metadata={"is_dimension": True},
+                )
+            )
+        if column_is_date(column):
+            documents.append(
+                _specialized_document(
+                    "date",
+                    evidence_source="date_candidate",
+                    text=f"Date evidence: {table_name}.{column_name} date field.",
+                    extra_metadata={"is_date": True},
+                )
+            )
+
+        documents.append(
+            _specialized_document(
+                "semantic_metadata",
+                evidence_source="semantic_metadata",
+                text=(
+                    f"Semantic metadata: {table_name}.{column_name} semantic type {semantic_type}; "
+                    f"core semantic type {core_semantic_type}; planner roles {', '.join(sorted(name for name, enabled in planner_roles.items() if enabled)) or 'none'}."
+                ),
+            )
+        )
+
+        if ai_metadata.get("ai_semantic_type") or business_terms or description:
+            documents.append(
+                _specialized_document(
+                    "ai_metadata",
+                    evidence_source="ai_semantic_metadata",
+                    text=(
+                        f"AI metadata: {table_name}.{column_name} ai semantic type {ai_metadata.get('ai_semantic_type', '')}. "
+                        f"Business terms: {', '.join(business_terms)}. Description: {description}"
+                    ).strip(),
+                    extra_metadata={
+                        "ai_semantic_type": ai_metadata.get("ai_semantic_type", ""),
+                        "ai_confidence": ai_metadata.get("confidence", 0.0),
+                    },
+                )
+            )
+
+        return documents
     
     def _create_column_document(
         self,
@@ -312,6 +415,14 @@ class VectorIndexBuilder:
         target_type = str(term_data.get("target_type", "") or "column")
         usage_scope = str(term_data.get("usage_scope", "") or "primary_match")
         confidence = float(term_data.get("confidence", 0.0) or 0.0)
+        sample_values = []
+        profile_facts = []
+        for mapping in mapped_columns:
+            sample_values.extend(str(value) for value in (mapping.get("sample_values") or []) if str(value))
+            mapping_profile = mapping.get("profile_facts")
+            if isinstance(mapping_profile, dict):
+                profile_facts.append(mapping_profile)
+        sample_values = list(dict.fromkeys(sample_values))[:8]
         
         # Build searchable text
         text_parts = [
@@ -325,6 +436,8 @@ class VectorIndexBuilder:
             text_parts.append(f"Primary terms: {', '.join(primary_terms)}")
         if related_terms:
             text_parts.append(f"Relationship context: {', '.join(related_terms)}")
+        if sample_values:
+            text_parts.append(f"Sample value evidence: {', '.join(sample_values)}")
         
         if mapped_columns:
             column_mappings = [f"{m.get('table', '')}.{m.get('column', '')}" for m in mapped_columns]
@@ -354,6 +467,9 @@ class VectorIndexBuilder:
             "usage_scope": usage_scope,
             "confidence": confidence,
             "mapped_columns": mapped_columns,
+            "sample_values": sample_values,
+            "profile_facts": profile_facts,
+            "sources": list(term_data.get("sources", []) or []),
             "example_questions": example_questions[:3],
         }
         

@@ -4,9 +4,9 @@ core/question_service.py
 SQL Generation Pipeline orchestrator.
 
 This service remains the central orchestrator for question-to-SQL flow in
-the CLI. It consumes pipeline-produced context, chooses rule-based or AI
-generation, validates SQL, applies safe deterministic repair when allowed,
-and returns only safe SELECT output.
+the CLI. It consumes pipeline-produced context, dispatches deterministic SQL
+generation by query shape, validates SQL, applies safe deterministic repair
+when allowed, and returns only safe SELECT output.
 
 It should not rebuild independent business meaning when pipeline evidence
 already exists.

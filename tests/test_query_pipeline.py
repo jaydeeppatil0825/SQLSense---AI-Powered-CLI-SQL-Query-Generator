@@ -84,8 +84,14 @@ def test_query_pipeline_returns_structured_debug_fields_without_calling_question
         "can_plan": True,
     }
 
+    retrieval_call = {}
+
+    def fake_retrieve_context(*args, **kwargs):
+        retrieval_call.update(kwargs)
+        return retrieved_context
+
     monkeypatch.setattr("core.query_pipeline.build_intent", lambda *args, **kwargs: built_intent)
-    monkeypatch.setattr("core.query_pipeline.retrieve_context", lambda *args, **kwargs: retrieved_context)
+    monkeypatch.setattr("core.query_pipeline.retrieve_context", fake_retrieve_context)
     monkeypatch.setattr("core.query_pipeline.build_query_context", lambda *args, **kwargs: preview_context)
 
     result = pipeline.run(
@@ -107,6 +113,7 @@ def test_query_pipeline_returns_structured_debug_fields_without_calling_question
     assert result.query_shape == "single_table_list"
     assert result.route_reason == "single-table deterministic browse/count query"
     assert result.can_plan is True
+    assert retrieval_call["require_normalized_vector_evidence"] is True
     debug_payload = result.to_dict()
     assert debug_payload["formula_evidence"] == []
     assert debug_payload["evidence_sources"] == ["kb_identifier"]

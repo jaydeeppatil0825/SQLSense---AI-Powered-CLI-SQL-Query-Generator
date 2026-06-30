@@ -25,6 +25,7 @@ GENERIC_SEMANTIC_PATTERNS: dict[str, str] = {
     "numeric_candidate": "numeric_candidate",
     "text_candidate": "text_candidate",
     "category_candidate": "category_candidate",
+    "unknown": "unknown",
 }
 
 
