@@ -41,8 +41,8 @@ SQL-Sense/
 │       └── retriever.py
 ├── query_pipeline/
 │   ├── query_pipeline.py            # Query planning pipeline entry point
-│   ├── query_planner.py             # Query planning and routing logic
-│   ├── intent_builder.py            # Intent detection (deterministic)
+│   ├── query_planner.py             # Query planning and routing logic with structured contract
+│   ├── intent_builder.py            # Schema-agnostic deterministic intent detection
 │   ├── context_retriever.py         # Context retrieval from KB/glossary/vector
 │   ├── question_normalizer.py       # Question normalization
 │   └── conversation/
@@ -401,16 +401,24 @@ Show all bills
 Count bill
 ```
 
-**Not yet supported (complex queries):**
+**Supported (grouped/aggregated with intent builder):**
+```
+Show sales by region
+Top 5 customers by revenue
+Deal value by account
+Pending billed amount by account
+Show current stock by storage point
+```
+
+**Partially supported (complex queries):**
 ```
 Show total sales by city
-Show top 5 customers by sales
 Show sales by product category
 Show payment details with customer names
 Show customers with pending payments
 ```
 
-Complex queries will return: "Complex deterministic SQL generation is not implemented yet. Please try a simpler query."
+Complex queries requiring joins, aggregations, or business reasoning will use the structured query pipeline contract with route recommendation. If evidence is insufficient, the system will return: "Cannot plan safely - missing required evidence."
 
 ---
 
@@ -441,14 +449,22 @@ This is rejected before SQL execution.
 
 ### SQL Generation Strategy
 
-The tool uses a **deterministic approach** for SQL generation:
+The tool uses a **deterministic approach** for SQL generation with a structured query pipeline contract:
 
 | Query type | Handler | Examples |
 |---|---|---|
 | Simple list/count | Deterministic rule-based generator | "Show all customers", "Count total orders", "Show all partners" |
-| Complex | Not yet implemented (returns clean message) | "Show top 5 customers by total sales", "Show monthly sales", "Revenue by category" |
+| Grouped/Aggregated | Schema-agnostic intent builder with structured contract | "Show sales by region", "Top 5 customers by revenue" |
+| Complex joins/aggregations | Partially implemented (deterministic route recommendation) | Multi-table queries with join paths |
 
-**Why?** Deterministic SQL generation is safer, faster, and more predictable. AI/LLM is used only during knowledge base build for semantic enrichment, not at runtime for SQL generation. Complex queries requiring joins, aggregations, or business reasoning will return a clean message asking for a simpler query.
+**Query Pipeline Architecture:**
+- **Intent Builder**: Schema-agnostic deterministic intent detection that extracts query shape (list, count, ranking, grouped_summary) without hardcoded semantic mappings
+- **Structured Contract**: Returns normalized question, intent, retrieved context, plan, missing evidence, confidence, route recommendation, and debug trace
+- **Missing Evidence Detection**: Identifies missing metrics, dimensions, join paths, filter columns, and formula evidence
+- **Route Recommendation**: Categorizes queries as `deterministic_sql_required` or `cannot_plan_safely` based on evidence strength
+- **Context Retrieval**: Uses vector search, business glossary, and schema facts for evidence gathering
+
+**Why?** Deterministic SQL generation is safer, faster, and more predictable. AI/LLM is used only during knowledge base build for semantic enrichment, not at runtime for SQL generation. The schema-agnostic intent builder preserves raw business terms for context retrieval without mapping to specific database tables or columns.
 
 ### Security
 
