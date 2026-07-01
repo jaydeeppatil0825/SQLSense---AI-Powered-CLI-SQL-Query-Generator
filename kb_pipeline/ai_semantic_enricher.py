@@ -129,6 +129,10 @@ _PURPOSE_VERBS = {"store", "stores", "track", "tracks", "hold", "holds", "record
 _TECHNICAL_WORDS = {"id", "date", "time", "timestamp"}
 
 
+class _AIEnrichmentResponseError(ValueError):
+    """Raised when AI output is JSON but does not match the enrichment contract."""
+
+
 def _describe_ai_enrichment_failure(exc: Exception, backend: str) -> str:
     """Return a short, non-sensitive reason suitable for CLI/log output."""
     backend_label = "NVIDIA" if backend == "nvidia" else "Local AI"
@@ -136,6 +140,8 @@ def _describe_ai_enrichment_failure(exc: Exception, backend: str) -> str:
 
     if isinstance(exc, json.JSONDecodeError):
         return f"{backend_label} returned invalid JSON"
+    if isinstance(exc, _AIEnrichmentResponseError):
+        return f"{backend_label} returned invalid enrichment JSON"
     if "timed out" in exc_text or "timeout" in exc_text:
         return f"{backend_label} timed out"
     if "api_key" in exc_text or "api key" in exc_text:
@@ -162,15 +168,31 @@ def get_last_enrichment_report() -> tuple[list[str], dict[str, str]]:
 
 
 def _clean_ai_response(response: str) -> str:
-    """Clean AI response by removing fences and surrounding text."""
-    response = re.sub(r"```json\s*", "", response)
-    response = re.sub(r"```\s*", "", response)
+    """Return the first valid JSON object from fenced or explanatory output."""
+    text = re.sub(r"```(?:json)?\s*", "", str(response or ""), flags=re.IGNORECASE)
+    text = re.sub(r"```\s*", "", text)
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(text):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False)
+    return text.strip()
 
-    start = response.find("{")
-    end = response.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return response.strip()
-    return response[start : end + 1].strip()
+
+def _require_response_keys(data: object, required: set[str], label: str) -> dict:
+    if not isinstance(data, dict):
+        raise _AIEnrichmentResponseError(f"Invalid enrichment structure: {label} must be an object")
+    missing = sorted(required - set(data))
+    if missing:
+        raise _AIEnrichmentResponseError(
+            f"Invalid enrichment structure: {label} is missing {', '.join(missing)}"
+        )
+    return data
 
 
 def _normalize_free_text(text: str) -> str:
@@ -652,30 +674,43 @@ def _column_batch_prompt(table_name: str, table_data: dict, columns: list[dict])
 def _parse_table_summary(response: str) -> dict:
     """Parse table-level enrichment JSON."""
     cleaned = _clean_ai_response(response)
-    data = json.loads(cleaned)
-    if {"d", "p", "q"} <= data.keys():
-        return {
-            "table_description": str(data.get("d", data.get("table_description", ""))).strip(),
-            "business_description": str(data.get("d", data.get("table_description", ""))).strip(),
-            "business_purpose": str(data.get("p", data.get("table_purpose", ""))).strip(),
-            "confidence": float(data.get("cf", 0.0) or 0.0),
-            "reason": str(data.get("r", "")).strip(),
-            "possible_business_questions": [
-                str(item).strip()
-                for item in data.get("q", data.get("possible_business_questions", []))
-                if str(item).strip()
-            ][:1],
-        }
-    raise ValueError("Invalid enrichment structure: missing d, p, or q")
+    data = _require_response_keys(json.loads(cleaned), {"d", "p", "q"}, "table response")
+    if not isinstance(data["d"], str) or not isinstance(data["p"], str) or not isinstance(data["q"], list):
+        raise _AIEnrichmentResponseError("Invalid enrichment structure: table response has invalid value types")
+    if any(not isinstance(item, str) for item in data["q"]):
+        raise _AIEnrichmentResponseError("Invalid enrichment structure: q must contain strings")
+    if "cf" in data and (isinstance(data["cf"], bool) or not isinstance(data["cf"], (int, float))):
+        raise _AIEnrichmentResponseError("Invalid enrichment structure: cf must be numeric")
+    return {
+        "table_description": data["d"].strip(),
+        "business_description": data["d"].strip(),
+        "business_purpose": data["p"].strip(),
+        "confidence": float(data.get("cf", 0.0) or 0.0),
+        "reason": str(data.get("r", "")).strip(),
+        "possible_business_questions": [item.strip() for item in data["q"] if item.strip()][:1],
+    }
 
 
 def _parse_column_enrichment(response: str) -> dict:
     """Parse column-level enrichment JSON."""
     cleaned = _clean_ai_response(response)
-    data = json.loads(cleaned)
+    data = _require_response_keys(json.loads(cleaned), set(), "column response")
     if "c" in data:
         if not isinstance(data["c"], dict):
-            raise ValueError("Invalid enrichment structure: c must be an object")
+            raise _AIEnrichmentResponseError("Invalid enrichment structure: c must be an object")
+        required = {"d", "b", "s", "cf", "r", "me", "di", "dt"}
+        for col_name, col_info in data["c"].items():
+            info = _require_response_keys(col_info, required, f"column '{col_name}'")
+            if not isinstance(info["d"], str) or not isinstance(info["b"], list) or not isinstance(info["s"], str):
+                raise _AIEnrichmentResponseError(f"Invalid enrichment structure: column '{col_name}' has invalid text fields")
+            if any(not isinstance(item, str) for item in info["b"]):
+                raise _AIEnrichmentResponseError(f"Invalid enrichment structure: column '{col_name}' terms must be strings")
+            if isinstance(info["cf"], bool) or not isinstance(info["cf"], (int, float)):
+                raise _AIEnrichmentResponseError(f"Invalid enrichment structure: column '{col_name}' confidence must be numeric")
+            if any(not isinstance(info[key], bool) for key in ("me", "di", "dt")):
+                raise _AIEnrichmentResponseError(f"Invalid enrichment structure: column '{col_name}' flags must be boolean")
+            if "pr" in info and not isinstance(info["pr"], dict):
+                raise _AIEnrichmentResponseError(f"Invalid enrichment structure: column '{col_name}' roles must be an object")
         return {
             str(col_name): {
                 "business_description": str(col_info.get("d", col_info.get("column_description", ""))).strip(),
@@ -697,7 +732,7 @@ def _parse_column_enrichment(response: str) -> dict:
         }
 
     if "columns" not in data or not isinstance(data["columns"], dict):
-        raise ValueError("Invalid enrichment structure: missing columns")
+        raise _AIEnrichmentResponseError("Invalid enrichment structure: missing c")
     return data["columns"]
 
 
@@ -912,15 +947,19 @@ def enrich_knowledge_base_with_ai(knowledge_base: dict, backend: str = "local") 
         except Exception as exc:
             reason = _describe_ai_enrichment_failure(exc, backend)
             _LAST_FALLBACK_TABLES[table_name] = reason
-            print(f"  [INFO] {table_name}: {reason}. Using rule-based fallback.")
-            logger.info(f"AI enrichment unavailable for table '{table_name}': {reason}. Using rule-based knowledge base.")
+            logger.debug(f"AI enrichment unavailable for table '{table_name}': {reason}. Using rule-based knowledge base.")
             logger.debug("AI enrichment technical details", exc_info=True)
 
     if _LAST_FALLBACK_TABLES and not _LAST_ENRICHED_TABLES:
         _LAST_ENRICHMENT_REASON = next(iter(_LAST_FALLBACK_TABLES.values()))
+        logger.info(f"AI semantic enrichment fallback: {_LAST_ENRICHMENT_REASON}.")
         return knowledge_base
 
     if _LAST_FALLBACK_TABLES:
         _LAST_ENRICHMENT_REASON = "Partial AI enrichment fallback"
-    logger.info("AI semantic enrichment completed")
+        logger.info(
+            f"AI semantic enrichment completed with fallback for {len(_LAST_FALLBACK_TABLES)} table(s)."
+        )
+    else:
+        logger.info("AI semantic enrichment completed")
     return enriched_kb

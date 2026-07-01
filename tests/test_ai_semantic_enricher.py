@@ -7,9 +7,13 @@ Tests for AI semantic enrichment of the knowledge base.
 import json
 import logging
 
+import pytest
+
 from semantic.ai_semantic_enricher import (
     enrich_knowledge_base_with_ai,
     _clean_ai_response,
+    _parse_column_enrichment,
+    _parse_table_summary,
     get_last_enrichment_report,
 )
 
@@ -38,6 +42,69 @@ That's it!"""
     assert "Here is the JSON:" not in cleaned
     assert "That's it!" not in cleaned
     assert '"tables"' in cleaned
+
+
+def test_clean_ai_response_extracts_first_valid_balanced_object():
+    response = (
+        "Analysis {not valid JSON}. Final answer: "
+        '{"d":"Bills","p":"Tracks billing","q":["Show bills"]} '
+        'trailing {"ignored":true}'
+    )
+
+    cleaned = _clean_ai_response(response)
+
+    assert json.loads(cleaned) == {
+        "d": "Bills",
+        "p": "Tracks billing",
+        "q": ["Show bills"],
+    }
+
+
+def test_enrichment_parsers_validate_required_keys_and_types():
+    with pytest.raises(ValueError, match="missing p"):
+        _parse_table_summary('{"d":"Bills","q":["Show bills"]}')
+
+    with pytest.raises(ValueError, match="flags must be boolean"):
+        _parse_column_enrichment(
+            json.dumps(
+                {
+                    "c": {
+                        "billed_value": {
+                            "d": "Billed value",
+                            "b": ["billing"],
+                            "s": "money",
+                            "cf": 0.9,
+                            "r": "numeric billing value",
+                            "me": "true",
+                            "di": False,
+                            "dt": False,
+                        }
+                    }
+                }
+            )
+        )
+
+
+def test_invalid_json_fallback_is_reported_once_without_duplicate_stdout(monkeypatch, caplog, capsys):
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "billed_value", "type": "DECIMAL(10,2)", "semantic_type": "numeric_candidate"}
+            ]
+        }
+    }
+    monkeypatch.setattr(
+        "semantic.ai_semantic_enricher._call_ai_backend",
+        lambda messages, backend, response_format=None: "model preface {not valid json}",
+    )
+    caplog.set_level(logging.INFO, logger="aisqlqurrey")
+
+    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
+
+    assert enriched == knowledge_base
+    assert "Using rule-based fallback" not in capsys.readouterr().out
+    fallback_logs = [record.message for record in caplog.records if "enrichment fallback" in record.message.lower()]
+    assert fallback_logs == ["AI semantic enrichment fallback: Local AI returned invalid JSON."]
 
 
 def test_enrich_knowledge_base_with_ai_fallback_on_invalid_json(monkeypatch):

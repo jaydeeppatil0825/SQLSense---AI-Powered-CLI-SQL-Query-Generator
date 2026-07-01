@@ -500,7 +500,6 @@ class DatabaseService:
                         self.last_ai_enrichment_status = "fallback"
                         self.last_ai_enrichment_message = "Ollama is not running. Using rule-based enrichment."
                         logger.info(self.last_ai_enrichment_message)
-                        print(f"  {self.last_ai_enrichment_message}")
                         enriched_kb = knowledge_base
                     else:
                         enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
@@ -516,7 +515,6 @@ class DatabaseService:
                         else:
                             self.last_ai_enrichment_message = "NVIDIA backend is not connected. Using rule-based enrichment."
                         logger.info(f"{self.last_ai_enrichment_message} Probe result: {backend_message}")
-                        print(f"  {self.last_ai_enrichment_message}")
                         enriched_kb = knowledge_base
                     else:
                         enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
@@ -560,8 +558,6 @@ class DatabaseService:
                             self.last_ai_enrichment_message = "Ollama is not running. Using rule-based enrichment."
                         else:
                             self.last_ai_enrichment_message = f"{reason}. Using rule-based fallback."
-                        logger.info(self.last_ai_enrichment_message)
-                        print(f"  {self.last_ai_enrichment_message}")
             except Exception as e:
                 # Catch everything so a timeout or network error never stops KB generation
                 reason = _describe_ai_enrichment_failure(e, ai_backend)
@@ -574,7 +570,6 @@ class DatabaseService:
                     self.last_ai_enrichment_message = f"{reason}. Using rule-based fallback."
                 logger.info(self.last_ai_enrichment_message)
                 logger.debug("AI enrichment technical details", exc_info=True)
-                print(f"  {self.last_ai_enrichment_message}")
         
         # Generate business glossary
         try:

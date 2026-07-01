@@ -85,13 +85,30 @@ class ChromaStore:
 
     def _init_client(self) -> None:
         try:
+            # Chroma telemetry is non-essential for SQLSense and older Chroma
+            # releases are incompatible with newer PostHog capture signatures.
+            os.environ["ANONYMIZED_TELEMETRY"] = "False"
             module = importlib.import_module("chromadb")
             persistent_client = getattr(module, "PersistentClient", None)
             if persistent_client is None:
                 raise ImportError("chromadb.PersistentClient is unavailable")
             self.persist_dir.mkdir(parents=True, exist_ok=True)
             self._module = module
-            self._client = persistent_client(path=str(self.persist_dir))
+            client_kwargs: dict[str, Any] = {"path": str(self.persist_dir)}
+            try:
+                config_module = importlib.import_module("chromadb.config")
+                settings_type = getattr(config_module, "Settings", None)
+                if settings_type is not None:
+                    client_kwargs["settings"] = settings_type(anonymized_telemetry=False)
+            except (ImportError, AttributeError, TypeError, ValueError) as exc:
+                logger.debug(f"Chroma telemetry settings are unavailable; using environment configuration: {exc}")
+
+            try:
+                self._client = persistent_client(**client_kwargs)
+            except TypeError as exc:
+                if "settings" not in client_kwargs or "settings" not in str(exc).lower():
+                    raise
+                self._client = persistent_client(path=str(self.persist_dir))
             self._available = True
             self._init_error = ""
         except Exception as exc:

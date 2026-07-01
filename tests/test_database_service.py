@@ -45,6 +45,47 @@ def test_build_knowledge_base_falls_back_when_ollama_is_not_running(monkeypatch,
     )
 
 
+def test_build_knowledge_base_invalid_ai_json_falls_back_once_and_stays_ready(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
+    monkeypatch.setenv("CHROMA_INDEX_DIR", str(tmp_path / "chroma"))
+    engine = create_engine("sqlite:///:memory:")
+    metadata = MetaData()
+    Table(
+        "orders",
+        metadata,
+        Column("order_id", Integer, primary_key=True),
+        Column("final_amount", Integer),
+    )
+    metadata.create_all(engine)
+
+    service = DatabaseService()
+    service.engine = engine
+    service.db_config = {"db_type": "sqlite", "sqlite_path": ":memory:"}
+    monkeypatch.setattr("core.database_service.save_json", lambda data, path: None)
+    monkeypatch.setattr("core.database_service.save_business_glossary", lambda glossary, path: None)
+    monkeypatch.setattr("core.database_service.check_ollama_status", lambda: (True, "ready"))
+    monkeypatch.setattr(
+        "kb_pipeline.ai_semantic_enricher._call_ai_backend",
+        lambda messages, backend, response_format=None: "prefix {not valid json}",
+    )
+
+    success, message, knowledge_base = service.build_knowledge_base(
+        use_ai_enrichment=True,
+        ai_backend="local",
+    )
+
+    assert success is True
+    assert message == "Knowledge base built successfully"
+    assert "orders" in knowledge_base
+    assert service.get_last_ai_enrichment_result() == (
+        "fallback",
+        "Local AI returned invalid JSON. Using rule-based fallback.",
+    )
+    assert "Using rule-based fallback" not in capsys.readouterr().out
+    assert service.get_vector_status()["index_status"] == "ready"
+
+
 def test_build_knowledge_base_skips_nvidia_ai_enrichment_when_backend_not_connected(monkeypatch, tmp_path):
     monkeypatch.setenv("VECTOR_INDEX_DIR", str(tmp_path / "vector_index"))
     engine = create_engine("sqlite:///:memory:")

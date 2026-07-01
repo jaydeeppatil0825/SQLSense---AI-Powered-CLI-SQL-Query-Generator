@@ -71,6 +71,41 @@ def _fake_chromadb_module():
     return SimpleNamespace(PersistentClient=_FakePersistentClient)
 
 
+def test_chroma_client_disables_anonymized_telemetry_and_still_builds(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeSettings:
+        def __init__(self, **kwargs):
+            captured["settings_kwargs"] = kwargs
+
+    class SettingsAwareClient(_FakePersistentClient):
+        def __init__(self, path: str, settings=None):
+            captured["client_settings"] = settings
+            super().__init__(path)
+
+    def fake_import(name):
+        if name == "chromadb":
+            return SimpleNamespace(PersistentClient=SettingsAwareClient)
+        if name == "chromadb.config":
+            return SimpleNamespace(Settings=FakeSettings)
+        raise ImportError(name)
+
+    monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    monkeypatch.setattr("kb_pipeline.vector.chroma_store.importlib.import_module", fake_import)
+    embedding_service = EmbeddingService()
+    builder = VectorIndexBuilder(embedding_service)
+    store = ChromaStore(embedding_service, persist_dir=tmp_path / "chroma")
+    documents = builder.build_from_knowledge_base(_sample_kb(), source_context=_source_context())
+
+    built, _, details = store.build_or_refresh_chroma_index(documents, _source_context())
+
+    assert captured["settings_kwargs"] == {"anonymized_telemetry": False}
+    assert captured["client_settings"] is not None
+    assert built is True
+    assert details["ready"] is True
+    assert store.is_ready() is True
+
+
 def _cosine(left: list[float], right: list[float]) -> float:
     if not left or not right or len(left) != len(right):
         return 0.0
