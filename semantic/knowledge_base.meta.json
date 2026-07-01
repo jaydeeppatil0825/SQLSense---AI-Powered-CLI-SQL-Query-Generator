@@ -2,9 +2,9 @@
     "db_engine": "mysql",
     "db_host": "localhost",
     "db_port": "3306",
-    "db_name": "sqlsense_billing_lab",
+    "db_name": "sqlsense_shop_lab",
     "database_type": "mysql",
-    "database_name": "sqlsense_billing_lab",
-    "schema_hash": "6acbb5329a02594ff52e5ceff0f42ce25ad5c59699fffdbd6d8f48e086e14b80",
-    "schema_fingerprint": "6acbb5329a02594ff52e5ceff0f42ce25ad5c59699fffdbd6d8f48e086e14b80"
+    "database_name": "sqlsense_shop_lab",
+    "schema_hash": "c6fd164baac55a2dc3cf0b6cb944d361701c92cee6c7e5dca9b322e69e17a9c1",
+    "schema_fingerprint": "c6fd164baac55a2dc3cf0b6cb944d361701c92cee6c7e5dca9b322e69e17a9c1"
 }
