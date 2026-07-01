@@ -18,9 +18,28 @@ def _bills_kb():
     }
 
 
-def _single_table_context(question: str, *, intent: str, column_names: list[str] | None = None):
+def _single_table_context(
+    question: str,
+    *,
+    intent: str,
+    column_names: list[str] | None = None,
+    selected_metric: str | None = "amount_total",
+):
     column_names = column_names or ["amount_total", "tax_total"]
+    aggregate_function = {
+        "total": "sum",
+        "average": "avg",
+    }.get(intent)
+    if aggregate_function is None:
+        aggregate_function = "min" if "lowest" in question else "max"
     return {
+        "query_shape": "single_table_aggregate",
+        "aggregate_function": aggregate_function,
+        "selected_metric": (
+            {"table": "bills", "column": selected_metric}
+            if selected_metric
+            else None
+        ),
         "plan": {
             "question": question,
             "intent": intent,
@@ -110,8 +129,14 @@ def test_lowest_amount_from_bills_generates_min():
 
 
 def test_ambiguous_metric_columns_returns_cannot_plan_safely():
+    context = _single_table_context(
+        "show total from bills",
+        intent="total",
+        selected_metric=None,
+    )
+    context["ambiguities"] = ["metric_selection"]
     result = generate_single_table_aggregate_sql(
-        query_context=_single_table_context("show total from bills", intent="total"),
+        query_context=context,
         knowledge_base=_bills_kb(),
     )
 
@@ -143,6 +168,8 @@ def test_missing_metric_returns_metric_not_found():
         "selected_tables": [{"table": "bills", "confidence": 0.9, "selected_columns": [{"column": "net_value", "confidence": 0.7, "semantic_type": "money"}]}],
         "selected_columns": [{"table": "bills", "column": "net_value", "confidence": 0.7, "semantic_type": "money"}],
         "selected_table_names": ["bills"],
+        "selected_metric": None,
+        "aggregate_function": "sum",
         "selected_knowledge_base": kb,
         "join_paths": [],
         "formula_evidence": [],
@@ -156,6 +183,22 @@ def test_missing_metric_returns_metric_not_found():
 
     assert result.status == "cannot_plan_safely"
     assert result.reason == "metric_not_found"
+
+
+def test_generator_uses_planner_selected_metric_without_question_rescoring():
+    context = _single_table_context(
+        "show total tax from bills",
+        intent="total",
+        selected_metric="amount_total",
+    )
+
+    result = generate_single_table_aggregate_sql(
+        query_context=context,
+        knowledge_base=_bills_kb(),
+    )
+
+    assert result.status == "generated"
+    assert result.sql == "SELECT SUM(amount_total) AS sum_amount_total FROM bills;"
 
 
 def test_grouped_query_is_not_applicable():

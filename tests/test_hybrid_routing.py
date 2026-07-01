@@ -1592,7 +1592,7 @@ def test_top_n_browse_currently_uses_rule_based_generator(monkeypatch):
     assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
 
 
-def test_single_table_total_uses_deterministic_aggregate(monkeypatch):
+def test_single_table_total_without_safe_selected_metric_returns_clarification(monkeypatch):
     kb = {
         "operating_costs": {
             "columns": [
@@ -1618,9 +1618,10 @@ def test_single_table_total_uses_deterministic_aggregate(monkeypatch):
 
     success, message, sql, error = service.process_question("show total operating cost", kb, ai_backend="local")
 
-    assert success is True
-    assert sql == "SELECT SUM(spent_value) AS sum_spent_value FROM operating_costs;"
-    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
+    assert success is False
+    assert sql is None
+    assert "cannot choose metric safely" in message.lower()
+    assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
 
 
 def test_top_vector_table_beats_generic_glossary_aliases_for_simple_list():

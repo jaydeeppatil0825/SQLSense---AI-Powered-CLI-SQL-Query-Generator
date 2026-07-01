@@ -2800,8 +2800,9 @@ def _normalize_planner_output(
         ambiguities=list(blocking_ambiguities),
         can_plan=can_plan,
     )
+    contract_ambiguities = sorted(blocking_ambiguities)
     ambiguity_details = _ambiguity_details_for_contract(
-        ambiguities,
+        contract_ambiguities,
         selected_tables,
         effective_measure_candidates,
         dimension_candidates,
@@ -2903,7 +2904,7 @@ def _normalize_planner_output(
         "complex_sql_plan": normalized_complex_sql_plan,
         "required_evidence": required_evidence,
         "missing_evidence": missing_evidence,
-        "ambiguities": ambiguities,
+        "ambiguities": contract_ambiguities,
         "ambiguity_details": ambiguity_details,
         "can_plan": can_plan,
         "blocked_reason": route_reason if route_recommendation == "blocked_unsafe" else "",

@@ -88,6 +88,20 @@ def test_active_planner_classifies_count_of_from_hardened_intent():
     assert context["can_plan"] is True
 
 
+def test_active_planner_classifies_list_from_normalized_table_evidence():
+    intent = build_intent("show all bills")
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.96, "matched_terms": ["bills"], "source": "vector"}],
+    )
+
+    context = build_query_context("show all bills", {}, intent=intent, retrieved_context=evidence)
+
+    assert context["route"] == "deterministic_sql_required"
+    assert context["query_shape"] == "single_table_list"
+    assert context["selected_table_names"] == ["bills"]
+    assert context["can_plan"] is True
+
+
 def test_active_planner_merges_structured_filter_with_field_evidence():
     intent = build_intent("show bills where status is pending")
     status = {
@@ -197,6 +211,36 @@ def test_active_planner_prioritizes_lowest_ranking_intent():
     assert context["limit"] == 5
     assert context["sorting"]["direction"] == "asc"
     assert context["selected_metric"]["column"] == "paid_value"
+
+
+def test_active_grouped_query_fails_closed_when_dimension_evidence_is_missing():
+    intent = build_intent("show total paid value by status from bills")
+    metric = {
+        "table": "bills",
+        "column": "paid_value",
+        "semantic_type": "money",
+        "is_measure": True,
+        "score": 0.95,
+        "matched_terms": ["paid value"],
+        "source": "vector",
+    }
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.96, "matched_terms": ["bills"], "source": "vector"}],
+        columns=[metric],
+        metrics=[metric],
+    )
+
+    context = build_query_context(
+        "show total paid value by status from bills",
+        {},
+        intent=intent,
+        retrieved_context=evidence,
+    )
+
+    assert context["query_shape"] == "grouped_aggregate"
+    assert context["route"] == "cannot_plan_safely"
+    assert "missing_dimension" in context["missing_evidence"]
+    assert context["selected_dimensions"] == []
 
 
 def test_active_planner_blocks_unsafe_intent_and_fails_closed_on_unsupported_intent():

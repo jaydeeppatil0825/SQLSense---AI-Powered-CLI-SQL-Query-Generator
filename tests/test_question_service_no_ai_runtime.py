@@ -48,6 +48,60 @@ RELATIONSHIP_KB = {
     },
 }
 
+PIPELINE_BILLS_KB = {
+    "bills": {
+        "columns": [
+            {"name": "bill_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
+            {"name": "billed_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+            {"name": "paid_value", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+            {"name": "status_code", "type": "VARCHAR(30)", "nullable": True, "semantic_type": "status"},
+        ],
+        "primary_keys": ["bill_id"],
+        "foreign_keys": [],
+        "relationships": [],
+    }
+}
+
+
+def _planner_pipeline_context(
+    question: str,
+    query_shape: str,
+    *,
+    route: str = "deterministic_sql_required",
+    can_plan: bool = True,
+    ambiguities=None,
+    ambiguity_details=None,
+    missing_evidence=None,
+):
+    plan_intent = "total" if query_shape == "single_table_aggregate" else "list"
+    query_context = {
+        "route": route,
+        "route_recommendation": route,
+        "query_shape": query_shape,
+        "can_plan": can_plan,
+        "ambiguities": list(ambiguities or []),
+        "ambiguity_details": list(ambiguity_details or []),
+        "missing_evidence": list(missing_evidence or []),
+        "planner_reason": "planner contract fixture",
+        "plan": {"question": question, "intent": plan_intent, "filters": [], "grouping": []},
+        "selected_tables": [{"table": "bills", "confidence": 0.95}],
+        "selected_table_names": ["bills"],
+        "selected_columns": [],
+        "selected_metric": {"table": "bills", "column": "billed_value"},
+        "aggregate_function": "sum" if query_shape == "single_table_aggregate" else None,
+        "join_paths": [],
+        "complex_sql_plan": {},
+    }
+    return {
+        "normalized_question": question,
+        "route_recommendation": route,
+        "query_context": query_context,
+        "plan": dict(query_context["plan"]),
+        "retrieved_context": {},
+        "formula_evidence": [],
+        "evidence_sources": ["normalized_vector_evidence"],
+    }
+
 
 def test_question_service_does_not_import_ai_sql_generator():
     """
@@ -344,6 +398,149 @@ def test_pipeline_blocked_unsafe_route_blocks_sql_generation(monkeypatch):
     assert sql is None
     assert "unsafe request blocked" in message.lower()
     assert service.get_last_query_context()["route_used"] == "blocked_unsafe"
+
+
+@pytest.mark.parametrize(
+    "query_shape",
+    [
+        "filtered_query",
+        "grouped_aggregate",
+        "ranking_query",
+        "joined_lookup",
+        "multi_metric_aggregate",
+    ],
+)
+def test_clean_planner_known_unimplemented_shapes_return_capability_message(monkeypatch, query_shape):
+    service = QuestionService()
+    pipeline_context = _planner_pipeline_context("show bills", query_shape)
+    monkeypatch.setattr(
+        "sql_pipeline.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Simple generator must not run")),
+    )
+    monkeypatch.setattr(
+        "sql_pipeline.question_service.generate_single_table_aggregate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Aggregate generator must not run")),
+    )
+
+    success, message, sql, error = service.process_question(
+        "show bills",
+        PIPELINE_BILLS_KB,
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is False
+    assert sql is None
+    assert message == (
+        "This query was understood, but deterministic SQL generation for this query shape "
+        f"is not implemented yet: {query_shape}."
+    )
+
+
+@pytest.mark.parametrize(
+    ("ambiguity_type", "choices"),
+    [
+        ("metric_selection", [{"column": "billed_value"}, {"column": "paid_value"}]),
+        ("table_selection", [{"table": "bills"}, {"table": "billing_notes"}]),
+        ("filter_selection", [{"column": "status_code"}, {"column": "lifecycle_state"}]),
+        ("dimension_selection", [{"column": "partner_name"}, {"column": "status_code"}]),
+    ],
+)
+def test_planner_ambiguity_choices_block_all_sql_generation(monkeypatch, ambiguity_type, choices):
+    service = QuestionService()
+    pipeline_context = _planner_pipeline_context(
+        "show bills",
+        "single_table_aggregate" if ambiguity_type == "metric_selection" else "filtered_query",
+        ambiguities=[ambiguity_type],
+        ambiguity_details=[{"type": ambiguity_type, "choices": choices}],
+    )
+    monkeypatch.setattr(
+        "sql_pipeline.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Simple generator must not run")),
+    )
+    monkeypatch.setattr(
+        "sql_pipeline.question_service.generate_single_table_aggregate_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Aggregate generator must not run")),
+    )
+
+    success, message, sql, error = service.process_question(
+        "show bills",
+        PIPELINE_BILLS_KB,
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is False
+    assert sql is None
+    assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
+    for choice in choices:
+        expected = choice.get("column") or choice.get("table")
+        assert expected in message
+
+
+def test_missing_planner_evidence_blocks_generation_even_with_deterministic_route(monkeypatch):
+    service = QuestionService()
+    pipeline_context = _planner_pipeline_context(
+        "show bills",
+        "single_table_list",
+        missing_evidence=["missing_table"],
+    )
+    monkeypatch.setattr(
+        "sql_pipeline.question_service.generate_simple_sql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Simple generator must not run")),
+    )
+
+    success, message, sql, error = service.process_question(
+        "show bills",
+        PIPELINE_BILLS_KB,
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is False
+    assert sql is None
+    assert "missing table" in message.lower()
+    assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
+
+
+def test_stale_old_route_used_value_does_not_control_clean_dispatch(monkeypatch):
+    service = QuestionService()
+    pipeline_context = _planner_pipeline_context("show bills", "single_table_list")
+    pipeline_context["query_context"]["route_used"] = "simple_rule_based"
+    monkeypatch.setattr(
+        "sql_pipeline.question_service.generate_simple_sql",
+        lambda *args, **kwargs: "SELECT bill_id FROM bills LIMIT 50;",
+    )
+
+    success, message, sql, error = service.process_question(
+        "show bills",
+        PIPELINE_BILLS_KB,
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is True
+    assert sql == "SELECT bill_id FROM bills LIMIT 50;"
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
+
+
+def test_invalid_aggregate_sql_is_rejected_after_generation(monkeypatch):
+    service = QuestionService()
+    pipeline_context = _planner_pipeline_context("show total billed value", "single_table_aggregate")
+    monkeypatch.setattr(
+        "sql_pipeline.question_service.generate_single_table_aggregate_sql",
+        lambda *args, **kwargs: SimpleNamespace(
+            status="generated",
+            sql="SELECT FROM bills;",
+            reason="invalid fixture",
+        ),
+    )
+
+    success, message, sql, error = service.process_question(
+        "show total billed value",
+        PIPELINE_BILLS_KB,
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is False
+    assert sql is None
+    assert "sql validation failed" in message.lower()
 
 
 def test_runtime_ai_sql_helpers_are_blocked():

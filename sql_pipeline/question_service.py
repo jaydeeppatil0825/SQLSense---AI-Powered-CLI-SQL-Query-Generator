@@ -485,13 +485,86 @@ def _route_recommendation(query_context: dict[str, Any]) -> str:
     return ""
 
 
+def _planner_ambiguity_types(query_context: dict[str, Any]) -> set[str]:
+    ambiguity_types: set[str] = set()
+    for value in (query_context.get("ambiguities") or []):
+        if isinstance(value, dict):
+            ambiguity_type = str(value.get("type") or "").strip()
+        else:
+            ambiguity_type = str(value).strip()
+        if ambiguity_type:
+            ambiguity_types.add(ambiguity_type)
+    for detail in (query_context.get("ambiguity_details") or []):
+        if isinstance(detail, dict) and str(detail.get("type") or "").strip():
+            ambiguity_types.add(str(detail["type"]).strip())
+    return ambiguity_types
+
+
+def _ambiguity_choice_labels(ambiguity_type: str, choices: list[Any]) -> list[str]:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for choice in choices:
+        if isinstance(choice, dict):
+            if ambiguity_type == "table_selection":
+                label = str(choice.get("table") or choice.get("table_name") or choice.get("name") or "").strip()
+            else:
+                label = str(
+                    choice.get("column")
+                    or choice.get("column_name")
+                    or choice.get("value")
+                    or choice.get("name")
+                    or ""
+                ).strip()
+        else:
+            label = str(choice).strip()
+        key = label.lower()
+        if label and key not in seen:
+            seen.add(key)
+            labels.append(label)
+    return labels
+
+
+def _planner_ambiguity_message(query_context: dict[str, Any]) -> str:
+    details = [
+        detail
+        for detail in (query_context.get("ambiguity_details") or [])
+        if isinstance(detail, dict) and str(detail.get("type") or "").strip()
+    ]
+    labels_by_type = {
+        str(detail.get("type") or "").strip(): _ambiguity_choice_labels(
+            str(detail.get("type") or "").strip(),
+            list(detail.get("choices") or []),
+        )
+        for detail in details
+    }
+    ambiguity_types = _planner_ambiguity_types(query_context)
+    for ambiguity_type, subject in (
+        ("metric_selection", "metric"),
+        ("table_selection", "table"),
+        ("filter_selection", "filter field"),
+        ("dimension_selection", "dimension"),
+    ):
+        if ambiguity_type not in ambiguity_types:
+            continue
+        labels = labels_by_type.get(ambiguity_type) or []
+        if ambiguity_type == "metric_selection" and not labels:
+            labels = _numeric_field_candidates(query_context)
+        if labels:
+            return f"Cannot choose {subject} safely. Choices: {', '.join(labels[:6])}. Please specify one."
+        return f"Cannot choose {subject} safely because multiple candidates are equally plausible. Please specify one."
+    return ""
+
+
 def _planning_block_message(query_context: dict[str, Any], route_recommendation: str) -> str:
     if route_recommendation == "blocked_unsafe":
         return "Unsafe request blocked. Only SELECT questions are allowed."
-    ambiguities = {str(value).strip() for value in (query_context.get("ambiguities") or []) if str(value).strip()}
+    ambiguities = _planner_ambiguity_types(query_context)
     missing_evidence = {str(value).strip() for value in (query_context.get("missing_evidence") or []) if str(value).strip()}
     query_shape = str(query_context.get("query_shape") or "").strip()
 
+    ambiguity_message = _planner_ambiguity_message(query_context)
+    if ambiguity_message:
+        return ambiguity_message
     if "table_selection" in ambiguities and query_shape in {"unknown", "single_table_list", "single_table_count", "single_table_aggregate"}:
         return _clarification_message(query_context)
     if "metric_selection" in ambiguities and query_shape == "single_table_aggregate":
@@ -500,7 +573,7 @@ def _planning_block_message(query_context: dict[str, Any], route_recommendation:
         return _deterministic_aggregate_failure_message(query_context, "metric_not_found")
 
     detail_parts: list[str] = []
-    route_reason = str(query_context.get("route_reason") or "").strip()
+    route_reason = str(query_context.get("planner_reason") or query_context.get("route_reason") or "").strip()
     if route_reason:
         detail_parts.append(route_reason.replace("_", " "))
     if missing_evidence:
@@ -1495,9 +1568,7 @@ class QuestionService:
 
         route = (
             query_context.get("route")
-            or query_context.get("route_used")
             or route_recommendation
-            or plan.get("route")
         )
         if not route:
             if query_shape == "blocked_unsafe":
@@ -1506,15 +1577,37 @@ class QuestionService:
                 route = "deterministic_sql_required"
             else:
                 route = "cannot_plan_safely"
-        if route == "blocked_unsafe":
+        if route == "blocked_unsafe" or query_shape == "blocked_unsafe":
             _set_route(query_context, "blocked_unsafe", "planner blocked this request before SQL generation")
-            return False, _planning_block_message(query_context, route), None, None
+            return False, _planning_block_message(query_context, "blocked_unsafe"), None, None
+
+        planner_ambiguities = _planner_ambiguity_types(query_context)
+        planner_missing_evidence = {
+            str(value).strip()
+            for value in (query_context.get("missing_evidence") or [])
+            if str(value).strip()
+        }
+        if planner_ambiguities or planner_missing_evidence or query_context.get("can_plan") is False:
+            _set_route(
+                query_context,
+                "cannot_plan_safely",
+                str(
+                    query_context.get("planner_reason")
+                    or query_context.get("route_reason")
+                    or "planner evidence is ambiguous or incomplete"
+                ),
+            )
+            return False, _planning_block_message(query_context, "cannot_plan_safely"), None, None
 
         if route == "cannot_plan_safely":
             _set_route(
                 query_context,
                 "cannot_plan_safely",
-                str(query_context.get("route_reason") or "cannot plan safely from available evidence"),
+                str(
+                    query_context.get("planner_reason")
+                    or query_context.get("route_reason")
+                    or "cannot plan safely from available evidence"
+                ),
             )
             return False, _planning_block_message(query_context, route), None, None
 

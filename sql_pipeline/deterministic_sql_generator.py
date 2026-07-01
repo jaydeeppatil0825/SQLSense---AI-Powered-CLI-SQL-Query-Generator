@@ -22,38 +22,13 @@ from dataclasses import dataclass, field
 import re
 from typing import Any, Optional
 
-from kb_pipeline.schema_facts import column_business_description, column_business_terms, resolved_semantic_type
+from kb_pipeline.schema_facts import resolved_semantic_type
 
 _AGGREGATE_HINTS = {
     "sum": {"sum", "total"},
     "avg": {"average", "avg", "mean"},
     "max": {"maximum", "max", "highest"},
     "min": {"minimum", "min", "lowest"},
-}
-_GENERIC_QUERY_TERMS = {
-    "show",
-    "list",
-    "display",
-    "get",
-    "fetch",
-    "tell",
-    "me",
-    "all",
-    "of",
-    "for",
-    "from",
-    "in",
-    "on",
-    "at",
-    "to",
-    "with",
-    "the",
-    "a",
-    "an",
-    "records",
-    "record",
-    "rows",
-    "row",
 }
 _NUMERIC_TYPE_MARKERS = ("int", "decimal", "numeric", "float", "double", "real")
 
@@ -114,7 +89,7 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
     context = query_context if isinstance(query_context, dict) else {}
     plan = context.get("plan") if isinstance(context.get("plan"), dict) else {}
     selected_tables = [entry for entry in (context.get("selected_tables") or []) if isinstance(entry, dict)]
-    aggregate_function = _detect_aggregate_function(plan)
+    aggregate_function = _planner_aggregate_function(context, plan)
 
     if aggregate_function is None:
         return DeterministicCapabilityResult(
@@ -287,7 +262,7 @@ def _build_single_table_aggregate_plan(
             formula_evidence=list(context.get("formula_evidence") or []),
         )
 
-    aggregate_function = _detect_aggregate_function(plan)
+    aggregate_function = _planner_aggregate_function(context, plan)
     if aggregate_function is None or aggregate_function == "count":
         return DeterministicSqlPlan(
             query_shape="single_table_aggregate",
@@ -302,7 +277,6 @@ def _build_single_table_aggregate_plan(
 
     metric_column, metric_reason = _resolve_metric_column(
         query_context=context,
-        plan=plan,
         table_name=table_name,
         table_data=table_data,
     )
@@ -372,6 +346,17 @@ def _detect_aggregate_function(plan: dict[str, Any]) -> str | None:
     return None
 
 
+def _planner_aggregate_function(context: dict[str, Any], plan: dict[str, Any]) -> str | None:
+    selected_function = str(context.get("aggregate_function") or "").strip().lower()
+    if selected_function:
+        normalized = {"average": "avg", "mean": "avg", "total": "sum"}.get(
+            selected_function,
+            selected_function,
+        )
+        return normalized if normalized in {"sum", "avg", "min", "max", "count"} else None
+    return _detect_aggregate_function(plan)
+
+
 def _infer_query_shape(context: dict[str, Any], plan: dict[str, Any]) -> str:
     selected_tables = [entry for entry in (context.get("selected_tables") or []) if isinstance(entry, dict)]
     has_joins = bool(context.get("join_paths"))
@@ -410,107 +395,34 @@ def _shape_blockers(query_shape: str) -> list[str]:
 def _resolve_metric_column(
     *,
     query_context: dict[str, Any],
-    plan: dict[str, Any],
     table_name: str,
     table_data: dict[str, Any],
 ) -> tuple[str | None, str]:
     table_columns = [column for column in (table_data.get("columns") or []) if isinstance(column, dict)]
-    numeric_columns = [
-        column for column in table_columns
-        if _is_numeric_metric_column(column, table_data)
-    ]
-    if not numeric_columns:
-        return None, "metric_not_found"
-
-    metric_terms = _metric_query_terms(str(plan.get("question") or ""), table_name)
-    if len(numeric_columns) == 1:
-        column_name = str(numeric_columns[0].get("name") or "").strip()
-        if not column_name:
-            return None, "metric_not_found"
-        if not metric_terms:
-            return column_name, ""
-        query_score = _metric_match_score(metric_terms, numeric_columns[0])
-        if query_score > 0:
-            return column_name, ""
-        return None, "metric_not_found"
-
-    selected_columns = [
-        entry for entry in (query_context.get("selected_columns") or [])
-        if isinstance(entry, dict) and str(entry.get("table") or "").strip() == table_name
-    ]
-    selected_confidence = {
-        str(entry.get("column") or "").strip(): float(entry.get("confidence") or 0.0)
-        for entry in selected_columns
-        if str(entry.get("column") or "").strip()
+    ambiguity_types = {
+        str(value).strip()
+        for value in (query_context.get("ambiguities") or [])
+        if str(value).strip()
     }
-    measure_candidates = [
-        entry for entry in (query_context.get("measure_candidates") or [])
-        if isinstance(entry, dict) and str(entry.get("table") or "").strip() == table_name
-    ]
-    measure_candidate_names = {
-        str(entry.get("column") or "").strip()
-        for entry in measure_candidates
-        if str(entry.get("column") or "").strip()
-    }
-
-    if not metric_terms:
+    if "metric_selection" in ambiguity_types:
         return None, "metric_ambiguous"
 
-    scored_candidates = []
-    for column in numeric_columns:
-        column_name = str(column.get("name") or "").strip()
-        if not column_name:
-            continue
-        query_score = _metric_match_score(metric_terms, column)
-        selected_score = selected_confidence.get(column_name, 0.0)
-        measure_score = 0.5 if column_name in measure_candidate_names else 0.0
-        scored_candidates.append(
-            {
-                "column": column_name,
-                "query_score": query_score,
-                "score": query_score + selected_score + measure_score,
-            }
-        )
+    selected_metric = query_context.get("selected_metric")
+    if not isinstance(selected_metric, dict):
+        return None, "metric_not_found"
 
-    direct_matches = [candidate for candidate in scored_candidates if candidate["query_score"] > 0]
-    if len(direct_matches) == 1:
-        return direct_matches[0]["column"], ""
-    if len(direct_matches) > 1:
-        direct_matches.sort(key=lambda item: (-item["score"], item["column"]))
-        top = direct_matches[0]
-        second = direct_matches[1]
-        if top["score"] >= second["score"] + 0.2:
-            return top["column"], ""
-        return None, "metric_ambiguous"
+    metric_table = str(selected_metric.get("table") or "").strip()
+    metric_column = str(selected_metric.get("column") or selected_metric.get("column_name") or "").strip()
+    if not metric_column or (metric_table and metric_table != table_name):
+        return None, "metric_not_found"
 
-    return None, "metric_not_found"
-
-
-def _metric_query_terms(question: str, table_name: str) -> set[str]:
-    tokens = set(_tokenize(question))
-    aggregate_terms = set().union(*_AGGREGATE_HINTS.values())
-    table_terms = set(_tokenize(table_name))
-    return {
-        token for token in tokens
-        if token not in _GENERIC_QUERY_TERMS
-        and token not in aggregate_terms
-        and token not in table_terms
-    }
-
-
-def _metric_match_score(metric_terms: set[str], column: dict[str, Any]) -> float:
-    if not metric_terms:
-        return 0.0
-
-    search_tokens = set(_tokenize(str(column.get("name") or "")))
-    for term in column_business_terms(column):
-        search_tokens.update(_tokenize(term))
-    search_tokens.update(_tokenize(column_business_description(column)))
-
-    overlap = metric_terms & search_tokens
-    if not overlap:
-        return 0.0
-    return round(len(overlap) / max(len(metric_terms), 1), 4)
+    schema_column = next(
+        (column for column in table_columns if str(column.get("name") or "").strip() == metric_column),
+        None,
+    )
+    if schema_column is None or not _is_numeric_metric_column(schema_column, table_data):
+        return None, "metric_not_found"
+    return metric_column, ""
 
 
 def _is_numeric_metric_column(column: dict[str, Any], table_data: dict[str, Any]) -> bool:
