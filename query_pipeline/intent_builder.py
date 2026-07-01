@@ -15,6 +15,7 @@ from utils.logger import get_logger
 from query_pipeline.question_normalizer import normalize_question
 
 logger = get_logger()
+INTENT_CONTRACT_VERSION = "1.0"
 _ALLOWED_INTENT_TYPES = {
     "list",
     "count",
@@ -47,17 +48,25 @@ _COUNT_RE = re.compile(
     re.IGNORECASE,
 )
 _TOP_RE = re.compile(r"\btop\s+(\d+)\b", re.IGNORECASE)
+_BOTTOM_RE = re.compile(r"\b(?:bottom|lowest)\s+(\d+)\b", re.IGNORECASE)
 _FIRST_RE = re.compile(r"\bfirst\s+(\d+)\b", re.IGNORECASE)
 _LIMIT_RE = re.compile(r"\blimit\s+(\d+)\b", re.IGNORECASE)
 _LATEST_RE = re.compile(r"\b(?:latest|recent|newest|oldest)\b", re.IGNORECASE)
-_SORTED_BY_RE = re.compile(r"\b(?:sorted|ordered)\s+by\s+(.+)$", re.IGNORECASE)
+_SORTED_BY_RE = re.compile(r"\b(?:sort(?:ed)?|order(?:ed)?)\s+by\s+(.+)$", re.IGNORECASE)
 _BY_RE = re.compile(r"\s+by\s+", re.IGNORECASE)
 _PER_RE = re.compile(r"\s+per\s+", re.IGNORECASE)
 _WISE_RE = re.compile(r"\b[a-z0-9_ ]+\s+wise\b", re.IGNORECASE)
 _FROM_RE = re.compile(r"\s+from\s+(.+)$", re.IGNORECASE)
 _IN_RE = re.compile(r"\s+in\s+(.+)$", re.IGNORECASE)
-_WHERE_RE = re.compile(r"\s+where\s+(.+)$", re.IGNORECASE)
-_FILTER_RE = re.compile(r"\s+filter(?:ed)?(?:\s+by)?\s+(.+)$", re.IGNORECASE)
+_FOR_RE = re.compile(r"\s+for\s+(.+)$", re.IGNORECASE)
+_WHERE_RE = re.compile(
+    r"\s+where\s+(.+?)(?=\s+(?:group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit\s+\d+)\b|$)",
+    re.IGNORECASE,
+)
+_FILTER_RE = re.compile(
+    r"\s+filter(?:ed)?(?:\s+by)?\s+(.+?)(?=\s+(?:group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit\s+\d+)\b|$)",
+    re.IGNORECASE,
+)
 _GROUP_BY_RE = re.compile(r"\s+group(?:ed)?\s+by\s+(.+)$", re.IGNORECASE)
 _BETWEEN_RE = re.compile(r"\bbetween\s+(.+?)\s+and\s+(.+?)(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|$))", re.IGNORECASE)
 _BEFORE_RE = re.compile(r"\bbefore\s+(.+?)(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|$))", re.IGNORECASE)
@@ -97,14 +106,13 @@ def build_intent(question: str, ai_backend: str = "local") -> Dict[str, Any]:
     normalized_question, _ = normalize_question(question)
     intent = _build_fallback_intent(normalized_question)
     intent = _normalize_simple_target_entity_usage(intent, normalized_question)
-    intent["source"] = "deterministic"
-    return intent
+    return _apply_intent_contract(intent, normalized_question)
 
 
 def extract_requested_limit(question: str) -> Optional[int]:
     """Extract an explicit row limit from generic query wording."""
     normalized_question, _ = normalize_question(question)
-    for pattern in (_TOP_RE, _FIRST_RE, _LIMIT_RE):
+    for pattern in (_TOP_RE, _BOTTOM_RE, _FIRST_RE, _LIMIT_RE):
         match = pattern.search(normalized_question)
         if not match:
             continue
@@ -115,6 +123,67 @@ def extract_requested_limit(question: str) -> Optional[int]:
         if value > 0:
             return value
     return None
+
+
+def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, Any]:
+    """Attach additive, versioned diagnostics without changing legacy fields."""
+    normalized = dict(intent or {})
+    structured_filters = _extract_structured_filters(question)
+    intent_type = str(normalized.get("intent_type") or "unknown").strip().lower()
+    confidence_reasons = ["deterministic_pattern_match"]
+    missing_phrases: list[str] = []
+    ambiguous_phrases: list[str] = []
+    unsupported_constructs: list[str] = []
+
+    if normalized.get("unsafe"):
+        confidence_reasons.append("explicit_unsafe_operation")
+    if intent_type == "count":
+        confidence_reasons.append("explicit_count_phrase")
+    if normalized.get("aggregate_function"):
+        confidence_reasons.append("explicit_aggregate_function")
+    if normalized.get("limit") is not None:
+        confidence_reasons.append("explicit_limit")
+    if normalized.get("requested_sort"):
+        confidence_reasons.append("explicit_sorting")
+    if normalized.get("requested_filters"):
+        confidence_reasons.append("explicit_filter_clause")
+    if normalized.get("grouping_phrase"):
+        confidence_reasons.append("explicit_grouping_phrase")
+    if normalized.get("source_scope"):
+        confidence_reasons.append("explicit_source_scope")
+
+    if not normalized.get("unsafe"):
+        if intent_type in {"list", "count", "sorted_list"} and not normalized.get("target_entity_phrase"):
+            missing_phrases.append("target_entity_phrase")
+        if intent_type in {"aggregate", "ranking", "grouped_summary"} and not normalized.get("metric_phrase"):
+            missing_phrases.append("metric_phrase")
+        if intent_type == "grouped_summary" and not normalized.get("grouping_phrase"):
+            missing_phrases.append("grouping_phrase")
+
+    if normalized.get("metric_is_generic"):
+        ambiguous_phrases.append("generic_metric_phrase")
+        confidence_reasons.append("generic_metric_requires_evidence")
+    if re.search(r"\b(?:something|anything|everything|stuff|things)\b", question, re.IGNORECASE):
+        ambiguous_phrases.append("vague_business_phrase")
+        confidence_reasons.append("vague_language")
+    if any(entry.get("operator") == "unknown" for entry in structured_filters):
+        unsupported_constructs.append("unparsed_filter_expression")
+    if len([part for part in str(question or "").split(";") if part.strip()]) > 1:
+        unsupported_constructs.append("multiple_statements")
+
+    normalized["intent_contract_version"] = INTENT_CONTRACT_VERSION
+    normalized["structured_filters"] = structured_filters
+    normalized["confidence_reasons"] = _merge_unique(confidence_reasons)
+    normalized["missing_phrases"] = _merge_unique(missing_phrases)
+    normalized["unsupported_constructs"] = _merge_unique(unsupported_constructs)
+    normalized["parse_diagnostics"] = {
+        "missing_phrases": list(normalized["missing_phrases"]),
+        "ambiguous_phrases": _merge_unique(ambiguous_phrases),
+        "unsupported_constructs": list(normalized["unsupported_constructs"]),
+        "has_issues": bool(missing_phrases or ambiguous_phrases or unsupported_constructs),
+    }
+    normalized["source"] = "deterministic"
+    return normalized
 
 
 
@@ -214,24 +283,25 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     source_scope = _extract_source_scope(body)
 
     sort_match = _SORTED_BY_RE.search(normalized_question)
-    if sort_match:
-        requested_sort = {"direction": "asc", "terms": sort_match.group(1).strip()}
+    requested_sort = _extract_requested_sort(normalized_question)
 
-    body_without_rank = re.sub(r"\b(?:top|first|limit)\s+\d+\b", "", body, flags=re.IGNORECASE).strip()
+    body_without_rank = re.sub(r"\b(?:top|bottom|lowest|first|limit)\s+\d+\b", "", body, flags=re.IGNORECASE).strip()
     body_without_latest = re.sub(r"\b(?:latest|recent|newest|oldest)\b", "", body_without_rank, flags=re.IGNORECASE).strip()
-    body_without_sort = re.sub(r"\b(?:sorted|ordered)\s+by\s+.+$", "", body_without_latest, flags=re.IGNORECASE).strip()
+    body_without_sort = re.sub(r"\b(?:sort(?:ed)?|order(?:ed)?)\s+by\s+.+$", "", body_without_latest, flags=re.IGNORECASE).strip()
     body_without_filters = _remove_filter_clauses(body_without_sort)
     body_without_scope = _remove_source_scope(body_without_filters)
 
-    if _COUNT_RE.search(normalized_question):
+    if _COUNT_RE.search(body):
         intent_type = "count"
         business_operation = "count"
         aggregate_function = "count"
-        requested_dimensions = [_cleanup_phrase(_COUNT_RE.sub("", normalized_question).strip())]
+        count_target = _cleanup_phrase(_COUNT_RE.sub("", body).strip())
+        count_target = re.sub(r"^of\s+", "", count_target, flags=re.IGNORECASE).strip()
+        requested_dimensions = [count_target] if count_target else []
     elif _COMPARE_RE.search(normalized_question):
         intent_type = "comparison"
         business_operation = "compare"
-    elif _TOP_RE.search(normalized_question) or _FIRST_RE.search(normalized_question):
+    elif _TOP_RE.search(normalized_question) or _BOTTOM_RE.search(normalized_question) or _FIRST_RE.search(normalized_question):
         intent_type = "ranking"
         business_operation = "rank"
     elif aggregate_function:
@@ -244,7 +314,7 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         intent_type = "filter"
 
     if limit is None:
-        top_match = _TOP_RE.search(normalized_question) or _FIRST_RE.search(normalized_question) or _LIMIT_RE.search(normalized_question)
+        top_match = _TOP_RE.search(normalized_question) or _BOTTOM_RE.search(normalized_question) or _FIRST_RE.search(normalized_question) or _LIMIT_RE.search(normalized_question)
         if top_match:
             limit = int(top_match.group(1))
 
@@ -281,10 +351,10 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
             elif not requested_metrics and primary_phrase:
                 requested_metrics = [primary_phrase]
 
-    if _LATEST_RE.search(normalized_question) and not requested_sort:
-        requested_sort = {"direction": "desc", "terms": "latest"}
     if (_TOP_RE.search(normalized_question) or _FIRST_RE.search(normalized_question)) and not requested_sort:
         requested_sort = {"direction": "desc", "terms": requested_metrics[0] if requested_metrics else "ranking"}
+    if _BOTTOM_RE.search(normalized_question) and not requested_sort:
+        requested_sort = {"direction": "asc", "terms": requested_metrics[0] if requested_metrics else "ranking"}
 
     needs_grouping = bool(requested_dimensions and requested_metrics and _BY_RE.search(body_without_sort))
     needs_aggregation = intent_type in {"count", "aggregate", "grouped_summary", "ranking", "comparison"} or bool(
@@ -387,7 +457,7 @@ def _normalize_simple_target_entity_usage(intent: Dict[str, Any], question: str)
         if _COUNT_RE.search(question):
             normalized["intent_type"] = "count"
             normalized["business_operation"] = "count"
-        elif _TOP_RE.search(question) or _FIRST_RE.search(question):
+        elif _TOP_RE.search(question) or _BOTTOM_RE.search(question) or _FIRST_RE.search(question):
             normalized["intent_type"] = "ranking"
             normalized["business_operation"] = "rank"
         elif _LATEST_RE.search(question) or requested_sort:
@@ -616,8 +686,25 @@ def _metric_is_generic_phrase(metric_phrase: str) -> bool:
     return all(token in _GENERIC_METRIC_TERMS for token in tokens)
 
 
+def _extract_requested_sort(question: str) -> dict[str, str]:
+    match = _SORTED_BY_RE.search(question)
+    if match:
+        terms = _clean_scalar(match.group(1))
+        direction = "asc"
+        direction_match = re.search(r"\s+(asc|ascending|desc|descending)\s*$", terms, re.IGNORECASE)
+        if direction_match:
+            direction = "desc" if direction_match.group(1).lower().startswith("desc") else "asc"
+            terms = terms[: direction_match.start()].strip()
+        return {"direction": direction, "terms": terms} if terms else {}
+    if re.search(r"\b(?:latest|recent|newest)\b", question, re.IGNORECASE):
+        return {"direction": "desc", "terms": "latest"}
+    if re.search(r"\boldest\b", question, re.IGNORECASE):
+        return {"direction": "asc", "terms": "oldest"}
+    return {}
+
+
 def _extract_limit_phrase(question: str) -> str:
-    for pattern in (_TOP_RE, _FIRST_RE, _LIMIT_RE):
+    for pattern in (_TOP_RE, _BOTTOM_RE, _FIRST_RE, _LIMIT_RE):
         match = pattern.search(question)
         if match:
             return _clean_scalar(match.group(0))
@@ -648,17 +735,11 @@ def _target_entity_phrase(
 
 
 def _extract_requested_filters(question: str) -> list[str]:
-    filters: list[str] = []
-    matches = [
-        _WHERE_RE.search(question),
-        _FILTER_RE.search(question),
-    ]
-    for match in matches:
-        if match:
-            filter_phrase = _cleanup_phrase(match.group(1))
-            if filter_phrase:
-                filters.append(filter_phrase)
+    filter_text = _extract_filter_text(question)
+    if filter_text:
+        return [phrase for phrase, _ in _split_filter_phrases(filter_text)]
 
+    filters: list[str] = []
     between_match = _BETWEEN_RE.search(question)
     if between_match:
         left = _cleanup_phrase(between_match.group(1))
@@ -681,33 +762,128 @@ def _extract_requested_filters(question: str) -> list[str]:
     return _merge_unique(filters)
 
 
-def _extract_source_scope(question: str) -> list[str]:
-    match = _FROM_RE.search(question)
+def _extract_filter_text(question: str) -> str:
+    for pattern in (_WHERE_RE, _FILTER_RE):
+        match = pattern.search(question)
+        if match:
+            return _cleanup_phrase(match.group(1))
+    return ""
+
+
+def _split_filter_phrases(filter_text: str) -> list[tuple[str, str | None]]:
+    protected = re.sub(
+        r"(\bbetween\s+\S+)\s+and\s+(\S+)",
+        lambda match: f"{match.group(1)} __between_and__ {match.group(2)}",
+        str(filter_text or ""),
+        flags=re.IGNORECASE,
+    )
+    parts = re.split(r"\s+(and|or)\s+", protected, flags=re.IGNORECASE)
+    results: list[tuple[str, str | None]] = []
+    conjunction: str | None = None
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            conjunction = part.lower()
+            continue
+        phrase = _cleanup_phrase(part.replace("__between_and__", "and"))
+        if phrase:
+            results.append((phrase, conjunction))
+        conjunction = None
+    return results
+
+
+def _extract_structured_filters(question: str) -> list[dict[str, Any]]:
+    filter_text = _extract_filter_text(question)
+    phrases = _split_filter_phrases(filter_text) if filter_text else [
+        (phrase, None) for phrase in _extract_requested_filters(question)
+    ]
+    structured: list[dict[str, Any]] = []
+    patterns = (
+        (r"^(.+?)\s+between\s+(.+?)\s+and\s+(.+)$", "between"),
+        (r"^(.+?)\s+(?:is\s+not|!=|<>)\s+(.+)$", "neq"),
+        (r"^(.+?)\s+(?:greater\s+than\s+or\s+equal\s+to|at\s+least|>=)\s+(.+)$", "gte"),
+        (r"^(.+?)\s+(?:less\s+than\s+or\s+equal\s+to|at\s+most|<=)\s+(.+)$", "lte"),
+        (r"^(.+?)\s+(?:greater\s+than|>)\s+(.+)$", "gt"),
+        (r"^(.+?)\s+(?:less\s+than|<)\s+(.+)$", "lt"),
+        (r"^(.+?)\s+(?:equals?|is|=)\s+(.+)$", "eq"),
+        (r"^(.+?)\s+before\s+(.+)$", "before"),
+        (r"^(.+?)\s+after\s+(.+)$", "after"),
+        (r"^(.+?)\s+contains\s+(.+)$", "contains"),
+    )
+    for phrase, conjunction in phrases:
+        entry = {
+            "raw_phrase": phrase,
+            "field": "",
+            "field_phrase": "",
+            "operator": "unknown",
+            "value": "",
+            "value_phrase": "",
+            "values": [],
+            "conjunction": conjunction,
+        }
+        for pattern, operator in patterns:
+            match = re.match(pattern, phrase, re.IGNORECASE)
+            if not match:
+                continue
+            entry["field_phrase"] = _cleanup_phrase(match.group(1))
+            entry["field"] = entry["field_phrase"]
+            entry["operator"] = operator
+            if operator == "between":
+                entry["values"] = [_cleanup_phrase(match.group(2)), _cleanup_phrase(match.group(3))]
+                entry["value_phrase"] = " and ".join(entry["values"])
+                entry["value"] = list(entry["values"])
+            else:
+                entry["value_phrase"] = _cleanup_phrase(match.group(2))
+                entry["values"] = [entry["value_phrase"]] if entry["value_phrase"] else []
+                entry["value"] = entry["value_phrase"]
+            break
+        structured.append(entry)
+    return structured
+
+
+def _source_scope_match(question: str) -> Optional[re.Match[str]]:
+    from_match = _FROM_RE.search(question)
+    if from_match:
+        return from_match
+    for pattern in (_IN_RE, _FOR_RE):
+        match = pattern.search(question)
+        if not match:
+            continue
+        prefix = question[: match.start()].strip()
+        body = _strip_leading_action(prefix)
+        if _COUNT_RE.search(body) or _detect_aggregate_function(prefix) or _TOP_RE.search(prefix) or _BOTTOM_RE.search(prefix):
+            return match
+    return None
+
+
+def _scope_parts(question: str) -> Optional[tuple[re.Match[str], str, Optional[re.Match[str]]]]:
+    match = _source_scope_match(question)
     if not match:
-        return []
+        return None
     tail = match.group(1)
     split_match = re.search(
-        r"\s+(?:where|filter(?:ed)?(?:\s+by)?|before|after|between|greater\s+than|less\s+than|sorted|ordered|by|per|each|group(?:ed)?\s+by)\b",
+        r"\s+(?:where|filter(?:ed)?(?:\s+by)?|before|after|between|greater\s+than|less\s+than|sort(?:ed)?|order(?:ed)?|by|per|each|group(?:ed)?\s+by)\b",
         tail,
         flags=re.IGNORECASE,
     )
+    return match, tail, split_match
+
+
+def _extract_source_scope(question: str) -> list[str]:
+    parts = _scope_parts(question)
+    if not parts:
+        return []
+    _, tail, split_match = parts
     scope = tail[: split_match.start()] if split_match else tail
     cleaned = _cleanup_phrase(scope)
     return [cleaned] if cleaned else []
 
 
 def _remove_source_scope(question: str) -> str:
-    match = _FROM_RE.search(question)
-    if not match:
+    parts = _scope_parts(question)
+    if not parts:
         return question.strip()
-
+    match, tail, split_match = parts
     prefix = question[: match.start()].strip()
-    tail = match.group(1)
-    split_match = re.search(
-        r"\s+(?:where|filter(?:ed)?(?:\s+by)?|before|after|between|greater\s+than|less\s+than|sorted|ordered|by|per|each|group(?:ed)?\s+by)\b",
-        tail,
-        flags=re.IGNORECASE,
-    )
     if not split_match:
         return prefix
 
@@ -717,11 +893,15 @@ def _remove_source_scope(question: str) -> str:
 
 def _remove_filter_clauses(question: str) -> str:
     stripped = question
-    for pattern in (_WHERE_RE, _FILTER_RE, _BETWEEN_RE, _BEFORE_RE, _AFTER_RE, _GREATER_THAN_RE, _LESS_THAN_RE):
+    for pattern in (_WHERE_RE, _FILTER_RE):
         match = pattern.search(stripped)
         if not match:
             continue
-        stripped = stripped[: match.start()].strip()
+        stripped = _clean_scalar(f"{stripped[: match.start()]} {stripped[match.end() :]}")
+    for pattern in (_BETWEEN_RE, _BEFORE_RE, _AFTER_RE, _GREATER_THAN_RE, _LESS_THAN_RE):
+        match = pattern.search(stripped)
+        if match:
+            stripped = stripped[: match.start()].strip()
     return stripped
 
 

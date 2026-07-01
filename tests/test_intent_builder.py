@@ -131,3 +131,149 @@ def test_fallback_intent_builder_preserves_structured_phrases_for_grouped_aggreg
     assert intent["source_scope_phrase"] == "bills"
     assert intent["grouping_phrase"] == "partner"
 
+
+def test_intent_contract_is_versioned_and_preserves_legacy_fields():
+    intent = build_intent("show all bills", ai_backend="local")
+
+    assert intent["intent_contract_version"] == "1.0"
+    assert intent["structured_filters"] == []
+    assert intent["parse_diagnostics"]["has_issues"] is False
+    assert "deterministic_pattern_match" in intent["confidence_reasons"]
+    assert {
+        "intent_type",
+        "requested_metrics",
+        "requested_dimensions",
+        "requested_filters",
+        "requested_sort",
+        "source_scope",
+        "limit",
+        "unsafe",
+        "target_entity_phrase",
+        "metric_phrase",
+    } <= set(intent)
+
+
+def test_show_count_of_bills_uses_count_contract():
+    intent = build_intent("show count of bills", ai_backend="local")
+
+    assert intent["intent_type"] == "count"
+    assert intent["aggregate_function"] == "count"
+    assert intent["target_entity_phrase"] == "bills"
+    assert intent["unsafe"] is False
+    assert "explicit_count_phrase" in intent["confidence_reasons"]
+
+
+def test_multi_filter_question_preserves_legacy_and_structured_filters():
+    intent = build_intent(
+        "show bills where status is pending and amount greater than 5000",
+        ai_backend="local",
+    )
+
+    assert intent["intent_type"] == "filter"
+    assert intent["requested_filters"] == ["status is pending", "amount greater than 5000"]
+    assert intent["structured_filters"] == [
+        {
+            "raw_phrase": "status is pending",
+            "field": "status",
+            "field_phrase": "status",
+            "operator": "eq",
+            "value": "pending",
+            "value_phrase": "pending",
+            "values": ["pending"],
+            "conjunction": None,
+        },
+        {
+            "raw_phrase": "amount greater than 5000",
+            "field": "amount",
+            "field_phrase": "amount",
+            "operator": "gt",
+            "value": "5000",
+            "value_phrase": "5000",
+            "values": ["5000"],
+            "conjunction": "and",
+        },
+    ]
+
+
+def test_or_filter_and_clause_boundary_are_preserved():
+    intent = build_intent(
+        "show bills where status is pending or status is overdue sorted by amount desc",
+        ai_backend="local",
+    )
+
+    assert intent["requested_filters"] == ["status is pending", "status is overdue"]
+    assert intent["structured_filters"][1]["conjunction"] == "or"
+    assert intent["requested_sort"] == {"direction": "desc", "terms": "amount"}
+
+
+def test_grouping_after_filter_is_preserved():
+    intent = build_intent(
+        "show sum amount from bills where status is pending group by partner",
+        ai_backend="local",
+    )
+
+    assert intent["intent_type"] == "grouped_summary"
+    assert intent["metric_phrase"] == "amount"
+    assert intent["source_scope"] == ["bills"]
+    assert intent["filter_phrase"] == "status is pending"
+    assert intent["grouping_phrase"] == "partner"
+
+
+@pytest.mark.parametrize("ranking_word", ["lowest", "bottom"])
+def test_lowest_and_bottom_n_are_ranking_with_ascending_sort(ranking_word):
+    intent = build_intent(f"show {ranking_word} 5 paid value from bills", ai_backend="local")
+
+    assert intent["intent_type"] == "ranking"
+    assert intent["limit"] == 5
+    assert intent["metric_phrase"] == "paid value"
+    assert intent["source_scope"] == ["bills"]
+    assert intent["requested_sort"] == {"direction": "asc", "terms": "paid value"}
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_sort"),
+    [
+        ("show bills sorted by amount descending", {"direction": "desc", "terms": "amount"}),
+        ("show bills ordered by amount asc", {"direction": "asc", "terms": "amount"}),
+    ],
+)
+def test_explicit_sort_direction_is_detected(question, expected_sort):
+    intent = build_intent(question, ai_backend="local")
+
+    assert intent["intent_type"] == "sorted_list"
+    assert intent["requested_sort"] == expected_sort
+
+
+@pytest.mark.parametrize(
+    ("question", "scope"),
+    [
+        ("show sum amount in bills", "bills"),
+        ("show average value for invoices", "invoices"),
+    ],
+)
+def test_safe_in_and_for_source_scope_is_detected(question, scope):
+    intent = build_intent(question, ai_backend="local")
+
+    assert intent["intent_type"] == "aggregate"
+    assert intent["source_scope"] == [scope]
+    assert intent["source_scope_phrase"] == scope
+
+
+def test_generic_metric_and_unsafe_diagnostics_are_additive():
+    aggregate_intent = build_intent("show sum amount from bills", ai_backend="local")
+    unsafe_intent = build_intent("delete bills", ai_backend="local")
+
+    assert aggregate_intent["parse_diagnostics"]["ambiguous_phrases"] == ["generic_metric_phrase"]
+    assert aggregate_intent["parse_diagnostics"]["has_issues"] is True
+    assert unsafe_intent["intent_type"] == "unsafe"
+    assert unsafe_intent["unsafe_operation"] == "delete"
+    assert "explicit_unsafe_operation" in unsafe_intent["confidence_reasons"]
+
+
+def test_parse_diagnostics_reports_missing_metric_phrase():
+    intent = build_intent("show top 5", ai_backend="local")
+
+    assert "metric_phrase" in intent["missing_phrases"]
+    assert intent["parse_diagnostics"]["missing_phrases"] == intent["missing_phrases"]
+    assert intent["parse_diagnostics"]["has_issues"] is True
+
