@@ -164,31 +164,37 @@ def classify_query_shape(
     requested_filters = list((intent or {}).get("requested_filters") or plan.get("requested_filters") or [])
     has_grouping = bool(plan.get("grouping") or plan.get("dimension") or requested_dimensions)
     has_filters = bool(filter_candidates or plan.get("filters") or plan.get("date_range") or requested_filters)
-    has_formula = bool(formula_evidence)
     has_join_paths = bool(join_paths)
     has_join = has_join_paths or table_count > 1
     intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
     planner_intent = str(plan.get("intent") or "").strip().lower()
     aggregate_hint = _aggregate_function_hint(question)
     is_count = planner_intent == "count" or intent_type == "count"
+    ranking_limit = plan.get("limit")
+    if ranking_limit is None:
+        ranking_limit = (intent or {}).get("limit")
     is_ranking = bool(
-        planner_intent == "top_n"
-        or intent_type == "ranking"
-        or (plan.get("limit") is not None and plan.get("sorting"))
+        ranking_limit is not None
+        and (
+            planner_intent == "top_n"
+            or intent_type == "ranking"
+            or bool(plan.get("sorting"))
+        )
+    )
+    has_explicit_rank_count = bool(
+        re.search(r"\b(?:top|bottom|lowest|highest|first|last)\s+\d+\b", question, re.IGNORECASE)
     )
     explicit_metric_count = _explicit_metric_candidate_count(question, metric_candidates)
     has_metric = bool(metric_candidates or requested_metrics)
 
-    if _UNSAFE_QUERY_RE.search(question):
+    if bool((intent or {}).get("unsafe")) or _UNSAFE_QUERY_RE.search(question):
         return "blocked_unsafe"
-    if has_formula:
-        return "formula_query"
-    if requested_metrics and not metric_candidates and (has_grouping or is_ranking or has_join):
-        return "formula_query"
     if has_filters:
         return "filtered_query"
     if explicit_metric_count > 1 and _question_requests_multiple_metrics(question):
         return "multi_metric_aggregate"
+    if is_ranking and has_explicit_rank_count:
+        return "ranking_query"
     if aggregate_hint and table_count == 1 and not has_grouping and not has_join:
         return "single_table_aggregate"
     if is_ranking:
@@ -1571,18 +1577,34 @@ def _structured_sorting(intent: dict[str, Any] | None, planner_intent: str) -> d
 def _structured_filter_entries(
     filter_candidates: list[dict[str, Any]],
     requested_filters: list[str],
+    structured_filters: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     filters: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
-    fallback_term = str(requested_filters[0]).strip() if requested_filters else ""
+    clauses = [dict(entry) for entry in (structured_filters or []) if isinstance(entry, dict)]
+    if not clauses:
+        clauses = [
+            {
+                "raw_phrase": str(term).strip(),
+                "field": "",
+                "operator": "unknown",
+                "value": str(term).strip(),
+                "conjunction": None if index == 0 else "and",
+            }
+            for index, term in enumerate(requested_filters)
+            if str(term).strip()
+        ]
 
-    for entry in filter_candidates:
+    for index, entry in enumerate(filter_candidates):
         table_name = str(entry.get("table", "")).strip()
         column_name = str(entry.get("column", "")).strip()
         if not table_name or not column_name:
             continue
+        clause = clauses[min(index, len(clauses) - 1)] if clauses else {}
         matched_terms = list(entry.get("matched_terms") or [])
-        term = str(matched_terms[0] if matched_terms else fallback_term).strip()
+        raw_phrase = str(clause.get("raw_phrase") or "").strip()
+        value = clause.get("value", clause.get("value_phrase", ""))
+        term = str(matched_terms[0] if matched_terms else raw_phrase or value).strip()
         signature = (table_name, column_name, term)
         if signature in seen:
             continue
@@ -1592,8 +1614,14 @@ def _structured_filter_entries(
                 "type": "value",
                 "table": table_name,
                 "column": column_name,
-                "value": term,
-                "term": term,
+                "value": value,
+                "term": raw_phrase or term,
+                "operator": str(clause.get("operator") or "unknown"),
+                "field_phrase": str(clause.get("field") or clause.get("field_phrase") or ""),
+                "value_phrase": clause.get("value", clause.get("value_phrase", "")),
+                "conjunction": clause.get("conjunction"),
+                "raw_phrase": raw_phrase,
+                "evidence_score": float(entry.get("score") or 0.0),
             }
         )
     return filters[:4]
@@ -1636,6 +1664,8 @@ def _column_selection_from_retrieved_context(
                 "column": str(entry.get("column") or ""),
                 "semantic_type": str(entry.get("semantic_type") or "unknown"),
                 "core_semantic_type": str(entry.get("core_semantic_type") or entry.get("semantic_type") or "unknown"),
+                "column_type": str(entry.get("column_type") or entry.get("type") or ""),
+                "nullable": entry.get("nullable"),
                 "confidence": round(min(max(float(entry.get("score") or 0.0), 0.45), 0.99), 2),
                 "reason": "; ".join(
                     filter(
@@ -1700,10 +1730,77 @@ def _tables_from_column_candidates(candidates: list[dict[str, Any]]) -> list[str
     return tables
 
 
+def _evidence_schema_slice(
+    selected_table_names: list[str],
+    selected_columns: list[dict[str, Any]],
+    matched_relationships: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a compatibility schema slice only from normalized runtime evidence."""
+    schema = {
+        table_name: {
+            "columns": [],
+            "primary_keys": [],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+        for table_name in selected_table_names
+        if table_name
+    }
+    seen_columns: set[tuple[str, str]] = set()
+    for entry in selected_columns:
+        table_name = str(entry.get("table") or "").strip()
+        column_name = str(entry.get("column") or "").strip()
+        key = (table_name, column_name)
+        if not all(key) or key in seen_columns or table_name not in schema:
+            continue
+        seen_columns.add(key)
+        schema[table_name]["columns"].append(
+            {
+                "name": column_name,
+                "type": str(entry.get("column_type") or ""),
+                "nullable": entry.get("nullable"),
+                "semantic_type": str(entry.get("semantic_type") or "unknown"),
+            }
+        )
+    for relationship in matched_relationships:
+        from_table = str(relationship.get("from_table") or "").strip()
+        to_table = str(relationship.get("to_table") or "").strip()
+        if from_table not in schema or to_table not in schema:
+            continue
+        schema[from_table]["relationships"].append(dict(relationship))
+    return schema
+
+
+def _relationship_graph_from_evidence(
+    selected_table_names: list[str],
+    matched_relationships: list[dict[str, Any]],
+) -> dict[str, Any]:
+    graph = {
+        table_name: {"outgoing": [], "incoming": []}
+        for table_name in selected_table_names
+        if table_name
+    }
+    for relationship in matched_relationships:
+        from_table = str(relationship.get("from_table") or "").strip()
+        to_table = str(relationship.get("to_table") or "").strip()
+        if from_table not in graph or to_table not in graph:
+            continue
+        edge = {
+            "from_table": from_table,
+            "from_column": relationship.get("from_column"),
+            "to_table": to_table,
+            "to_column": relationship.get("to_column"),
+            "source": relationship.get("relationship_source") or relationship.get("evidence_source") or relationship.get("source"),
+            "confidence": relationship.get("confidence") or relationship.get("score"),
+        }
+        graph[from_table]["outgoing"].append(edge)
+        graph[to_table]["incoming"].append(edge)
+    return graph
+
+
 def _build_query_context_from_retrieved_context(
     question: str,
     normalized_question: str,
-    enriched_kb: dict,
     intent: dict[str, Any],
     retrieved_context: dict[str, Any],
 ) -> dict:
@@ -1714,41 +1811,48 @@ def _build_query_context_from_retrieved_context(
     requested_metrics = list((intent or {}).get("requested_metrics") or [])
     requested_dimensions = list((intent or {}).get("requested_dimensions") or [])
     requested_filters = list((intent or {}).get("requested_filters") or [])
+    intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
+    requires_metric_evidence = bool(
+        (intent or {}).get("needs_aggregation")
+        or (intent or {}).get("aggregate_function")
+        or intent_type in {"aggregate", "grouped_summary", "ranking"}
+    )
+    required_metric_phrases = requested_metrics if requires_metric_evidence else []
 
     matched_tables = [
         dict(entry)
         for entry in (retrieved_context.get("matched_tables") or [])
-        if str(entry.get("table", "")).strip() in enriched_kb
+        if str(entry.get("table", "")).strip()
     ]
     matched_columns = [
         dict(entry)
         for entry in (retrieved_context.get("matched_columns") or [])
-        if str(entry.get("table", "")).strip() in enriched_kb
+        if str(entry.get("table", "")).strip()
     ]
     measure_candidates = [
         _ensure_candidate_reason(dict(entry), role="metric")
         for entry in (retrieved_context.get("measure_candidates") or [])
-        if str(entry.get("table", "")).strip() in enriched_kb
+        if str(entry.get("table", "")).strip()
     ]
     dimension_candidates = [
         _ensure_candidate_reason(dict(entry), role="dimension")
         for entry in (retrieved_context.get("dimension_candidates") or [])
-        if str(entry.get("table", "")).strip() in enriched_kb
+        if str(entry.get("table", "")).strip()
     ]
     filter_candidates = [
         _ensure_candidate_reason(dict(entry), role="filter")
         for entry in (retrieved_context.get("filter_candidates") or [])
-        if str(entry.get("table", "")).strip() in enriched_kb
+        if str(entry.get("table", "")).strip()
     ]
     join_paths = [
         dict(path)
         for path in (retrieved_context.get("possible_join_paths") or [])
-        if str(path.get("from_table", "")).strip() in enriched_kb and str(path.get("to_table", "")).strip() in enriched_kb
+        if str(path.get("from_table", "")).strip() and str(path.get("to_table", "")).strip()
     ]
     matched_relationships = [
         dict(entry)
         for entry in (retrieved_context.get("matched_relationships") or [])
-        if str(entry.get("from_table", "")).strip() in enriched_kb and str(entry.get("to_table", "")).strip() in enriched_kb
+        if str(entry.get("from_table", "")).strip() and str(entry.get("to_table", "")).strip()
     ]
 
     merged_columns = _merge_candidate_columns(matched_columns, measure_candidates, dimension_candidates, filter_candidates)
@@ -1772,7 +1876,7 @@ def _build_query_context_from_retrieved_context(
         join_paths = []
     else:
         for table_name in _tables_from_join_paths(join_paths):
-            if table_name in enriched_kb and table_name not in selected_table_names:
+            if table_name not in selected_table_names:
                 selected_table_names.append(table_name)
 
     selected_tables = _table_entries_from_retrieved_context(
@@ -1781,15 +1885,6 @@ def _build_query_context_from_retrieved_context(
         join_paths,
         selected_table_names=selected_table_names,
     )
-    if not simple_primary_table:
-        selected_table_names, selected_tables = _promote_join_path_tables(
-            selected_table_names,
-            selected_tables,
-            enriched_kb,
-            {"intent": planner_intent, "dimension": dimension, "grouping": [dimension] if dimension else [], "filters": requested_filters},
-            join_paths,
-        )
-
     selected_columns = [
         {"table": entry["table"], **column_entry}
         for entry in selected_tables
@@ -1799,7 +1894,11 @@ def _build_query_context_from_retrieved_context(
         selected_columns,
         question,
     )
-    filters = _structured_filter_entries(filter_candidates, requested_filters)
+    filters = _structured_filter_entries(
+        filter_candidates,
+        requested_filters,
+        list((intent or {}).get("structured_filters") or []),
+    )
     confidence = float(retrieved_context.get("confidence") or 0.0)
     if not selected_table_names:
         confidence = min(confidence, 0.35)
@@ -1826,19 +1925,15 @@ def _build_query_context_from_retrieved_context(
         "requested_metrics": requested_metrics,
         "requested_dimensions": requested_dimensions,
         "requested_filters": requested_filters,
-        "unresolved_metrics": requested_metrics if requested_metrics and not effective_measure_candidates else [],
+        "unresolved_metrics": required_metric_phrases if required_metric_phrases and not effective_measure_candidates else [],
         "evidence_sources": list(retrieved_context.get("retrieval_sources") or []),
     }
 
-    reduced_kb = {
-        table_name: deepcopy(enriched_kb[table_name])
-        for table_name in selected_table_names
-        if table_name in enriched_kb
-    }
+    reduced_kb = _evidence_schema_slice(selected_table_names, selected_columns, matched_relationships)
     warnings = []
     if confidence < 0.5:
         warnings.append("Retrieved context is weak; planner confidence is low.")
-    if requested_metrics and not effective_measure_candidates:
+    if required_metric_phrases and not effective_measure_candidates:
         warnings.append("Requested metric remains unresolved in dynamic context.")
 
     legacy_query_shape = _derive_complex_query_shape(
@@ -1857,7 +1952,7 @@ def _build_query_context_from_retrieved_context(
         selected_tables,
         selected_columns,
         join_paths,
-        requested_metrics,
+        required_metric_phrases,
         requested_dimensions,
         requested_filters,
         effective_measure_candidates,
@@ -1866,6 +1961,15 @@ def _build_query_context_from_retrieved_context(
         retrieved_context.get("formula_evidence") or [],
         legacy_query_shape,
     )
+    intent_missing_phrases = set((intent or {}).get("missing_phrases") or [])
+    if "target_entity_phrase" in intent_missing_phrases:
+        missing_evidence_flags["missing_table"] = True
+    if "metric_phrase" in intent_missing_phrases:
+        missing_evidence_flags["missing_metric"] = True
+    if "grouping_phrase" in intent_missing_phrases:
+        missing_evidence_flags["missing_dimension"] = True
+    if (intent or {}).get("unsupported_constructs"):
+        missing_evidence_flags["unsupported_intent"] = True
 
     legacy_route_recommendation = _compute_route_recommendation(
         plan,
@@ -1911,13 +2015,13 @@ def _build_query_context_from_retrieved_context(
         selected_columns=selected_columns,
         selected_table_names=selected_table_names,
         selected_knowledge_base=reduced_kb,
-        knowledge_base=enriched_kb,
+        knowledge_base={},
         warnings=warnings,
         confidence=confidence,
         vector_results={},
         vector_used=False,
         join_paths=join_paths,
-        fk_relationships=_build_fk_relationship_graph(enriched_kb),
+        fk_relationships=_relationship_graph_from_evidence(selected_table_names, matched_relationships),
         matched_relationships=matched_relationships,
         measure_candidates=effective_measure_candidates,
         dimension_candidates=dimension_candidates,
@@ -2211,8 +2315,6 @@ def _normalize_query_shape_label(
         join_paths=join_paths,
         formula_evidence=formula_evidence,
     )
-    if query_shape == "unknown" and legacy_query_shape == "formula_query":
-        return "formula_query"
     return query_shape
 
 
@@ -2228,10 +2330,16 @@ def _route_recommendation_from_contract(
     if query_shape == "blocked_unsafe":
         return "blocked_unsafe", "question contains blocked SQL operation wording"
 
+    if missing_evidence_flags.get("unsupported_intent"):
+        return "cannot_plan_safely", "intent contains an unsupported deterministic construct"
     if "table_selection" in ambiguities:
         return "cannot_plan_safely", "table evidence is missing or ambiguous"
     if "metric_selection" in ambiguities:
         return "cannot_plan_safely", "metric evidence is ambiguous"
+    if "dimension_selection" in ambiguities:
+        return "cannot_plan_safely", "dimension evidence is ambiguous"
+    if "filter_selection" in ambiguities:
+        return "cannot_plan_safely", "filter evidence is ambiguous"
     if missing_evidence_flags.get("missing_table"):
         return "cannot_plan_safely", "table evidence is missing or ambiguous"
     if missing_evidence_flags.get("missing_join_path"):
@@ -2272,6 +2380,7 @@ def _required_evidence_for_query_shape(query_shape: str) -> list[str]:
 
 def _missing_evidence_list(missing_evidence_flags: dict[str, Any]) -> list[str]:
     ordered = [
+        "unsupported_intent",
         "missing_table",
         "missing_metric",
         "missing_dimension",
@@ -2300,6 +2409,59 @@ def _ambiguities_for_contract(
     if _has_close_role_ambiguity(dimension_candidates):
         ambiguities.append("dimension_selection")
     return ambiguities
+
+
+def _ambiguity_details_for_contract(
+    ambiguities: list[str],
+    selected_tables: list[dict[str, Any]],
+    measure_candidates: list[dict[str, Any]],
+    dimension_candidates: list[dict[str, Any]],
+    filter_candidates: list[dict[str, Any]],
+    retrieved_context: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    retrieved_ambiguities = dict((retrieved_context or {}).get("ambiguity_candidates") or {})
+    details: list[dict[str, Any]] = []
+    for ambiguity_type in ambiguities:
+        if ambiguity_type == "table_selection":
+            choices = list(retrieved_ambiguities.get("tables") or selected_tables[:5])
+        elif ambiguity_type == "metric_selection":
+            choices = list(retrieved_ambiguities.get("metrics") or measure_candidates[:5])
+        elif ambiguity_type == "dimension_selection":
+            choices = list(retrieved_ambiguities.get("dimensions") or dimension_candidates[:5])
+        elif ambiguity_type == "filter_selection":
+            choices = list(retrieved_ambiguities.get("filters") or filter_candidates[:5])
+        else:
+            choices = []
+        details.append({"type": ambiguity_type, "choices": choices})
+    return details
+
+
+def _evidence_summary_for_contract(
+    retrieved_context: dict[str, Any] | None,
+    *,
+    selected_tables: list[dict[str, Any]],
+    selected_columns: list[dict[str, Any]],
+    measure_candidates: list[dict[str, Any]],
+    dimension_candidates: list[dict[str, Any]],
+    filter_candidates: list[dict[str, Any]],
+    join_paths: list[dict[str, Any]],
+) -> dict[str, Any]:
+    context = retrieved_context or {}
+    return {
+        "retrieval_sources": list(context.get("retrieval_sources") or []),
+        "evidence_scores": dict(context.get("evidence_scores") or {}),
+        "source_metadata": dict(context.get("source_metadata") or {}),
+        "missing_evidence_indicators": dict(context.get("missing_evidence_indicators") or {}),
+        "normalized_package_used": bool(context.get("normalized_package_used")),
+        "candidate_counts": {
+            "tables": len(selected_tables),
+            "columns": len(selected_columns),
+            "metrics": len(measure_candidates),
+            "dimensions": len(dimension_candidates),
+            "filters": len(filter_candidates),
+            "relationship_paths": len(join_paths),
+        },
+    }
 
 
 def _has_close_role_ambiguity(candidates: list[dict[str, Any]]) -> bool:
@@ -2600,6 +2762,13 @@ def _normalize_planner_output(
     required_evidence = _required_evidence_for_query_shape(query_shape)
     missing_evidence = _missing_evidence_list(missing_evidence_flags)
     ambiguities = _ambiguities_for_contract(selected_tables, effective_measure_candidates, dimension_candidates)
+    requested_filter_count = len(
+        list((intent or {}).get("structured_filters") or (intent or {}).get("requested_filters") or [])
+        if isinstance(intent, dict)
+        else []
+    )
+    if requested_filter_count == 1 and _has_close_role_ambiguity(filter_candidates):
+        ambiguities.append("filter_selection")
     blocking_ambiguities: set[str] = set()
     if (
         "table_selection" in ambiguities
@@ -2608,11 +2777,15 @@ def _normalize_planner_output(
     ):
         blocking_ambiguities.add("table_selection")
     if (
-        query_shape == "single_table_aggregate"
+        query_shape in {"single_table_aggregate", "grouped_aggregate", "ranking_query"}
         and "metric_selection" in ambiguities
         and _explicit_metric_candidate_count(question, effective_measure_candidates) != 1
     ):
         blocking_ambiguities.add("metric_selection")
+    if "dimension_selection" in ambiguities and query_shape in {"grouped_aggregate", "ranking_query"}:
+        blocking_ambiguities.add("dimension_selection")
+    if "filter_selection" in ambiguities and query_shape == "filtered_query":
+        blocking_ambiguities.add("filter_selection")
     can_plan = bool(
         selected_table_names
         and query_shape not in {"unknown", "blocked_unsafe"}
@@ -2626,6 +2799,43 @@ def _normalize_planner_output(
         selected_tables=selected_tables,
         ambiguities=list(blocking_ambiguities),
         can_plan=can_plan,
+    )
+    ambiguity_details = _ambiguity_details_for_contract(
+        ambiguities,
+        selected_tables,
+        effective_measure_candidates,
+        dimension_candidates,
+        filter_candidates,
+        retrieved_context,
+    )
+    selected_metric = None if "metric_selection" in blocking_ambiguities else (
+        dict(effective_measure_candidates[0]) if effective_measure_candidates else None
+    )
+    selected_dimensions = [] if "dimension_selection" in blocking_ambiguities else [
+        dict(entry) for entry in dimension_candidates
+    ]
+    selected_filters = [] if "filter_selection" in blocking_ambiguities else [
+        dict(entry) for entry in (plan.get("filters") or [])
+    ]
+    selected_relationship_path = dict(join_paths[0]) if join_paths else None
+    aggregate_function = str(
+        (intent or {}).get("aggregate_function")
+        if isinstance(intent, dict)
+        else ""
+    ).strip().lower() or _aggregate_function_hint(question)
+    sorting = dict(
+        ((intent or {}).get("requested_sort") or plan.get("sorting") or {})
+        if isinstance(intent, dict)
+        else (plan.get("sorting") or {})
+    )
+    evidence_summary = _evidence_summary_for_contract(
+        retrieved_context,
+        selected_tables=selected_tables,
+        selected_columns=selected_columns,
+        measure_candidates=effective_measure_candidates,
+        dimension_candidates=dimension_candidates,
+        filter_candidates=filter_candidates,
+        join_paths=join_paths,
     )
 
     normalized_complex_sql_plan = dict(complex_sql_plan or {})
@@ -2667,13 +2877,21 @@ def _normalize_planner_output(
         debug_trace.append({"stage": "ambiguities", "value": list(ambiguities)})
 
     normalized_result = {
+        "planner_contract_version": "1.0",
         "normalized_question": normalized_question,
         "intent": intent if isinstance(intent, dict) else {"intent_type": str(intent or "").strip().lower()},
+        "route": route_recommendation,
         "query_shape": query_shape,
         "route_recommendation": route_recommendation,
         "selected_tables": list(selected_tables),
         "selected_table_names": list(selected_table_names),
         "selected_columns": list(selected_columns),
+        "selected_metric": selected_metric,
+        "selected_dimensions": selected_dimensions,
+        "selected_filters": selected_filters,
+        "selected_relationship_path": selected_relationship_path,
+        "aggregate_function": aggregate_function,
+        "sorting": sorting,
         "metric_candidates": list(effective_measure_candidates),
         "dimension_candidates": list(dimension_candidates),
         "filter_candidates": list(filter_candidates),
@@ -2686,7 +2904,11 @@ def _normalize_planner_output(
         "required_evidence": required_evidence,
         "missing_evidence": missing_evidence,
         "ambiguities": ambiguities,
+        "ambiguity_details": ambiguity_details,
         "can_plan": can_plan,
+        "blocked_reason": route_reason if route_recommendation == "blocked_unsafe" else "",
+        "planner_reason": route_reason,
+        "evidence_summary": evidence_summary,
         "route_reason": route_reason,
         "debug_trace": debug_trace,
         "vector_results": dict(vector_results or {}),
@@ -2722,18 +2944,20 @@ def build_query_context(
     intent: dict[str, Any] | None = None,
     retrieved_context: dict[str, Any] | None = None,
 ) -> dict:
-    """Build a structured plan and reduced schema slice for SQL generation."""
-    enriched_kb = _enriched_kb(knowledge_base)
+    """Build a deterministic planner contract without generating SQL."""
     normalized_question = _normalize(question)
     
     if intent and retrieved_context is not None:
         return _build_query_context_from_retrieved_context(
             question,
             normalized_question,
-            enriched_kb,
             intent,
             retrieved_context,
         )
+
+    # Legacy direct-planner compatibility path. Active QueryPipeline runtime
+    # always supplies hardened intent plus normalized vector evidence above.
+    enriched_kb = _enriched_kb(knowledge_base)
     
     intent = _detect_intent(normalized_question)
     dimension = _detect_dimension(normalized_question, intent)

@@ -4,6 +4,228 @@ from core.query_planner import build_query_context, build_intent
 from semantic.business_glossary import generate_business_glossary
 
 
+def _normalized_runtime_evidence(
+    *,
+    tables,
+    columns=None,
+    metrics=None,
+    dimensions=None,
+    filters=None,
+    relationships=None,
+    join_paths=None,
+    ambiguity_candidates=None,
+    confidence=0.9,
+):
+    return {
+        "query_terms": [],
+        "matched_tables": list(tables),
+        "matched_columns": list(columns or []),
+        "matched_glossary_terms": [],
+        "matched_relationships": list(relationships or []),
+        "possible_join_paths": list(join_paths or []),
+        "measure_candidates": list(metrics or []),
+        "dimension_candidates": list(dimensions or []),
+        "filter_candidates": list(filters or []),
+        "date_candidates": [],
+        "retrieval_sources": ["normalized_vector_evidence"],
+        "evidence_scores": {"overall": confidence},
+        "source_metadata": {"backend": "chroma"},
+        "ambiguity_candidates": dict(ambiguity_candidates or {}),
+        "missing_evidence_indicators": {},
+        "normalized_package_used": True,
+        "confidence": confidence,
+    }
+
+
+def test_active_planner_contract_uses_hardened_intent_and_normalized_evidence_only():
+    intent = build_intent("show sum paid value from bills")
+    metric = {
+        "table": "bills",
+        "column": "paid_value",
+        "semantic_type": "money",
+        "is_measure": True,
+        "score": 0.95,
+        "matched_terms": ["paid value"],
+        "source": "vector",
+    }
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.96, "matched_terms": ["bills"], "source": "vector"}],
+        columns=[metric],
+        metrics=[metric],
+        confidence=0.94,
+    )
+    raw_kb = {"unrelated_raw_table": {"columns": [{"name": "wrong_column"}]}}
+
+    context = build_query_context(
+        "show sum paid value from bills",
+        raw_kb,
+        intent=intent,
+        retrieved_context=evidence,
+    )
+
+    assert context["route"] == context["route_recommendation"] == "deterministic_sql_required"
+    assert context["query_shape"] == "single_table_aggregate"
+    assert context["selected_table_names"] == ["bills"]
+    assert context["selected_metric"]["column"] == "paid_value"
+    assert context["aggregate_function"] == "sum"
+    assert context["knowledge_base"] == {}
+    assert list(context["selected_knowledge_base"]) == ["bills"]
+    assert context["evidence_summary"]["normalized_package_used"] is True
+    assert context["evidence_summary"]["source_metadata"] == {"backend": "chroma"}
+
+
+def test_active_planner_classifies_count_of_from_hardened_intent():
+    intent = build_intent("show count of bills")
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.96, "matched_terms": ["bills"], "source": "vector"}],
+    )
+
+    context = build_query_context("show count of bills", {}, intent=intent, retrieved_context=evidence)
+
+    assert intent["intent_contract_version"] == "1.0"
+    assert context["query_shape"] == "single_table_count"
+    assert context["route"] == "deterministic_sql_required"
+    assert context["can_plan"] is True
+
+
+def test_active_planner_merges_structured_filter_with_field_evidence():
+    intent = build_intent("show bills where status is pending")
+    status = {
+        "table": "bills",
+        "column": "status_code",
+        "semantic_type": "status",
+        "score": 0.94,
+        "matched_terms": ["status", "pending"],
+        "source": "vector",
+    }
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.96, "matched_terms": ["bills"], "source": "vector"}],
+        columns=[status],
+        filters=[status],
+    )
+
+    context = build_query_context(
+        "show bills where status is pending",
+        {},
+        intent=intent,
+        retrieved_context=evidence,
+    )
+
+    assert context["query_shape"] == "filtered_query"
+    assert context["route"] == "deterministic_sql_required"
+    assert context["selected_filters"] == [
+        {
+            "type": "value",
+            "table": "bills",
+            "column": "status_code",
+            "value": "pending",
+            "term": "status is pending",
+            "operator": "eq",
+            "field_phrase": "status",
+            "value_phrase": "pending",
+            "conjunction": None,
+            "raw_phrase": "status is pending",
+            "evidence_score": 0.94,
+        }
+    ]
+
+
+def test_active_planner_blocks_ambiguous_filter_field_with_choices():
+    intent = build_intent("show bills where status is pending")
+    filter_candidates = [
+        {
+            "table": "bills",
+            "column": column,
+            "semantic_type": "status",
+            "score": score,
+            "matched_terms": ["status", "pending"],
+            "source": "vector",
+        }
+        for column, score in (("status_code", 0.94), ("lifecycle_state", 0.91))
+    ]
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.96, "matched_terms": ["bills"], "source": "vector"}],
+        columns=filter_candidates,
+        filters=filter_candidates,
+    )
+
+    context = build_query_context(
+        "show bills where status is pending",
+        {},
+        intent=intent,
+        retrieved_context=evidence,
+    )
+
+    assert context["query_shape"] == "filtered_query"
+    assert context["route"] == "cannot_plan_safely"
+    assert context["selected_filters"] == []
+    filter_ambiguity = next(
+        entry for entry in context["ambiguity_details"] if entry["type"] == "filter_selection"
+    )
+    assert {choice["column"] for choice in filter_ambiguity["choices"]} == {
+        "status_code",
+        "lifecycle_state",
+    }
+
+
+def test_active_planner_prioritizes_lowest_ranking_intent():
+    intent = build_intent("show lowest 5 paid value from bills")
+    metric = {
+        "table": "bills",
+        "column": "paid_value",
+        "semantic_type": "money",
+        "is_measure": True,
+        "score": 0.95,
+        "matched_terms": ["paid value"],
+        "source": "vector",
+    }
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.96, "matched_terms": ["bills"], "source": "vector"}],
+        columns=[metric],
+        metrics=[metric],
+    )
+
+    context = build_query_context(
+        "show lowest 5 paid value from bills",
+        {},
+        intent=intent,
+        retrieved_context=evidence,
+    )
+
+    assert context["query_shape"] == "ranking_query"
+    assert context["route"] == "deterministic_sql_required"
+    assert context["limit"] == 5
+    assert context["sorting"]["direction"] == "asc"
+    assert context["selected_metric"]["column"] == "paid_value"
+
+
+def test_active_planner_blocks_unsafe_intent_and_fails_closed_on_unsupported_intent():
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.96, "matched_terms": ["bills"], "source": "vector"}],
+    )
+    unsafe_context = build_query_context(
+        "delete bills",
+        {},
+        intent=build_intent("delete bills"),
+        retrieved_context=evidence,
+    )
+    unsupported_intent = build_intent("show bills")
+    unsupported_intent["unsupported_constructs"] = ["unparsed_filter_expression"]
+    unsupported_context = build_query_context(
+        "show bills",
+        {},
+        intent=unsupported_intent,
+        retrieved_context=evidence,
+    )
+
+    assert unsafe_context["route"] == "blocked_unsafe"
+    assert unsafe_context["query_shape"] == "blocked_unsafe"
+    assert unsafe_context["can_plan"] is False
+    assert unsafe_context["blocked_reason"]
+    assert unsupported_context["route"] == "cannot_plan_safely"
+    assert "unsupported_intent" in unsupported_context["missing_evidence"]
+
+
 def test_query_planner_uses_dynamic_glossary_and_kb_metadata():
     knowledge_base = {
         "entity_groups": {
@@ -389,6 +611,11 @@ def test_qp6_show_sum_amount_from_bills_is_cannot_plan_safely_when_metric_is_amb
     assert context["route_recommendation"] == "cannot_plan_safely"
     assert context["can_plan"] is False
     assert "metric_selection" in context["ambiguities"]
+    metric_ambiguity = next(
+        entry for entry in context["ambiguity_details"] if entry["type"] == "metric_selection"
+    )
+    assert {choice["column"] for choice in metric_ambiguity["choices"]} >= {"billed_value", "paid_value"}
+    assert context["selected_metric"] is None
     assert context["route_reason"] == "metric evidence is ambiguous"
 
 
@@ -509,6 +736,7 @@ def test_qp2_joined_lookup_exposes_join_candidates():
     assert context["route_recommendation"] == "deterministic_sql_required"
     assert context["join_candidates"]
     assert context["required_joins"] == ["bills.partner_id = partners.partner_id"]
+    assert context["selected_relationship_path"] == retrieved_context["possible_join_paths"][0]
 
 
 def test_qp3_filtered_query_classification():
@@ -940,10 +1168,10 @@ def test_query_planner_leaves_pending_billed_amount_unresolved_without_formula_e
     assert context["measure_candidates"] == []
     assert context["plan"]["metric"] is None
     assert context["confidence"] == 0.49
-    assert context["query_shape"] == "formula_query"
-    assert context["complex_sql_plan"]["query_shape"] == "formula_query"
-    assert "missing_formula_evidence" in context["missing_evidence"]
-    assert context["missing_evidence_flags"]["missing_formula_evidence"] is True
+    assert context["query_shape"] == "grouped_aggregate"
+    assert context["complex_sql_plan"]["query_shape"] == "grouped_aggregate"
+    assert "missing_metric" in context["missing_evidence"]
+    assert context["missing_evidence_flags"]["missing_metric"] is True
     assert context["route_recommendation"] == "cannot_plan_safely"
     assert "Requested metric remains unresolved in dynamic context." in context["warnings"]
 
@@ -1043,6 +1271,9 @@ def test_query_planner_builds_grouped_aggregation_complex_plan_from_dynamic_cont
     assert context["complex_sql_plan"]["aggregation_type"] == "sum"
     assert context["complex_sql_plan"]["required_joins"] == ["clients.client_id = agreements.client_id"]
     assert context["complex_sql_plan"]["missing_evidence"] == {}
+    assert context["selected_metric"]["column"] == "deal_value"
+    assert context["selected_dimensions"][0]["column"] == "client_name"
+    assert context["selected_relationship_path"] == retrieved_context["possible_join_paths"][0]
 
 
 def test_query_planner_does_not_use_fixed_aliases_in_structured_path():
@@ -1132,6 +1363,18 @@ def test_qp1_structured_contract_includes_required_fields():
     assert "order_by_candidates" in context
     assert "can_plan" in context
     assert "ambiguities" in context
+    assert {
+        "route",
+        "selected_metric",
+        "selected_dimensions",
+        "selected_filters",
+        "selected_relationship_path",
+        "aggregate_function",
+        "sorting",
+        "blocked_reason",
+        "planner_reason",
+        "evidence_summary",
+    } <= context.keys()
 
     # Legacy fields for backward compatibility
     assert "selected_tables" in context
