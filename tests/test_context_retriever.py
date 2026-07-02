@@ -508,6 +508,67 @@ def test_context_retriever_generic_metric_preserves_all_vector_measures():
     }
 
 
+def test_context_retriever_structured_filter_uses_field_not_sample_value():
+    class FakeVectorRetriever:
+        def get_normalized_evidence_package(self, query, top_k=8):
+            return {
+                "candidate_tables": [{"table_name": "bills", "score": 0.9}],
+                "candidate_columns": [
+                    {
+                        "table_name": "bills",
+                        "column_name": "paid_value",
+                        "semantic_type": "numeric_candidate",
+                        "business_terms": ["paid value"],
+                        "sample_values": ["0", "1000"],
+                        "score": 0.85,
+                    },
+                    {
+                        "table_name": "bills",
+                        "column_name": "bill_status",
+                        "semantic_type": "status",
+                        "business_terms": ["bill status"],
+                        "sample_values": ["paid", "pending"],
+                        "score": 0.8,
+                    },
+                ],
+                "candidate_metrics": [],
+                "candidate_dimensions": [],
+                "candidate_dates": [],
+                "relationships": [],
+                "glossary_matches": [],
+                "retrieval_sources": ["vector"],
+                "ambiguity_candidates": {},
+                "missing_evidence_indicators": {},
+                "source_metadata": {"query": query},
+            }
+
+    intent = {
+        "requested_dimensions": [],
+        "requested_metrics": [],
+        "requested_filters": ["paid value equals 0"],
+        "structured_filters": [
+            {
+                "field": "paid value",
+                "field_phrase": "paid value",
+                "operator": "eq",
+                "value": "0",
+            }
+        ],
+        "raw_business_terms": ["paid value", "bills"],
+        "source_scope": ["bills"],
+    }
+
+    context = retrieve_context(
+        "show bills where paid value equals 0",
+        intent,
+        {"bills": {"columns": [], "primary_keys": [], "foreign_keys": [], "relationships": []}},
+        business_glossary={},
+        vector_retriever=FakeVectorRetriever(),
+    )
+
+    assert [entry["column"] for entry in context["filter_candidates"]] == ["paid_value"]
+
+
 def test_context_retriever_fails_closed_when_normalized_runtime_evidence_is_unavailable():
     intent = {
         "intent_type": "list",

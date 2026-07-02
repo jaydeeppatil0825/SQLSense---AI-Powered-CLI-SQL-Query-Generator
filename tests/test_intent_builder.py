@@ -195,6 +195,23 @@ def test_multi_filter_question_preserves_legacy_and_structured_filters():
     ]
 
 
+@pytest.mark.parametrize(
+    ("phrase", "operator", "value"),
+    [
+        ("amount greater than 5000", "gt", "5000"),
+        ("amount less than 5000", "lt", "5000"),
+        ("amount greater than or equal to 5000", "gte", "5000"),
+        ("amount less than or equal to 5000", "lte", "5000"),
+    ],
+)
+def test_structured_filter_comparison_operators(phrase, operator, value):
+    intent = build_intent(f"show bills where {phrase}")
+
+    assert intent["structured_filters"][0]["field_phrase"] == "amount"
+    assert intent["structured_filters"][0]["operator"] == operator
+    assert intent["structured_filters"][0]["value"] == value
+
+
 def test_or_filter_and_clause_boundary_are_preserved():
     intent = build_intent(
         "show bills where status is pending or status is overdue sorted by amount desc",

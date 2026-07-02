@@ -142,10 +142,21 @@ def retrieve_context(
         ),
         require_dimension=True,
     )
+    structured_filters = [
+        entry
+        for entry in (intent.get("structured_filters") or [])
+        if isinstance(entry, dict)
+    ]
+    requested_filter_terms = [
+        str(entry.get("field_phrase") or entry.get("field") or "").strip()
+        for entry in structured_filters
+        if str(entry.get("field_phrase") or entry.get("field") or "").strip()
+    ] or list(intent.get("requested_filters") or [])
     filter_candidates = _candidate_columns(
-        intent.get("requested_filters") or [],
+        requested_filter_terms,
         matched_columns,
         require_filter=True,
+        allow_sample_value_match=not bool(structured_filters),
     )
 
     retrieval_sources = _unique(
@@ -1148,6 +1159,7 @@ def _candidate_columns(
     require_dimension: bool = False,
     require_filter: bool = False,
     allow_role_only: bool = False,
+    allow_sample_value_match: bool = True,
 ) -> list[Dict[str, Any]]:
     requested_terms = [_humanize(term) for term in requested_terms if _humanize(term)]
     if (require_measure or require_dimension or require_filter) and not requested_terms and not allow_role_only:
@@ -1157,7 +1169,12 @@ def _candidate_columns(
     role = "measure" if require_measure else "dimension" if require_dimension else "filter" if require_filter else "generic"
     candidates = []
     for entry in matched_columns:
-        score, reasons = _role_candidate_score(entry, requested_terms, role=role)
+        score, reasons = _role_candidate_score(
+            entry,
+            requested_terms,
+            role=role,
+            allow_sample_value_match=allow_sample_value_match,
+        )
         if score <= 0:
             continue
         candidate = dict(entry)
@@ -1187,6 +1204,7 @@ def _role_candidate_score(
     requested_terms: list[str],
     *,
     role: str,
+    allow_sample_value_match: bool = True,
 ) -> tuple[float, list[str]]:
     semantic_type = str(entry.get("semantic_type") or "").strip().lower()
     core_semantic_type = str(entry.get("core_semantic_type") or "").strip().lower()
@@ -1254,7 +1272,11 @@ def _role_candidate_score(
         filter_support = 0.0
         filter_reasons: list[str] = []
         if requested_terms:
-            filter_support, filter_reasons = _filter_support_score(entry, requested_terms)
+            filter_support, filter_reasons = _filter_support_score(
+                entry,
+                requested_terms,
+                allow_sample_value_match=allow_sample_value_match,
+            )
         if filter_support <= 0:
             return 0.0, []
         base_score += 0.14
@@ -1279,7 +1301,12 @@ def _role_candidate_score(
     return round(total_score, 4), _unique(reasons)
 
 
-def _filter_support_score(entry: Dict[str, Any], requested_terms: list[str]) -> tuple[float, list[str]]:
+def _filter_support_score(
+    entry: Dict[str, Any],
+    requested_terms: list[str],
+    *,
+    allow_sample_value_match: bool = True,
+) -> tuple[float, list[str]]:
     semantic_type = str(entry.get("semantic_type") or "").strip().lower()
     core_semantic_type = str(entry.get("core_semantic_type") or "").strip().lower()
     column_name = str(entry.get("column") or "").strip()
@@ -1295,10 +1322,11 @@ def _filter_support_score(entry: Dict[str, Any], requested_terms: list[str]) -> 
             best_score = score
             reasons = [f"filter term '{term}' matched column context", *local_reasons]
 
-        sample_score = _sample_value_match_score(term, entry)
-        if sample_score > best_score:
-            best_score = sample_score
-            reasons = [f"filter term '{term}' matched sampled values"]
+        if allow_sample_value_match:
+            sample_score = _sample_value_match_score(term, entry)
+            if sample_score > best_score:
+                best_score = sample_score
+                reasons = [f"filter term '{term}' matched sampled values"]
 
     if _looks_like_date_filter(requested_terms) and bool(entry.get("is_date")):
         best_score = max(best_score, 0.7)

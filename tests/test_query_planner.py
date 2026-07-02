@@ -226,6 +226,57 @@ def test_active_planner_blocks_ambiguous_filter_field_with_choices():
     }
 
 
+def test_active_planner_selects_only_best_nonambiguous_filter_candidate():
+    intent = build_intent("show bills where billed value greater than 5000")
+    candidates = [
+        {
+            "table": "bills",
+            "column": "billed_value",
+            "semantic_type": "numeric_candidate",
+            "score": 0.97,
+            "matched_terms": ["billed value"],
+            "source": "vector",
+        },
+        {
+            "table": "bills",
+            "column": "paid_value",
+            "semantic_type": "numeric_candidate",
+            "score": 0.58,
+            "matched_terms": ["paid value"],
+            "source": "vector",
+        },
+    ]
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.96, "source": "vector"}],
+        columns=candidates,
+        filters=candidates,
+    )
+
+    context = build_query_context(
+        "show bills where billed value greater than 5000",
+        {},
+        intent=intent,
+        retrieved_context=evidence,
+    )
+
+    assert context["route"] == "deterministic_sql_required"
+    assert context["selected_filters"] == [
+        {
+            "type": "value",
+            "table": "bills",
+            "column": "billed_value",
+            "value": "5000",
+            "term": "billed value greater than 5000",
+            "operator": "gt",
+            "field_phrase": "billed value",
+            "value_phrase": "5000",
+            "conjunction": None,
+            "raw_phrase": "billed value greater than 5000",
+            "evidence_score": 0.97,
+        }
+    ]
+
+
 def test_active_planner_prioritizes_lowest_ranking_intent():
     intent = build_intent("show lowest 5 paid value from bills")
     metric = {

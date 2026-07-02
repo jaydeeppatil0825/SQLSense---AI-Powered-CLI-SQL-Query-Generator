@@ -1595,12 +1595,25 @@ def _structured_filter_entries(
             if str(term).strip()
         ]
 
-    for index, entry in enumerate(filter_candidates):
+    for index, clause in enumerate(clauses):
+        ranked_candidates = sorted(
+            (
+                (_filter_field_match_score(entry, clause), entry)
+                for entry in filter_candidates
+            ),
+            key=lambda item: (
+                -item[0],
+                str(item[1].get("table") or ""),
+                str(item[1].get("column") or ""),
+            ),
+        )
+        if not ranked_candidates or ranked_candidates[0][0] <= 0:
+            continue
+        entry = ranked_candidates[0][1]
         table_name = str(entry.get("table", "")).strip()
         column_name = str(entry.get("column", "")).strip()
         if not table_name or not column_name:
             continue
-        clause = clauses[min(index, len(clauses) - 1)] if clauses else {}
         matched_terms = list(entry.get("matched_terms") or [])
         raw_phrase = str(clause.get("raw_phrase") or "").strip()
         value = clause.get("value", clause.get("value_phrase", ""))
@@ -1625,6 +1638,33 @@ def _structured_filter_entries(
             }
         )
     return filters[:4]
+
+
+def _filter_field_match_score(entry: dict[str, Any], clause: dict[str, Any]) -> float:
+    field_phrase = str(clause.get("field_phrase") or clause.get("field") or "").strip()
+    if not field_phrase:
+        return float(entry.get("score") or 0.0)
+    normalized_field = _normalize(field_phrase)
+    field_tokens = set(_tokenize(field_phrase))
+    texts = [
+        str(entry.get("column") or "").replace("_", " "),
+        *[str(value) for value in (entry.get("matched_terms") or [])],
+    ]
+    lexical_score = 0.0
+    for text in texts:
+        normalized_text = _normalize(text)
+        text_tokens = set(_tokenize(text))
+        if not normalized_text or not text_tokens:
+            continue
+        if normalized_text == normalized_field:
+            lexical_score = max(lexical_score, 1.0)
+        elif field_tokens and field_tokens <= text_tokens:
+            lexical_score = max(lexical_score, 0.9)
+        elif field_tokens:
+            overlap = len(field_tokens & text_tokens) / len(field_tokens)
+            lexical_score = max(lexical_score, overlap * 0.7)
+    evidence_score = min(float(entry.get("score") or 0.0), 1.0)
+    return round((lexical_score * 0.9) + (evidence_score * 0.1), 4) if lexical_score else 0.0
 
 
 def _merge_candidate_columns(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:

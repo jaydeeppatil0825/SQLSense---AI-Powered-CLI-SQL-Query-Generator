@@ -1,5 +1,8 @@
+import pytest
+
 from sql_pipeline.deterministic_sql_generator import (
     build_deterministic_sql_plan,
+    generate_deterministic_sql,
     generate_single_table_aggregate_sql,
 )
 
@@ -11,6 +14,7 @@ def _bills_kb():
                 {"name": "bill_id", "type": "INTEGER", "nullable": False, "semantic_type": "id"},
                 {"name": "amount_total", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
                 {"name": "tax_total", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
+                {"name": "status_code", "type": "VARCHAR(30)", "nullable": True, "semantic_type": "status"},
             ],
             "primary_keys": ["bill_id"],
             "foreign_keys": [],
@@ -228,6 +232,162 @@ def test_generator_uses_full_kb_types_when_selected_projection_omits_them():
 
     assert result.status == "generated"
     assert result.sql == "SELECT SUM(amount_total) AS sum_amount_total FROM bills;"
+
+
+def _filtered_context(
+    *,
+    field: str,
+    operator: str,
+    value: str,
+    aggregate_function: str | None = None,
+    selected_metric: str | None = None,
+):
+    selected_filter = {
+        "type": "value",
+        "table": "bills",
+        "column": field,
+        "value": value,
+        "operator": operator,
+        "field_phrase": field.replace("_", " "),
+        "value_phrase": value,
+        "conjunction": None,
+    }
+    structured_filter = {
+        "field": field.replace("_", " "),
+        "field_phrase": field.replace("_", " "),
+        "operator": operator,
+        "value": value,
+        "value_phrase": value,
+        "conjunction": None,
+    }
+    return {
+        "query_shape": "filtered_query",
+        "intent": {"structured_filters": [structured_filter]},
+        "aggregate_function": aggregate_function,
+        "selected_metric": (
+            {"table": "bills", "column": selected_metric}
+            if selected_metric
+            else None
+        ),
+        "plan": {
+            "question": "filtered bills",
+            "intent": "total" if aggregate_function else "list",
+            "dimension": None,
+            "grouping": [],
+            "filters": [selected_filter],
+            "date_range": None,
+            "limit": 50,
+        },
+        "selected_tables": [{"table": "bills", "confidence": 0.9}],
+        "selected_table_names": ["bills"],
+        "selected_filters": [selected_filter],
+        "selected_knowledge_base": _bills_kb(),
+        "join_paths": [],
+        "formula_evidence": [],
+    }
+
+
+def test_filtered_list_quotes_string_value_and_uses_schema_columns():
+    result = generate_deterministic_sql(
+        query_context=_filtered_context(field="status_code", operator="eq", value="pending"),
+        knowledge_base=_bills_kb(),
+    )
+
+    assert result.status == "generated"
+    assert result.sql == (
+        "SELECT bill_id, amount_total, tax_total, status_code FROM bills "
+        "WHERE status_code = 'pending' LIMIT 50;"
+    )
+
+
+def test_filtered_list_keeps_numeric_comparison_unquoted():
+    result = generate_deterministic_sql(
+        query_context=_filtered_context(field="amount_total", operator="gte", value="5000.00"),
+        knowledge_base=_bills_kb(),
+    )
+
+    assert result.status == "generated"
+    assert "WHERE amount_total >= 5000.00" in result.sql
+    assert "'5000.00'" not in result.sql
+
+
+@pytest.mark.parametrize(
+    ("operator", "sql_operator"),
+    [("gt", ">"), ("lt", "<"), ("gte", ">="), ("lte", "<=")],
+)
+def test_filtered_numeric_comparison_operators(operator, sql_operator):
+    result = generate_deterministic_sql(
+        query_context=_filtered_context(field="amount_total", operator=operator, value="5000"),
+        knowledge_base=_bills_kb(),
+    )
+
+    assert result.status == "generated"
+    assert f"WHERE amount_total {sql_operator} 5000" in result.sql
+
+
+def test_filtered_aggregate_uses_planner_metric_and_filter():
+    result = generate_deterministic_sql(
+        query_context=_filtered_context(
+            field="status_code",
+            operator="eq",
+            value="paid",
+            aggregate_function="sum",
+            selected_metric="amount_total",
+        ),
+        knowledge_base=_bills_kb(),
+    )
+
+    assert result.status == "generated"
+    assert result.sql == (
+        "SELECT SUM(amount_total) AS sum_amount_total FROM bills "
+        "WHERE status_code = 'paid';"
+    )
+
+
+def test_filtered_query_rejects_column_not_in_schema():
+    result = generate_deterministic_sql(
+        query_context=_filtered_context(field="unknown_field", operator="eq", value="pending"),
+        knowledge_base=_bills_kb(),
+    )
+
+    assert result.status == "cannot_plan_safely"
+    assert result.sql is None
+    assert result.reason == "filter_column_not_in_schema"
+
+
+def test_filtered_query_rejects_nonnumeric_value_for_numeric_column():
+    result = generate_deterministic_sql(
+        query_context=_filtered_context(field="amount_total", operator="eq", value="paid"),
+        knowledge_base=_bills_kb(),
+    )
+
+    assert result.status == "cannot_plan_safely"
+    assert result.sql is None
+    assert result.reason == "filter_value_type_mismatch"
+
+
+def test_filtered_query_escapes_single_quote_in_string_value():
+    result = generate_deterministic_sql(
+        query_context=_filtered_context(field="status_code", operator="eq", value="owner's"),
+        knowledge_base=_bills_kb(),
+    )
+
+    assert result.status == "generated"
+    assert "WHERE status_code = 'owner''s'" in result.sql
+
+
+def test_filtered_ranking_contract_remains_not_implemented():
+    context = _filtered_context(field="status_code", operator="eq", value="pending")
+    context["plan"]["sorting"] = {"direction": "desc", "by": "amount_total"}
+
+    result = generate_deterministic_sql(
+        query_context=context,
+        knowledge_base=_bills_kb(),
+    )
+
+    assert result.status == "not_applicable"
+    assert result.sql is None
+    assert result.reason == "ranked filtered SQL is not implemented"
 
 
 def test_grouped_query_is_not_applicable():

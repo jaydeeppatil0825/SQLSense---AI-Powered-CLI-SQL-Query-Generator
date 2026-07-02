@@ -403,7 +403,6 @@ def test_pipeline_blocked_unsafe_route_blocks_sql_generation(monkeypatch):
 @pytest.mark.parametrize(
     "query_shape",
     [
-        "filtered_query",
         "grouped_aggregate",
         "ranking_query",
         "joined_lookup",
@@ -434,6 +433,88 @@ def test_clean_planner_known_unimplemented_shapes_return_capability_message(monk
         "This query was understood, but deterministic SQL generation for this query shape "
         f"is not implemented yet: {query_shape}."
     )
+
+
+def test_filtered_query_dispatches_deterministic_generator_and_validates():
+    service = QuestionService()
+    question = "show bills where status is pending"
+    pipeline_context = _planner_pipeline_context(question, "filtered_query")
+    selected_filter = {
+        "type": "value",
+        "table": "bills",
+        "column": "status_code",
+        "value": "pending",
+        "operator": "eq",
+        "field_phrase": "status",
+        "value_phrase": "pending",
+        "conjunction": None,
+    }
+    structured_filter = {
+        "field": "status",
+        "field_phrase": "status",
+        "operator": "eq",
+        "value": "pending",
+        "value_phrase": "pending",
+        "conjunction": None,
+    }
+    query_context = pipeline_context["query_context"]
+    query_context["intent"] = {"intent_type": "filter", "structured_filters": [structured_filter]}
+    query_context["selected_filters"] = [selected_filter]
+    query_context["plan"]["filters"] = [selected_filter]
+    query_context["selected_knowledge_base"] = PIPELINE_BILLS_KB
+    pipeline_context["plan"] = dict(query_context["plan"])
+
+    success, message, sql, error = service.process_question(
+        question,
+        PIPELINE_BILLS_KB,
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is True
+    assert error is None
+    assert message == "SQL generated successfully (deterministic)"
+    assert sql == (
+        "SELECT bill_id, billed_value, paid_value, status_code FROM bills "
+        "WHERE status_code = 'pending' LIMIT 50;"
+    )
+    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
+
+
+def test_filtered_query_validation_failure_returns_no_sql(monkeypatch):
+    service = QuestionService()
+    question = "show bills where status is pending"
+    pipeline_context = _planner_pipeline_context(question, "filtered_query")
+    selected_filter = {
+        "table": "bills",
+        "column": "status_code",
+        "value": "pending",
+        "operator": "eq",
+        "field_phrase": "status",
+        "conjunction": None,
+    }
+    query_context = pipeline_context["query_context"]
+    query_context["intent"] = {
+        "structured_filters": [
+            {"field": "status", "field_phrase": "status", "operator": "eq", "value": "pending"}
+        ]
+    }
+    query_context["selected_filters"] = [selected_filter]
+    query_context["plan"]["filters"] = [selected_filter]
+    pipeline_context["plan"] = dict(query_context["plan"])
+    monkeypatch.setattr(
+        "sql_pipeline.question_service.validate_sql_structure",
+        lambda *args, **kwargs: (False, "forced structural rejection"),
+    )
+
+    success, message, sql, error = service.process_question(
+        question,
+        PIPELINE_BILLS_KB,
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is False
+    assert sql is None
+    assert message == "SQL validation failed: forced structural rejection"
 
 
 @pytest.mark.parametrize(

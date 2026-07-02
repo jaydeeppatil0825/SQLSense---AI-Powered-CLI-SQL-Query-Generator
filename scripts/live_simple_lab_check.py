@@ -11,7 +11,7 @@ Purpose:
 - Runs the normal SQLSense app flow:
   connect -> build KB/Chroma -> ask question -> generate SQL -> validate -> execute
 - Verifies current supported deterministic shapes:
-  single_table_list, single_table_count, single_table_aggregate
+  single_table_list, single_table_count, single_table_aggregate, filtered_query
 - Proves explicit metric phrases like "billed value" select billed_value, not ambiguous fallback.
 
 This script is intentionally a live/e2e check. It is not a replacement for unit tests.
@@ -135,6 +135,77 @@ SUPPORTED_CASES: List[Dict[str, Any]] = [
     },
 ]
 
+FILTERED_CASES: List[Dict[str, Any]] = [
+    {
+        "name": "pending bills",
+        "question": "show bills where bill status is pending",
+        "query_shape": "filtered_query",
+        "sql_must_contain": ["WHERE", "bill_status", "=", "'pending'"],
+        "expected_kind": "row_count",
+        "expected_value": 2,
+    },
+    {
+        "name": "paid bills",
+        "question": "show bills where bill status is paid",
+        "query_shape": "filtered_query",
+        "sql_must_contain": ["WHERE", "bill_status", "=", "'paid'"],
+        "expected_kind": "row_count",
+        "expected_value": 5,
+    },
+    {
+        "name": "billed value above 5000",
+        "question": "show bills where billed value greater than 5000",
+        "query_shape": "filtered_query",
+        "sql_must_contain": ["WHERE", "billed_value", ">", "5000"],
+        "expected_kind": "row_count",
+        "expected_value": 3,
+    },
+    {
+        "name": "zero paid value",
+        "question": "show bills where paid value equals 0",
+        "query_shape": "filtered_query",
+        "sql_must_contain": ["WHERE", "paid_value", "=", "0"],
+        "expected_kind": "row_count",
+        "expected_value": 2,
+    },
+    {
+        "name": "sum billed value for paid bills",
+        "question": "show sum billed value from bills where bill status is paid",
+        "query_shape": "filtered_query",
+        "selected_metric": "billed_value",
+        "sql_must_contain": ["SUM", "billed_value", "WHERE", "bill_status", "'paid'"],
+        "expected_kind": "scalar",
+        "expected_value": Decimal("13000.00"),
+    },
+    {
+        "name": "sum paid value for paid bills",
+        "question": "show sum paid value from bills where bill status is paid",
+        "query_shape": "filtered_query",
+        "selected_metric": "paid_value",
+        "sql_must_contain": ["SUM", "paid_value", "WHERE", "bill_status", "'paid'"],
+        "expected_kind": "scalar",
+        "expected_value": Decimal("13000.00"),
+    },
+    {
+        "name": "sum billed value for partial bills",
+        "question": "show sum billed value from bills where bill status is partial",
+        "query_shape": "filtered_query",
+        "selected_metric": "billed_value",
+        "sql_must_contain": ["SUM", "billed_value", "WHERE", "bill_status", "'partial'"],
+        "expected_kind": "scalar",
+        "expected_value": Decimal("14100.00"),
+    },
+    {
+        "name": "average billed value for pending bills",
+        "question": "show average billed value from bills where bill status is pending",
+        "query_shape": "filtered_query",
+        "selected_metric": "billed_value",
+        "sql_must_contain": ["AVG", "billed_value", "WHERE", "bill_status", "'pending'"],
+        "expected_kind": "scalar",
+        "expected_value": Decimal("5300.00"),
+    },
+]
+
 BLOCKING_CASES: List[Dict[str, Any]] = [
     {
         "name": "generic amount ambiguity",
@@ -153,6 +224,18 @@ BLOCKING_CASES: List[Dict[str, Any]] = [
         "question": "delete bills",
         "expected_route": "blocked_unsafe",
         "must_mention": ["blocked", "unsafe"],
+    },
+    {
+        "name": "ambiguous filter field",
+        "question": "show bills where amount is paid",
+        "expected_route": "cannot_plan_safely",
+        "must_mention": [],
+    },
+    {
+        "name": "unknown filter field",
+        "question": "show bills where unknown field is pending",
+        "expected_route": "cannot_plan_safely",
+        "must_mention": [],
     },
 ]
 
@@ -370,6 +453,13 @@ def main() -> int:
 
     print("\n[CHECK] Supported deterministic SQL cases")
     for case in SUPPORTED_CASES:
+        ok, message = run_supported_case(app, case)
+        print(("PASS " if ok else "FAIL ") + message)
+        if not ok:
+            failures.append(message)
+
+    print("\n[CHECK] Filtered deterministic SQL cases")
+    for case in FILTERED_CASES:
         ok, message = run_supported_case(app, case)
         print(("PASS " if ok else "FAIL ") + message)
         if not ok:

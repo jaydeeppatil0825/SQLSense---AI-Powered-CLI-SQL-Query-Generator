@@ -777,6 +777,12 @@ def _split_filter_phrases(filter_text: str) -> list[tuple[str, str | None]]:
         str(filter_text or ""),
         flags=re.IGNORECASE,
     )
+    protected = re.sub(
+        r"\b((?:greater|less)\s+than)\s+or\s+(equal\s+to)\b",
+        lambda match: f"{match.group(1)} __comparison_or__ {match.group(2)}",
+        protected,
+        flags=re.IGNORECASE,
+    )
     parts = re.split(r"\s+(and|or)\s+", protected, flags=re.IGNORECASE)
     results: list[tuple[str, str | None]] = []
     conjunction: str | None = None
@@ -784,7 +790,9 @@ def _split_filter_phrases(filter_text: str) -> list[tuple[str, str | None]]:
         if index % 2 == 1:
             conjunction = part.lower()
             continue
-        phrase = _cleanup_phrase(part.replace("__between_and__", "and"))
+        phrase = _cleanup_phrase(
+            part.replace("__between_and__", "and").replace("__comparison_or__", "or")
+        )
         if phrase:
             results.append((phrase, conjunction))
         conjunction = None
