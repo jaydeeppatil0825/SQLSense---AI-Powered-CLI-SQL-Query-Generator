@@ -70,6 +70,55 @@ def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypat
     assert service.get_last_sql() == expected_sql
 
 
+def test_process_question_revalidates_with_full_kb_not_incomplete_projection(monkeypatch, tmp_path):
+    service = _service_with_orders(monkeypatch, tmp_path)
+    expected_sql = "SELECT order_id, final_amount FROM orders LIMIT 50;"
+    incomplete_projection = {
+        "orders": {
+            "columns": [{"name": "final_amount", "type": ""}],
+            "primary_keys": [],
+            "foreign_keys": [],
+        }
+    }
+    query_context = {
+        "route": "deterministic_sql_required",
+        "route_recommendation": "deterministic_sql_required",
+        "query_shape": "single_table_list",
+        "selected_knowledge_base": incomplete_projection,
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        service.query_pipeline,
+        "run",
+        lambda **kwargs: {
+            "query_context": query_context,
+            "route_recommendation": "deterministic_sql_required",
+            "intent": {"intent_type": "list"},
+            "plan": {},
+        },
+    )
+    monkeypatch.setattr(
+        service.question_service,
+        "process_question",
+        lambda **kwargs: (True, "ok", expected_sql, None),
+    )
+    monkeypatch.setattr(service.question_service, "get_last_query_context", lambda: query_context)
+
+    def capture_validation(sql, knowledge_base):
+        captured["sql"] = sql
+        captured["knowledge_base"] = knowledge_base
+        return True, "SQL is valid"
+
+    monkeypatch.setattr(service.question_service, "validate_sql", capture_validation)
+
+    result = service.process_question("show all orders", ai_backend="local")
+
+    assert result["validation_result"]["is_valid"] is True
+    assert captured["sql"] == expected_sql
+    assert captured["knowledge_base"] is KB
+
+
 def test_destructive_natural_language_question_is_blocked(monkeypatch, tmp_path):
     service = _service_with_orders(monkeypatch, tmp_path)
 

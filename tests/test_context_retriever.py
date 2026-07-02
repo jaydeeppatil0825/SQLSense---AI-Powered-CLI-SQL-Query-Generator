@@ -375,6 +375,139 @@ def test_context_retriever_consumes_normalized_vector_evidence_package():
     assert context["ambiguity_candidates"]["tables"] == [{"table_name": "deals"}]
 
 
+def test_context_retriever_exact_metric_phrase_outranks_shared_suffix():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+                {"name": "paid_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": [],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+
+    class FakeVectorRetriever:
+        def get_normalized_evidence_package(self, query, top_k=8):
+            return {
+                "candidate_tables": [{"table_name": "bills", "score": 0.8}],
+                "candidate_columns": [
+                    {
+                        "table_name": "bills",
+                        "column_name": "billed_value",
+                        "is_measure": True,
+                        "score": 0.8,
+                    },
+                    {
+                        "table_name": "bills",
+                        "column_name": "paid_value",
+                        "is_measure": True,
+                        "score": 0.8,
+                    },
+                ],
+                "candidate_metrics": [
+                    {"table_name": "bills", "column_name": "billed_value", "score": 0.8},
+                    {"table_name": "bills", "column_name": "paid_value", "score": 0.8},
+                ],
+                "candidate_dimensions": [],
+                "candidate_dates": [],
+                "relationships": [],
+                "glossary_matches": [],
+                "retrieval_sources": ["vector"],
+                "ambiguity_candidates": {},
+                "missing_evidence_indicators": {},
+                "source_metadata": {"query": query},
+            }
+
+    intent = {
+        "requested_dimensions": [],
+        "requested_metrics": ["paid value"],
+        "requested_filters": [],
+        "raw_business_terms": ["paid value", "bills"],
+        "source_scope": ["bills"],
+    }
+
+    context = retrieve_context(
+        "show sum paid value from bills",
+        intent,
+        knowledge_base,
+        business_glossary={},
+        vector_retriever=FakeVectorRetriever(),
+    )
+
+    assert context["measure_candidates"][0]["column"] == "paid_value"
+    assert context["measure_candidates"][0]["score"] > context["measure_candidates"][1]["score"]
+
+
+def test_context_retriever_generic_metric_preserves_all_vector_measures():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+                {"name": "paid_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": [],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+
+    class FakeVectorRetriever:
+        def get_normalized_evidence_package(self, query, top_k=8):
+            metrics = [
+                {
+                    "table_name": "bills",
+                    "column_name": "billed_value",
+                    "semantic_type": "numeric_candidate",
+                    "is_measure": True,
+                    "score": 0.85,
+                },
+                {
+                    "table_name": "bills",
+                    "column_name": "paid_value",
+                    "semantic_type": "numeric_candidate",
+                    "is_measure": True,
+                    "score": 0.65,
+                },
+            ]
+            return {
+                "candidate_tables": [{"table_name": "bills", "score": 0.9}],
+                "candidate_columns": metrics,
+                "candidate_metrics": metrics,
+                "candidate_dimensions": [],
+                "candidate_dates": [],
+                "relationships": [],
+                "glossary_matches": [],
+                "retrieval_sources": ["vector"],
+                "ambiguity_candidates": {},
+                "missing_evidence_indicators": {},
+                "source_metadata": {"query": query},
+            }
+
+    intent = {
+        "requested_dimensions": [],
+        "requested_metrics": ["amount"],
+        "requested_filters": [],
+        "raw_business_terms": ["amount", "bills"],
+        "source_scope": ["bills"],
+        "metric_is_generic": True,
+    }
+
+    context = retrieve_context(
+        "show sum amount from bills",
+        intent,
+        knowledge_base,
+        business_glossary={},
+        vector_retriever=FakeVectorRetriever(),
+    )
+
+    assert {entry["column"] for entry in context["measure_candidates"]} == {
+        "billed_value",
+        "paid_value",
+    }
+
+
 def test_context_retriever_fails_closed_when_normalized_runtime_evidence_is_unavailable():
     intent = {
         "intent_type": "list",

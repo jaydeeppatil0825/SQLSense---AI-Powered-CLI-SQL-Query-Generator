@@ -248,8 +248,10 @@ def _build_single_table_aggregate_plan(
             formula_evidence=list(context.get("formula_evidence") or []),
         )
 
-    scoped_kb = context.get("selected_knowledge_base") if isinstance(context.get("selected_knowledge_base"), dict) else knowledge_base
-    table_data = (scoped_kb or {}).get(table_name) or (knowledge_base or {}).get(table_name)
+    scoped_kb = context.get("selected_knowledge_base") if isinstance(context.get("selected_knowledge_base"), dict) else {}
+    # The retrieval projection may omit physical SQL types. Prefer the full KB
+    # schema for deterministic type validation, while retaining scoped fallback.
+    table_data = (knowledge_base or {}).get(table_name) or scoped_kb.get(table_name)
     if not isinstance(table_data, dict):
         return DeterministicSqlPlan(
             query_shape="single_table_aggregate",

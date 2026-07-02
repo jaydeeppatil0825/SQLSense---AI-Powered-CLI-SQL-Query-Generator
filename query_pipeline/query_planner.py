@@ -2423,15 +2423,33 @@ def _ambiguity_details_for_contract(
     details: list[dict[str, Any]] = []
     for ambiguity_type in ambiguities:
         if ambiguity_type == "table_selection":
-            choices = list(retrieved_ambiguities.get("tables") or selected_tables[:5])
+            candidates = list(selected_tables[:5])
+            retrieved_choices = list(retrieved_ambiguities.get("tables") or [])
         elif ambiguity_type == "metric_selection":
-            choices = list(retrieved_ambiguities.get("metrics") or measure_candidates[:5])
+            candidates = list(measure_candidates[:5])
+            retrieved_choices = list(retrieved_ambiguities.get("metrics") or [])
         elif ambiguity_type == "dimension_selection":
-            choices = list(retrieved_ambiguities.get("dimensions") or dimension_candidates[:5])
+            candidates = list(dimension_candidates[:5])
+            retrieved_choices = list(retrieved_ambiguities.get("dimensions") or [])
         elif ambiguity_type == "filter_selection":
-            choices = list(retrieved_ambiguities.get("filters") or filter_candidates[:5])
+            candidates = list(filter_candidates[:5])
+            retrieved_choices = list(retrieved_ambiguities.get("filters") or [])
         else:
-            choices = []
+            candidates = []
+            retrieved_choices = []
+
+        choices: list[Any] = []
+        seen: set[tuple[str, str]] = set()
+        for choice in [*candidates, *retrieved_choices]:
+            if not isinstance(choice, dict):
+                continue
+            table_name = str(choice.get("table") or choice.get("table_name") or "").strip()
+            column_name = str(choice.get("column") or choice.get("column_name") or "").strip()
+            key = (table_name, column_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            choices.append(choice)
         details.append({"type": ambiguity_type, "choices": choices})
     return details
 
@@ -2715,6 +2733,12 @@ def _normalize_planner_output(
         selected_columns,
         question,
     )
+    metric_is_generic = bool(intent.get("metric_is_generic")) if isinstance(intent, dict) else False
+    if metric_is_generic:
+        effective_measure_candidates = _merge_candidate_columns(
+            effective_measure_candidates,
+            _fallback_metric_candidates_from_selected_columns(selected_columns, question),
+        )
 
     query_shape = _normalize_query_shape_label(
         question=question,
@@ -2762,6 +2786,13 @@ def _normalize_planner_output(
     required_evidence = _required_evidence_for_query_shape(query_shape)
     missing_evidence = _missing_evidence_list(missing_evidence_flags)
     ambiguities = _ambiguities_for_contract(selected_tables, effective_measure_candidates, dimension_candidates)
+    unique_metrics = {
+        (str(entry.get("table") or "").strip(), str(entry.get("column") or "").strip())
+        for entry in effective_measure_candidates
+        if str(entry.get("table") or "").strip() and str(entry.get("column") or "").strip()
+    }
+    if metric_is_generic and len(unique_metrics) > 1 and "metric_selection" not in ambiguities:
+        ambiguities.append("metric_selection")
     requested_filter_count = len(
         list((intent or {}).get("structured_filters") or (intent or {}).get("requested_filters") or [])
         if isinstance(intent, dict)
@@ -2779,7 +2810,10 @@ def _normalize_planner_output(
     if (
         query_shape in {"single_table_aggregate", "grouped_aggregate", "ranking_query"}
         and "metric_selection" in ambiguities
-        and _explicit_metric_candidate_count(question, effective_measure_candidates) != 1
+        and (
+            metric_is_generic
+            or _explicit_metric_candidate_count(question, effective_measure_candidates) != 1
+        )
     ):
         blocking_ambiguities.add("metric_selection")
     if "dimension_selection" in ambiguities and query_shape in {"grouped_aggregate", "ranking_query"}:

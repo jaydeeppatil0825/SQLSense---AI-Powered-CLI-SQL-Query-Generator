@@ -402,7 +402,10 @@ class AppService:
         query_context = _safe_dict(self.question_service.get_last_query_context() or query_context)
         route = route or str(query_context.get("route_used") or query_context.get("route") or "")
         if generated_sql:
-            is_valid, reason = self.question_service.validate_sql(generated_sql, query_context.get("selected_knowledge_base") or knowledge_base)
+            is_valid, reason = self.question_service.validate_sql(
+                generated_sql,
+                knowledge_base or query_context.get("selected_knowledge_base") or {},
+            )
             validation_result = {"is_valid": is_valid, "reason": reason}
         elif error or message:
             validation_result = {"is_valid": False, "reason": error or message}

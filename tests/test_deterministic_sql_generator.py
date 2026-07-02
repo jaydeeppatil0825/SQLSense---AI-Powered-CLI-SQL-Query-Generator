@@ -201,6 +201,35 @@ def test_generator_uses_planner_selected_metric_without_question_rescoring():
     assert result.sql == "SELECT SUM(amount_total) AS sum_amount_total FROM bills;"
 
 
+def test_generator_uses_full_kb_types_when_selected_projection_omits_them():
+    context = _single_table_context(
+        "show sum billed value from bills",
+        intent="total",
+        selected_metric="amount_total",
+    )
+    context["selected_knowledge_base"] = {
+        "bills": {
+            "columns": [
+                {
+                    "name": "amount_total",
+                    "type": "",
+                    "semantic_type": "numeric_candidate",
+                }
+            ],
+            "primary_keys": [],
+            "foreign_keys": [],
+        }
+    }
+
+    result = generate_single_table_aggregate_sql(
+        query_context=context,
+        knowledge_base=_bills_kb(),
+    )
+
+    assert result.status == "generated"
+    assert result.sql == "SELECT SUM(amount_total) AS sum_amount_total FROM bills;"
+
+
 def test_grouped_query_is_not_applicable():
     context = _single_table_context("show total amount by bill type", intent="total")
     context["plan"]["grouping"] = ["bill type"]

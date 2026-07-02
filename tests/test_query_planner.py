@@ -74,6 +74,50 @@ def test_active_planner_contract_uses_hardened_intent_and_normalized_evidence_on
     assert context["evidence_summary"]["source_metadata"] == {"backend": "chroma"}
 
 
+def test_active_planner_keeps_generic_metric_ambiguous_despite_score_gap():
+    intent = build_intent("show sum amount from bills")
+    billed_metric = {
+        "table": "bills",
+        "column": "billed_value",
+        "semantic_type": "numeric_candidate",
+        "is_measure": True,
+        "score": 0.95,
+        "source": "vector",
+    }
+    paid_metric = {
+        "table": "bills",
+        "column": "paid_value",
+        "semantic_type": "numeric_candidate",
+        "is_measure": True,
+        "score": 0.7,
+        "source": "vector",
+    }
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.96, "source": "vector"}],
+        columns=[billed_metric, paid_metric],
+        metrics=[billed_metric, paid_metric],
+        ambiguity_candidates={"metrics": [{"table_name": "bills", "column_name": "paid_value"}]},
+    )
+
+    context = build_query_context(
+        "show sum amount from bills",
+        {},
+        intent=intent,
+        retrieved_context=evidence,
+    )
+
+    metric_ambiguity = next(
+        entry for entry in context["ambiguity_details"] if entry["type"] == "metric_selection"
+    )
+    assert intent["metric_is_generic"] is True
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert context["selected_metric"] is None
+    assert {choice.get("column") or choice.get("column_name") for choice in metric_ambiguity["choices"]} >= {
+        "billed_value",
+        "paid_value",
+    }
+
+
 def test_active_planner_classifies_count_of_from_hardened_intent():
     intent = build_intent("show count of bills")
     evidence = _normalized_runtime_evidence(
@@ -598,6 +642,7 @@ def test_qp6_show_sum_billed_value_from_bills_keeps_single_table_aggregate_contr
     assert context["selected_table_names"] == ["bills"]
     assert context["missing_evidence"] == []
     assert any(candidate["column"] == "billed_value" for candidate in context["metric_candidates"])
+    assert context["selected_metric"]["column"] == "billed_value"
     assert context["route_reason"]
 
 
@@ -627,6 +672,7 @@ def test_qp6_show_sum_paid_value_from_bills_keeps_single_table_aggregate_contrac
     assert context["route_recommendation"] == "deterministic_sql_required"
     assert context["can_plan"] is True
     assert any(candidate["column"] == "paid_value" for candidate in context["metric_candidates"])
+    assert context["selected_metric"]["column"] == "paid_value"
 
 
 def test_qp6_show_sum_amount_from_bills_is_cannot_plan_safely_when_metric_is_ambiguous():
@@ -661,6 +707,38 @@ def test_qp6_show_sum_amount_from_bills_is_cannot_plan_safely_when_metric_is_amb
     assert {choice["column"] for choice in metric_ambiguity["choices"]} >= {"billed_value", "paid_value"}
     assert context["selected_metric"] is None
     assert context["route_reason"] == "metric evidence is ambiguous"
+
+
+def test_qp6_show_sum_value_from_bills_lists_all_metric_choices():
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "billed_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+                {"name": "paid_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": ["bill_id"],
+            "foreign_keys": [],
+            "relationships": [],
+        },
+    }
+    glossary = generate_business_glossary(knowledge_base, use_ai_enrichment=True)
+
+    context = build_query_context(
+        "show sum value from bills",
+        knowledge_base,
+        business_glossary=glossary,
+        use_vector_retrieval=False,
+    )
+
+    metric_ambiguity = next(
+        entry for entry in context["ambiguity_details"] if entry["type"] == "metric_selection"
+    )
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert {choice["column"] for choice in metric_ambiguity["choices"]} >= {
+        "billed_value",
+        "paid_value",
+    }
 
 
 def test_qp3_multi_metric_aggregate_classification():

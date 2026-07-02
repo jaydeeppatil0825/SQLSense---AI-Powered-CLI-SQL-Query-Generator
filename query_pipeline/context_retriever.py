@@ -123,13 +123,15 @@ def retrieve_context(
         else _possible_join_paths(knowledge_base, matched_tables)
     )
 
+    requested_metric_terms = [] if intent.get("metric_is_generic") else (intent.get("requested_metrics") or [])
     measure_candidates = _candidate_columns(
-        intent.get("requested_metrics") or [],
+        requested_metric_terms,
         _merge_column_candidates(
             vector_context.get("candidate_metrics", []),
             matched_columns,
         ),
         require_measure=True,
+        allow_role_only=bool(intent.get("metric_is_generic")),
     )
     dimension_candidates = _candidate_columns(
         intent.get("requested_dimensions") or [],
@@ -1145,9 +1147,10 @@ def _candidate_columns(
     require_measure: bool = False,
     require_dimension: bool = False,
     require_filter: bool = False,
+    allow_role_only: bool = False,
 ) -> list[Dict[str, Any]]:
     requested_terms = [_humanize(term) for term in requested_terms if _humanize(term)]
-    if (require_measure or require_dimension or require_filter) and not requested_terms:
+    if (require_measure or require_dimension or require_filter) and not requested_terms and not allow_role_only:
         return []
     if require_filter and not requested_terms:
         return []
@@ -1268,7 +1271,9 @@ def _role_candidate_score(
     if evidence_sources:
         reasons.append(f"evidence from {', '.join(_unique(evidence_sources))}")
 
-    total_score = min(base_score + best_term_score, 1.0)
+    # Keep lexical specificity visible instead of saturating exact and partial
+    # matches to the same score when retrieval evidence is already strong.
+    total_score = min((base_score * 0.4) + (best_term_score * 0.8), 1.0)
     if requested_terms and total_score < 0.45:
         return 0.0, []
     return round(total_score, 4), _unique(reasons)
