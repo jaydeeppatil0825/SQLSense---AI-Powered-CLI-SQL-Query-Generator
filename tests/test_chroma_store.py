@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from types import SimpleNamespace
 
 from kb_pipeline.vector.chroma_store import ChromaStore
@@ -91,6 +92,8 @@ def test_chroma_client_disables_anonymized_telemetry_and_still_builds(monkeypatc
         raise ImportError(name)
 
     monkeypatch.setenv("EMBEDDING_BACKEND", "unsupported")
+    monkeypatch.setenv("ANONYMIZED_TELEMETRY", "True")
+    monkeypatch.setenv("CHROMA_ANONYMIZED_TELEMETRY", "True")
     monkeypatch.setattr("kb_pipeline.vector.chroma_store.importlib.import_module", fake_import)
     embedding_service = EmbeddingService()
     builder = VectorIndexBuilder(embedding_service)
@@ -101,6 +104,8 @@ def test_chroma_client_disables_anonymized_telemetry_and_still_builds(monkeypatc
 
     assert captured["settings_kwargs"] == {"anonymized_telemetry": False}
     assert captured["client_settings"] is not None
+    assert os.environ["ANONYMIZED_TELEMETRY"] == "False"
+    assert os.environ["CHROMA_ANONYMIZED_TELEMETRY"] == "False"
     assert built is True
     assert details["ready"] is True
     assert store.is_ready() is True

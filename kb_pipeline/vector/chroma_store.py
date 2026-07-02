@@ -88,6 +88,7 @@ class ChromaStore:
             # Chroma telemetry is non-essential for SQLSense and older Chroma
             # releases are incompatible with newer PostHog capture signatures.
             os.environ["ANONYMIZED_TELEMETRY"] = "False"
+            os.environ["CHROMA_ANONYMIZED_TELEMETRY"] = "False"
             module = importlib.import_module("chromadb")
             persistent_client = getattr(module, "PersistentClient", None)
             if persistent_client is None:
