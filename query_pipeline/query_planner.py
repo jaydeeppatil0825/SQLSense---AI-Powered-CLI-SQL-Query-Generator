@@ -2847,8 +2847,12 @@ def _normalize_planner_output(
         and query_shape in {"unknown", "single_table_list", "single_table_count", "single_table_aggregate", "filtered_query"}
     ):
         blocking_ambiguities.add("table_selection")
+    is_filtered_aggregate = query_shape == "filtered_query" and bool(
+        (intent.get("aggregate_function") if isinstance(intent, dict) else None)
+        or _aggregate_function_hint(question)
+    )
     if (
-        query_shape in {"single_table_aggregate", "grouped_aggregate", "ranking_query"}
+        (query_shape in {"single_table_aggregate", "grouped_aggregate", "ranking_query"} or is_filtered_aggregate)
         and "metric_selection" in ambiguities
         and (
             metric_is_generic
