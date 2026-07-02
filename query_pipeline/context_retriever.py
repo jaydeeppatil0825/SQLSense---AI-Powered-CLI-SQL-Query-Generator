@@ -55,17 +55,44 @@ def retrieve_context(
     """Collect evidence for the planner through the normalized vector boundary."""
     normalized_question = _normalize_text(normalized_question)
     query_terms = _query_terms(normalized_question, intent)
+    structured_filters = [
+        entry
+        for entry in (intent.get("structured_filters") or [])
+        if isinstance(entry, dict)
+    ]
+    requested_filter_terms = [
+        str(entry.get("field_phrase") or entry.get("field") or "").strip()
+        for entry in structured_filters
+        if str(entry.get("field_phrase") or entry.get("field") or "").strip()
+    ] or list(intent.get("requested_filters") or [])
     vector_context = _normalized_vector_context(
         normalized_question,
         vector_retriever,
         require_normalized=require_normalized_vector_evidence,
+        supplemental_column_queries=requested_filter_terms if structured_filters else [],
     )
     use_vector_only = bool(vector_context.get("normalized_package_used"))
 
     glossary = business_glossary or {}
     kb_table_matches = [] if use_vector_only else _match_tables(query_terms, knowledge_base)
     matched_tables = list(kb_table_matches)
-    matched_columns = [] if use_vector_only else _match_columns(query_terms, knowledge_base)
+    schema_filter_matches = (
+        _match_filter_field_columns(requested_filter_terms, knowledge_base)
+        if structured_filters
+        else []
+    )
+    for entry in schema_filter_matches:
+        entry["evidence_sources"] = _unique(
+            [*(entry.get("evidence_sources") or []), "structured_filter_schema_identifier"]
+        )
+    matched_columns = (
+        _merge_column_candidates(
+            vector_context.get("matched_columns", []),
+            schema_filter_matches,
+        )
+        if use_vector_only
+        else _match_columns(query_terms, knowledge_base)
+    )
     matched_glossary_terms = vector_context.get("matched_glossary_terms", [])
 
     if not use_vector_only:
@@ -83,7 +110,7 @@ def retrieve_context(
         )
     else:
         matched_tables = _merge_table_candidates(vector_context.get("matched_tables", []))
-        matched_columns = _merge_column_candidates(vector_context.get("matched_columns", []))
+        matched_columns = _merge_column_candidates(matched_columns)
 
     strong_primary_table = _strong_direct_primary_table_match(
         normalized_question,
@@ -142,16 +169,6 @@ def retrieve_context(
         ),
         require_dimension=True,
     )
-    structured_filters = [
-        entry
-        for entry in (intent.get("structured_filters") or [])
-        if isinstance(entry, dict)
-    ]
-    requested_filter_terms = [
-        str(entry.get("field_phrase") or entry.get("field") or "").strip()
-        for entry in structured_filters
-        if str(entry.get("field_phrase") or entry.get("field") or "").strip()
-    ] or list(intent.get("requested_filters") or [])
     filter_candidates = _candidate_columns(
         requested_filter_terms,
         matched_columns,
@@ -519,6 +536,55 @@ def _match_columns(query_terms: list[str], knowledge_base: Dict[str, Any]) -> li
     return matches[:20]
 
 
+def _match_filter_field_columns(
+    field_terms: list[str],
+    knowledge_base: Dict[str, Any],
+) -> list[Dict[str, Any]]:
+    matches: list[Dict[str, Any]] = []
+    for table_name, table_data in knowledge_base.items():
+        for column in table_data.get("columns", []):
+            column_name = str(column.get("name", "")).strip()
+            if not column_name:
+                continue
+            search_texts = [
+                column_name,
+                _humanize(column_name),
+                *column_business_terms(column),
+            ]
+            best_score = 0.0
+            matched_terms: list[str] = []
+            evidence_sources: list[str] = []
+            for term in field_terms:
+                score, term_evidence = _score_match(term, *search_texts)
+                if score <= 0:
+                    continue
+                best_score = max(best_score, score)
+                matched_terms.append(term)
+                evidence_sources.extend(term_evidence)
+            if best_score <= 0:
+                continue
+            matches.append(
+                {
+                    "table": table_name,
+                    "column": column_name,
+                    "semantic_type": resolved_semantic_type(column),
+                    "core_semantic_type": str(column.get("semantic_type", "")).strip().lower(),
+                    "is_measure": column_is_measure(column),
+                    "is_dimension": column_is_dimension(column),
+                    "is_date": column_is_date(column),
+                    "sample_values": [],
+                    "score": round(best_score, 4),
+                    "matched_terms": _unique(matched_terms),
+                    "evidence_sources": _unique(
+                        ["structured_filter_schema_identifier", *evidence_sources]
+                    ),
+                    "source": "kb_identifier",
+                }
+            )
+    matches.sort(key=lambda item: (-item["score"], item["table"], item["column"]))
+    return matches[:20]
+
+
 def _match_glossary_terms(query_terms: list[str], glossary: Dict[str, Any]) -> list[Dict[str, Any]]:
     matches = []
     for term, entry in glossary.items():
@@ -726,6 +792,7 @@ def _normalized_vector_context(
     vector_retriever: Optional[Any],
     *,
     require_normalized: bool = False,
+    supplemental_column_queries: Optional[list[str]] = None,
 ) -> Dict[str, Any]:
     if vector_retriever is None or not hasattr(vector_retriever, "get_normalized_evidence_package"):
         if require_normalized:
@@ -742,6 +809,15 @@ def _normalized_vector_context(
 
     candidate_tables = list(package.get("candidate_tables", []) or [])
     candidate_columns = list(package.get("candidate_columns", []) or [])
+    supplemental_columns: list[dict[str, Any]] = []
+    if hasattr(vector_retriever, "get_relevant_columns"):
+        for query in _unique(supplemental_column_queries or []):
+            try:
+                supplemental_columns.extend(
+                    list(vector_retriever.get_relevant_columns(query, top_k=4) or [])
+                )
+            except Exception as exc:
+                logger.debug(f"Targeted filter column retrieval failed for {query!r}: {exc}")
     glossary_matches = list(package.get("glossary_matches", []) or [])
     relationships = list(package.get("relationships", []) or [])
     candidate_metrics = _normalized_column_entries(
@@ -757,6 +833,11 @@ def _normalized_vector_context(
         role="date",
     )
 
+    matched_columns = _merge_column_candidates(
+        _normalized_column_entries(candidate_columns),
+        _normalized_column_entries(supplemental_columns),
+    )
+
     return {
         "matched_tables": [
             {
@@ -769,7 +850,7 @@ def _normalized_vector_context(
             for entry in candidate_tables
             if entry.get("table_name")
         ],
-        "matched_columns": _normalized_column_entries(candidate_columns),
+        "matched_columns": matched_columns,
         "matched_glossary_terms": glossary_matches,
         "matched_relationships": [
             {
@@ -787,7 +868,11 @@ def _normalized_vector_context(
         "candidate_dates": candidate_dates,
         "evidence_scores": dict(package.get("evidence_scores", {}) or {}),
         "retrieval_sources": _unique(
-            ["normalized_vector_evidence", *(package.get("retrieval_sources", []) or [])]
+            [
+                "normalized_vector_evidence",
+                "targeted_filter_vector_evidence" if supplemental_columns else "",
+                *(package.get("retrieval_sources", []) or []),
+            ]
         ),
         "ambiguity_candidates": dict(package.get("ambiguity_candidates", {}) or {}),
         "missing_evidence_indicators": dict(package.get("missing_evidence_indicators", {}) or {}),

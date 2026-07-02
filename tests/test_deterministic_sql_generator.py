@@ -15,6 +15,8 @@ def _bills_kb():
                 {"name": "amount_total", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
                 {"name": "tax_total", "type": "DECIMAL(12,2)", "nullable": True, "semantic_type": "numeric_candidate"},
                 {"name": "status_code", "type": "VARCHAR(30)", "nullable": True, "semantic_type": "status"},
+                {"name": "customer_name", "type": "VARCHAR(100)", "nullable": True, "semantic_type": "name"},
+                {"name": "bill_date", "type": "DATE", "nullable": True, "semantic_type": "date"},
             ],
             "primary_keys": ["bill_id"],
             "foreign_keys": [],
@@ -238,10 +240,11 @@ def _filtered_context(
     *,
     field: str,
     operator: str,
-    value: str,
+    value: object,
     aggregate_function: str | None = None,
     selected_metric: str | None = None,
 ):
+    value_phrase = " and ".join(str(item) for item in value) if isinstance(value, list) else str(value)
     selected_filter = {
         "type": "value",
         "table": "bills",
@@ -249,7 +252,8 @@ def _filtered_context(
         "value": value,
         "operator": operator,
         "field_phrase": field.replace("_", " "),
-        "value_phrase": value,
+        "value_phrase": value_phrase,
+        "values": list(value) if isinstance(value, list) else ([value] if value != "" else []),
         "conjunction": None,
     }
     structured_filter = {
@@ -257,7 +261,8 @@ def _filtered_context(
         "field_phrase": field.replace("_", " "),
         "operator": operator,
         "value": value,
-        "value_phrase": value,
+        "value_phrase": value_phrase,
+        "values": list(value) if isinstance(value, list) else ([value] if value != "" else []),
         "conjunction": None,
     }
     return {
@@ -287,6 +292,57 @@ def _filtered_context(
     }
 
 
+def _multi_filtered_context(
+    filters: list[dict[str, object]],
+    *,
+    aggregate_function: str | None = None,
+    selected_metric: str | None = None,
+):
+    context = _filtered_context(
+        field=str(filters[0]["field"]),
+        operator=str(filters[0]["operator"]),
+        value=filters[0].get("value", ""),
+        aggregate_function=aggregate_function,
+        selected_metric=selected_metric,
+    )
+    selected_filters = []
+    structured_filters = []
+    for index, specification in enumerate(filters):
+        field = str(specification["field"])
+        value = specification.get("value", "")
+        values = list(value) if isinstance(value, list) else ([value] if value != "" else [])
+        conjunction = None if index == 0 else str(specification.get("conjunction") or "and")
+        value_phrase = " and ".join(str(item) for item in values)
+        selected_filters.append(
+            {
+                "type": "value",
+                "table": "bills",
+                "column": field,
+                "value": value,
+                "values": values,
+                "operator": str(specification["operator"]),
+                "field_phrase": field.replace("_", " "),
+                "value_phrase": value_phrase,
+                "conjunction": conjunction,
+            }
+        )
+        structured_filters.append(
+            {
+                "field": field.replace("_", " "),
+                "field_phrase": field.replace("_", " "),
+                "operator": str(specification["operator"]),
+                "value": value,
+                "values": values,
+                "value_phrase": value_phrase,
+                "conjunction": conjunction,
+            }
+        )
+    context["intent"]["structured_filters"] = structured_filters
+    context["plan"]["filters"] = selected_filters
+    context["selected_filters"] = selected_filters
+    return context
+
+
 def test_filtered_list_quotes_string_value_and_uses_schema_columns():
     result = generate_deterministic_sql(
         query_context=_filtered_context(field="status_code", operator="eq", value="pending"),
@@ -295,7 +351,7 @@ def test_filtered_list_quotes_string_value_and_uses_schema_columns():
 
     assert result.status == "generated"
     assert result.sql == (
-        "SELECT bill_id, amount_total, tax_total, status_code FROM bills "
+        "SELECT bill_id, amount_total, tax_total, status_code, customer_name, bill_date FROM bills "
         "WHERE status_code = 'pending' LIMIT 50;"
     )
 
@@ -323,6 +379,111 @@ def test_filtered_numeric_comparison_operators(operator, sql_operator):
 
     assert result.status == "generated"
     assert f"WHERE amount_total {sql_operator} 5000" in result.sql
+
+
+def test_filtered_list_supports_multiple_and_filters():
+    context = _multi_filtered_context(
+        [
+            {"field": "status_code", "operator": "eq", "value": "pending"},
+            {"field": "amount_total", "operator": "gt", "value": "1000", "conjunction": "and"},
+        ]
+    )
+
+    result = generate_deterministic_sql(query_context=context, knowledge_base=_bills_kb())
+
+    assert result.status == "generated"
+    assert "WHERE status_code = 'pending' AND amount_total > 1000" in result.sql
+
+
+def test_filtered_list_supports_uniform_or_filters():
+    context = _multi_filtered_context(
+        [
+            {"field": "status_code", "operator": "eq", "value": "paid"},
+            {"field": "status_code", "operator": "eq", "value": "partial", "conjunction": "or"},
+        ]
+    )
+
+    result = generate_deterministic_sql(query_context=context, knowledge_base=_bills_kb())
+
+    assert result.status == "generated"
+    assert "WHERE status_code = 'paid' OR status_code = 'partial'" in result.sql
+
+
+@pytest.mark.parametrize(
+    ("field", "operator", "value", "predicate"),
+    [
+        ("amount_total", "between", ["1000", "5000"], "amount_total BETWEEN 1000 AND 5000"),
+        ("bill_date", "between", ["2026-01-01", "2026-02-01"], "bill_date BETWEEN '2026-01-01' AND '2026-02-01'"),
+        ("customer_name", "contains", "John", "customer_name LIKE '%John%'"),
+        ("status_code", "neq", "paid", "status_code <> 'paid'"),
+        ("bill_date", "after", "2026-02-01", "bill_date > '2026-02-01'"),
+        ("bill_date", "before", "2026-03-01", "bill_date < '2026-03-01'"),
+        ("bill_date", "eq", "2026-02-03", "bill_date = '2026-02-03'"),
+        ("amount_total", "is_null", "", "amount_total IS NULL"),
+        ("amount_total", "is_not_null", "", "amount_total IS NOT NULL"),
+    ],
+)
+def test_filtered_list_supports_advanced_typed_predicates(field, operator, value, predicate):
+    result = generate_deterministic_sql(
+        query_context=_filtered_context(field=field, operator=operator, value=value),
+        knowledge_base=_bills_kb(),
+    )
+
+    assert result.status == "generated"
+    assert f"WHERE {predicate}" in result.sql
+
+
+def test_filtered_aggregate_supports_multiple_and_filters():
+    context = _multi_filtered_context(
+        [
+            {"field": "status_code", "operator": "eq", "value": "paid"},
+            {"field": "amount_total", "operator": "gt", "value": "1000", "conjunction": "and"},
+        ],
+        aggregate_function="sum",
+        selected_metric="amount_total",
+    )
+
+    result = generate_deterministic_sql(query_context=context, knowledge_base=_bills_kb())
+
+    assert result.status == "generated"
+    assert result.sql == (
+        "SELECT SUM(amount_total) AS sum_amount_total FROM bills "
+        "WHERE status_code = 'paid' AND amount_total > 1000;"
+    )
+
+
+def test_filtered_query_rejects_mixed_and_or_without_parentheses():
+    context = _multi_filtered_context(
+        [
+            {"field": "status_code", "operator": "eq", "value": "paid"},
+            {"field": "amount_total", "operator": "gt", "value": "1000", "conjunction": "and"},
+            {"field": "status_code", "operator": "eq", "value": "partial", "conjunction": "or"},
+        ]
+    )
+
+    result = generate_deterministic_sql(query_context=context, knowledge_base=_bills_kb())
+
+    assert result.status == "cannot_plan_safely"
+    assert result.sql is None
+    assert "mixed or unsupported filter conjunctions" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("field", "operator", "value"),
+    [
+        ("status_code", "gt", "paid"),
+        ("bill_date", "after", "not-a-date"),
+        ("amount_total", "between", ["1000"]),
+    ],
+)
+def test_filtered_query_rejects_invalid_typed_predicates(field, operator, value):
+    result = generate_deterministic_sql(
+        query_context=_filtered_context(field=field, operator=operator, value=value),
+        knowledge_base=_bills_kb(),
+    )
+
+    assert result.status == "cannot_plan_safely"
+    assert result.sql is None
 
 
 def test_filtered_aggregate_uses_planner_metric_and_filter():

@@ -212,6 +212,27 @@ def test_structured_filter_comparison_operators(phrase, operator, value):
     assert intent["structured_filters"][0]["value"] == value
 
 
+@pytest.mark.parametrize(
+    ("phrase", "operator", "value"),
+    [
+        ("amount between 1000 and 5000", "between", ["1000", "5000"]),
+        ("customer name contains John", "contains", "John"),
+        ("status is not paid", "neq", "paid"),
+        ("status not equal to paid", "neq", "paid"),
+        ("bill date is after 2026-02-01", "after", "2026-02-01"),
+        ("bill date is before 2026-03-01", "before", "2026-03-01"),
+        ("bill date on 2026-02-03", "eq", "2026-02-03"),
+        ("paid value is null", "is_null", ""),
+        ("paid value is not null", "is_not_null", ""),
+    ],
+)
+def test_structured_filter_advanced_operators(phrase, operator, value):
+    intent = build_intent(f"show bills where {phrase}")
+
+    assert intent["structured_filters"][0]["operator"] == operator
+    assert intent["structured_filters"][0]["value"] == value
+
+
 def test_or_filter_and_clause_boundary_are_preserved():
     intent = build_intent(
         "show bills where status is pending or status is overdue sorted by amount desc",

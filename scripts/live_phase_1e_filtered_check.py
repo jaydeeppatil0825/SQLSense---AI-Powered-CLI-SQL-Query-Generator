@@ -44,16 +44,16 @@ CREATE TABLE bills (
     customer_name VARCHAR(100) NOT NULL,
     bill_status VARCHAR(30) NOT NULL,
     billed_value DECIMAL(12,2) NOT NULL,
-    paid_value DECIMAL(12,2) NOT NULL,
+    paid_value DECIMAL(12,2) NULL,
     bill_date DATE NOT NULL
 );
 
 INSERT INTO bills (bill_no, customer_name, bill_status, billed_value, paid_value, bill_date) VALUES
-('B001', 'Aarav Traders', 'paid',      1000.00, 1000.00, '2026-01-05'),
-('B002', 'Bright Retail', 'partial',   2500.00, 1500.00, '2026-01-08'),
+('B001', 'John Supplies', 'paid',      1000.00, 1000.00, '2026-01-05'),
+('B002', 'Bright Retail', 'partial',   2500.00,    NULL, '2026-01-08'),
 ('B003', 'City Mart', 'pending',       3000.00,    0.00, '2026-01-12'),
 ('B004', 'Delta Stores', 'paid',       4500.00, 4500.00, '2026-01-18'),
-('B005', 'Elite Bazaar', 'partial',    5200.00, 2000.00, '2026-01-22'),
+('B005', 'Elite Bazaar', 'partial',    5200.00, 3500.00, '2026-01-22'),
 ('B006', 'Fresh Point', 'paid',        1800.00, 1800.00, '2026-02-03'),
 ('B007', 'Global Shop', 'pending',     7600.00,    0.00, '2026-02-10'),
 ('B008', 'Hari Om Sales', 'paid',      2200.00, 2200.00, '2026-02-15'),
@@ -149,6 +149,93 @@ FILTERED_CASES: List[Dict[str, Any]] = [
         "expected_kind": "scalar",
         "expected_value": Decimal("5300.00"),
         "sql_must_contain": ["AVG", "billed_value", "WHERE", "bill_status", "pending"],
+    },
+]
+
+ADVANCED_FILTERED_CASES: List[Dict[str, Any]] = [
+    {
+        "name": "pending bills with no payment",
+        "question": "show bills where bill status is pending and paid value equals 0",
+        "expected_kind": "row_count",
+        "expected_value": 2,
+        "sql_must_contain": ["WHERE", "bill_status", "pending", "AND", "paid_value", "= 0"],
+    },
+    {
+        "name": "paid or partial bills",
+        "question": "show bills where bill status is paid or bill status is partial",
+        "expected_kind": "row_count",
+        "expected_value": 8,
+        "sql_must_contain": ["WHERE", "bill_status", "paid", "OR", "partial"],
+    },
+    {
+        "name": "billed value numeric range",
+        "question": "show bills where billed value between 1000 and 5000",
+        "expected_kind": "row_count",
+        "expected_value": 7,
+        "sql_must_contain": ["billed_value", "BETWEEN 1000 AND 5000"],
+    },
+    {
+        "name": "bill date range",
+        "question": "show bills where bill date between 2026-01-08 and 2026-02-10",
+        "expected_kind": "row_count",
+        "expected_value": 6,
+        "sql_must_contain": ["bill_date", "BETWEEN '2026-01-08' AND '2026-02-10'"],
+    },
+    {
+        "name": "customer name contains",
+        "question": "show bills where customer name contains John",
+        "expected_kind": "row_count",
+        "expected_value": 1,
+        "sql_must_contain": ["customer_name", "LIKE", "%John%"],
+    },
+    {
+        "name": "bill status not paid",
+        "question": "show bills where bill status is not paid",
+        "expected_kind": "row_count",
+        "expected_value": 5,
+        "sql_must_contain": ["bill_status", "<>", "paid"],
+    },
+    {
+        "name": "bill date after",
+        "question": "show bills where bill date is after 2026-02-01",
+        "expected_kind": "row_count",
+        "expected_value": 5,
+        "sql_must_contain": ["bill_date", "> '2026-02-01'"],
+    },
+    {
+        "name": "bill date before",
+        "question": "show bills where bill date is before 2026-03-01",
+        "expected_kind": "row_count",
+        "expected_value": 9,
+        "sql_must_contain": ["bill_date", "< '2026-03-01'"],
+    },
+    {
+        "name": "bill date on",
+        "question": "show bills where bill date is on 2026-02-03",
+        "expected_kind": "row_count",
+        "expected_value": 1,
+        "sql_must_contain": ["bill_date", "= '2026-02-03'"],
+    },
+    {
+        "name": "paid value is null",
+        "question": "show bills where paid value is null",
+        "expected_kind": "row_count",
+        "expected_value": 1,
+        "sql_must_contain": ["paid_value", "IS NULL"],
+    },
+    {
+        "name": "paid value is not null",
+        "question": "show bills where paid value is not null",
+        "expected_kind": "row_count",
+        "expected_value": 9,
+        "sql_must_contain": ["paid_value", "IS NOT NULL"],
+    },
+    {
+        "name": "filtered aggregate with and",
+        "question": "show sum billed value from bills where bill status is paid and billed value greater than 1000",
+        "expected_kind": "scalar",
+        "expected_value": Decimal("12000.00"),
+        "sql_must_contain": ["SUM", "billed_value", "bill_status", "paid", "AND", "billed_value", "> 1000"],
     },
 ]
 
@@ -270,7 +357,15 @@ def run_sql_case(app: Any, case: Dict[str, Any]) -> Tuple[bool, str]:
     sql = result.get("generated_sql") or result.get("sql")
 
     if not result.get("success") or not sql:
-        return False, f"{case['name']}: expected generated SQL, got result={result}"
+        context = result.get("query_context") or {}
+        intent = context.get("intent") or {}
+        return False, (
+            f"{case['name']}: expected generated SQL; "
+            f"route={result.get('route') or result.get('route_used')} "
+            f"message={result.get('message') or result.get('error')} "
+            f"missing={context.get('missing_evidence')} "
+            f"filters={intent.get('structured_filters')}"
+        )
 
     validation_result = result.get("validation_result") or {}
     if not validation_result.get("is_valid"):
@@ -348,6 +443,13 @@ def main() -> int:
 
     print("\n[CHECK] Phase 1E filtered cases")
     for case in FILTERED_CASES:
+        ok, msg = run_sql_case(app, case)
+        print(("PASS " if ok else "FAIL ") + msg)
+        if not ok:
+            failures.append(msg)
+
+    print("\n[CHECK] Advanced deterministic filtered cases")
+    for case in ADVANCED_FILTERED_CASES:
         ok, msg = run_sql_case(app, case)
         print(("PASS " if ok else "FAIL ") + msg)
         if not ok:

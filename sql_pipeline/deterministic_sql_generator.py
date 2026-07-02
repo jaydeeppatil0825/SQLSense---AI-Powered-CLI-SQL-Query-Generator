@@ -19,6 +19,7 @@ The active phase implements single-table aggregate and filtered rendering.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import re
 from typing import Any, Optional
@@ -32,12 +33,20 @@ _AGGREGATE_HINTS = {
     "min": {"minimum", "min", "lowest"},
 }
 _NUMERIC_TYPE_MARKERS = ("int", "decimal", "numeric", "float", "double", "real")
+_DATE_TYPE_MARKERS = ("date", "time", "timestamp")
 _FILTER_OPERATORS = {
     "eq": "=",
+    "neq": "<>",
     "gt": ">",
     "lt": "<",
     "gte": ">=",
     "lte": "<=",
+    "before": "<",
+    "after": ">",
+    "between": "BETWEEN",
+    "contains": "LIKE",
+    "is_null": "IS NULL",
+    "is_not_null": "IS NOT NULL",
 }
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -62,6 +71,7 @@ class DeterministicSqlPlan:
     required_joins: list[dict[str, Any]] = field(default_factory=list)
     select_items: list[dict[str, Any]] = field(default_factory=list)
     where_clauses: list[str] = field(default_factory=list)
+    where_conjunctions: list[str] = field(default_factory=list)
     group_by: list[str] = field(default_factory=list)
     order_by: list[str] = field(default_factory=list)
     limit: Optional[int] = None
@@ -153,10 +163,13 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
                 required_evidence=["selected_table", "selected_filter"],
                 reason="planner-selected filter evidence is missing",
             )
+        selected_filters = [
+            entry for entry in (context.get("selected_filters") or [])
+            if isinstance(entry, dict)
+        ]
         selected_filter_operators = {
             str(entry.get("operator") or "").strip().lower()
-            for entry in (context.get("selected_filters") or [])
-            if isinstance(entry, dict)
+            for entry in selected_filters
         }
         if not selected_filter_operators or not selected_filter_operators <= set(_FILTER_OPERATORS):
             return DeterministicCapabilityResult(
@@ -165,6 +178,27 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
                 supported_now=False,
                 blocked_by=["filter_operator_not_supported"],
                 reason="the selected filter operator is not implemented in this phase",
+            )
+        conjunctions = [
+            str(entry.get("conjunction") or "").strip().lower()
+            for entry in selected_filters
+        ]
+        if conjunctions and conjunctions[0]:
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="filtered_query",
+                supported_now=True,
+                blocked_by=["filter_conjunction_invalid"],
+                reason="the first filter clause cannot have a conjunction",
+            )
+        active_conjunctions = {value or "and" for value in conjunctions[1:]}
+        if not active_conjunctions <= {"and", "or"} or len(active_conjunctions) > 1:
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="filtered_query",
+                supported_now=True,
+                blocked_by=["filter_conjunction_not_supported"],
+                reason="mixed or unsupported filter conjunctions cannot be planned safely",
             )
         if aggregate_function == "count":
             return DeterministicCapabilityResult(
@@ -448,7 +482,7 @@ def _build_filtered_single_table_plan(
             reason="table_schema_missing",
         )
 
-    where_clauses, filter_columns, filter_reason = _resolve_filter_clauses(
+    where_clauses, where_conjunctions, filter_columns, filter_reason = _resolve_filter_clauses(
         query_context=context,
         table_name=table_name,
         table_data=table_data,
@@ -516,6 +550,7 @@ def _build_filtered_single_table_plan(
         base_table=table_name,
         select_items=select_items,
         where_clauses=where_clauses,
+        where_conjunctions=where_conjunctions,
         limit=limit,
         aggregation_type=aggregate_function,
         metric_columns=metric_columns,
@@ -553,7 +588,7 @@ def _resolve_filter_clauses(
     query_context: dict[str, Any],
     table_name: str,
     table_data: dict[str, Any],
-) -> tuple[list[str], list[str], str]:
+) -> tuple[list[str], list[str], list[str], str]:
     selected_filters = [
         entry for entry in (query_context.get("selected_filters") or [])
         if isinstance(entry, dict)
@@ -564,9 +599,9 @@ def _resolve_filter_clauses(
         if isinstance(entry, dict)
     ]
     if not selected_filters:
-        return [], [], "selected_filter_missing"
+        return [], [], [], "selected_filter_missing"
     if structured_filters and len(selected_filters) != len(structured_filters):
-        return [], [], "filter_evidence_incomplete"
+        return [], [], [], "filter_evidence_incomplete"
 
     schema_columns = {
         str(column.get("name") or "").strip(): column
@@ -574,43 +609,87 @@ def _resolve_filter_clauses(
         if isinstance(column, dict) and str(column.get("name") or "").strip()
     }
     where_clauses: list[str] = []
+    where_conjunctions: list[str] = []
     filter_columns: list[str] = []
+    active_conjunctions: set[str] = set()
     for index, selected_filter in enumerate(selected_filters):
         filter_table = str(selected_filter.get("table") or "").strip()
         column_name = str(selected_filter.get("column") or selected_filter.get("column_name") or "").strip()
         operator = str(selected_filter.get("operator") or "").strip().lower()
         conjunction = str(selected_filter.get("conjunction") or "").strip().lower()
         if filter_table != table_name or not _SAFE_IDENTIFIER_RE.fullmatch(column_name):
-            return [], [], "filter_column_not_selected"
+            return [], [], [], "filter_column_not_selected"
         schema_column = schema_columns.get(column_name)
         if schema_column is None:
-            return [], [], "filter_column_not_in_schema"
-        sql_operator = _FILTER_OPERATORS.get(operator)
-        if not sql_operator:
-            return [], [], "filter_operator_not_supported"
-        if index > 0 and conjunction not in {"", "and"}:
-            return [], [], "filter_conjunction_not_supported"
-        literal, literal_reason = _filter_literal(
-            selected_filter.get("value", selected_filter.get("value_phrase")),
+            return [], [], [], "filter_column_not_in_schema"
+        if index == 0 and conjunction:
+            return [], [], [], "filter_conjunction_invalid"
+        normalized_conjunction = "" if index == 0 else (conjunction or "and")
+        if index > 0 and normalized_conjunction not in {"and", "or"}:
+            return [], [], [], "filter_conjunction_not_supported"
+        if normalized_conjunction:
+            active_conjunctions.add(normalized_conjunction)
+            if len(active_conjunctions) > 1:
+                return [], [], [], "filter_conjunction_not_supported"
+        predicate, predicate_reason = _filter_predicate(
+            column_name,
             schema_column,
             operator,
+            selected_filter,
         )
-        if literal_reason:
-            return [], [], literal_reason
-        where_clauses.append(f"{column_name} {sql_operator} {literal}")
+        if predicate_reason:
+            return [], [], [], predicate_reason
+        where_clauses.append(predicate)
+        where_conjunctions.append(normalized_conjunction)
         filter_columns.append(column_name)
-    return where_clauses, filter_columns, ""
+    return where_clauses, where_conjunctions, filter_columns, ""
+
+
+def _filter_predicate(
+    column_name: str,
+    schema_column: dict[str, Any],
+    operator: str,
+    selected_filter: dict[str, Any],
+) -> tuple[str, str]:
+    if operator == "is_null":
+        return f"{column_name} IS NULL", ""
+    if operator == "is_not_null":
+        return f"{column_name} IS NOT NULL", ""
+    if operator == "between":
+        values = selected_filter.get("values") or selected_filter.get("value")
+        if not isinstance(values, (list, tuple)) or len(values) != 2:
+            return "", "filter_between_values_invalid"
+        lower, lower_reason = _filter_literal(values[0], schema_column, operator)
+        upper, upper_reason = _filter_literal(values[1], schema_column, operator)
+        if lower_reason or upper_reason:
+            return "", lower_reason or upper_reason
+        return f"{column_name} BETWEEN {lower} AND {upper}", ""
+
+    sql_operator = _FILTER_OPERATORS.get(operator)
+    if not sql_operator:
+        return "", "filter_operator_not_supported"
+    literal, literal_reason = _filter_literal(
+        selected_filter.get("value", selected_filter.get("value_phrase")),
+        schema_column,
+        operator,
+    )
+    if literal_reason:
+        return "", literal_reason
+    return f"{column_name} {sql_operator} {literal}", ""
 
 
 def _filter_literal(value: Any, schema_column: dict[str, Any], operator: str) -> tuple[str, str]:
     if isinstance(value, (list, tuple, dict)) or value is None:
         return "", "filter_value_missing"
-    column_type = str(schema_column.get("type") or "").strip().lower()
-    is_numeric = any(marker in column_type for marker in _NUMERIC_TYPE_MARKERS)
     text = str(value).strip()
     if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
         text = text[1:-1].strip()
-    if is_numeric:
+    if not text:
+        return "", "filter_value_missing"
+    column_kind = _filter_column_kind(schema_column)
+    if column_kind == "numeric":
+        if operator not in {"eq", "neq", "gt", "lt", "gte", "lte", "between"}:
+            return "", "filter_operator_type_mismatch"
         try:
             numeric = Decimal(text)
         except (InvalidOperation, ValueError):
@@ -618,9 +697,42 @@ def _filter_literal(value: Any, schema_column: dict[str, Any], operator: str) ->
         if not numeric.is_finite():
             return "", "filter_value_type_mismatch"
         return format(numeric, "f"), ""
-    if operator != "eq":
+    if column_kind == "date":
+        if operator not in {"eq", "neq", "gt", "lt", "gte", "lte", "before", "after", "between"}:
+            return "", "filter_operator_type_mismatch"
+        return _date_filter_literal(text, schema_column)
+    if operator not in {"eq", "neq", "contains"}:
         return "", "filter_operator_type_mismatch"
+    if operator == "contains":
+        text = f"%{text}%"
     return "'" + text.replace("'", "''") + "'", ""
+
+
+def _filter_column_kind(schema_column: dict[str, Any]) -> str:
+    column_type = str(schema_column.get("type") or "").strip().lower()
+    semantic_type = resolved_semantic_type(schema_column)
+    if any(marker in column_type for marker in _NUMERIC_TYPE_MARKERS):
+        return "numeric"
+    if semantic_type == "date" or any(marker in column_type for marker in _DATE_TYPE_MARKERS):
+        return "date"
+    return "text"
+
+
+def _date_filter_literal(text: str, schema_column: dict[str, Any]) -> tuple[str, str]:
+    column_type = str(schema_column.get("type") or "").strip().lower()
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            normalized = date.fromisoformat(text).isoformat()
+        elif "time" in column_type or "timestamp" in column_type:
+            parsed = datetime.fromisoformat(text.replace(" ", "T"))
+            if parsed.tzinfo is not None:
+                return "", "filter_value_type_mismatch"
+            normalized = parsed.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            return "", "filter_value_type_mismatch"
+    except ValueError:
+        return "", "filter_value_type_mismatch"
+    return f"'{normalized}'", ""
 
 
 def _render_filtered_query(plan: DeterministicSqlPlan) -> str:
@@ -629,7 +741,15 @@ def _render_filtered_query(plan: DeterministicSqlPlan) -> str:
         expression = str(item.get("expression") or "").strip()
         alias = str(item.get("alias") or "").strip()
         select_parts.append(f"{expression} AS {alias}" if alias else expression)
-    sql = f"SELECT {', '.join(select_parts)} FROM {plan.base_table} WHERE {' AND '.join(plan.where_clauses)}"
+    predicate = plan.where_clauses[0]
+    for index, clause in enumerate(plan.where_clauses[1:], start=1):
+        conjunction = (
+            plan.where_conjunctions[index]
+            if index < len(plan.where_conjunctions)
+            else "and"
+        ) or "and"
+        predicate += f" {conjunction.upper()} {clause}"
+    sql = f"SELECT {', '.join(select_parts)} FROM {plan.base_table} WHERE {predicate}"
     if plan.limit:
         sql += f" LIMIT {plan.limit}"
     return sql + ";"

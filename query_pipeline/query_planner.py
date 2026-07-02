@@ -1618,7 +1618,7 @@ def _structured_filter_entries(
         raw_phrase = str(clause.get("raw_phrase") or "").strip()
         value = clause.get("value", clause.get("value_phrase", ""))
         term = str(matched_terms[0] if matched_terms else raw_phrase or value).strip()
-        signature = (table_name, column_name, term)
+        signature = (table_name, column_name, raw_phrase or str(value) or term)
         if signature in seen:
             continue
         seen.add(signature)
@@ -1646,25 +1646,54 @@ def _filter_field_match_score(entry: dict[str, Any], clause: dict[str, Any]) -> 
         return float(entry.get("score") or 0.0)
     normalized_field = _normalize(field_phrase)
     field_tokens = set(_tokenize(field_phrase))
-    texts = [
-        str(entry.get("column") or "").replace("_", " "),
-        *[str(value) for value in (entry.get("matched_terms") or [])],
-    ]
+    column_text = str(entry.get("column") or "").replace("_", " ")
+    normalized_column = _normalize(column_text)
+    column_tokens = set(_tokenize(column_text))
     lexical_score = 0.0
-    for text in texts:
+    if normalized_column == normalized_field:
+        lexical_score = 1.0
+    elif field_tokens and field_tokens <= column_tokens:
+        lexical_score = 0.9
+    elif field_tokens:
+        lexical_score = (len(field_tokens & column_tokens) / len(field_tokens)) * 0.7
+
+    for text in [str(value) for value in (entry.get("matched_terms") or [])]:
         normalized_text = _normalize(text)
         text_tokens = set(_tokenize(text))
         if not normalized_text or not text_tokens:
             continue
         if normalized_text == normalized_field:
-            lexical_score = max(lexical_score, 1.0)
+            lexical_score = max(lexical_score, 0.82)
         elif field_tokens and field_tokens <= text_tokens:
-            lexical_score = max(lexical_score, 0.9)
+            lexical_score = max(lexical_score, 0.75)
         elif field_tokens:
             overlap = len(field_tokens & text_tokens) / len(field_tokens)
-            lexical_score = max(lexical_score, overlap * 0.7)
+            lexical_score = max(lexical_score, overlap * 0.6)
     evidence_score = min(float(entry.get("score") or 0.0), 1.0)
     return round((lexical_score * 0.9) + (evidence_score * 0.1), 4) if lexical_score else 0.0
+
+
+def _has_structured_filter_ambiguity(
+    filter_candidates: list[dict[str, Any]],
+    structured_filters: list[dict[str, Any]],
+) -> bool:
+    for clause in structured_filters:
+        ranked: list[tuple[float, str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for candidate in filter_candidates:
+            table_name = str(candidate.get("table") or "").strip()
+            column_name = str(candidate.get("column") or "").strip()
+            signature = (table_name, column_name)
+            if not table_name or not column_name or signature in seen:
+                continue
+            seen.add(signature)
+            score = _filter_field_match_score(candidate, clause)
+            if score > 0:
+                ranked.append((score, table_name, column_name))
+        ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+        if len(ranked) >= 2 and abs(ranked[0][0] - ranked[1][0]) < 0.08:
+            return True
+    return False
 
 
 def _merge_candidate_columns(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2121,7 +2150,7 @@ def _detect_missing_evidence(
     if len(selected_tables) > 1 and not join_paths:
         missing_evidence["missing_join_path"] = True
 
-    if requested_filters and not filters:
+    if requested_filters and len(filters) < len(requested_filters):
         missing_evidence["missing_filter_column"] = True
 
     if query_shape == "formula_query" and not formula_evidence:
@@ -2833,12 +2862,22 @@ def _normalize_planner_output(
     }
     if metric_is_generic and len(unique_metrics) > 1 and "metric_selection" not in ambiguities:
         ambiguities.append("metric_selection")
-    requested_filter_count = len(
-        list((intent or {}).get("structured_filters") or (intent or {}).get("requested_filters") or [])
+    structured_filter_clauses = (
+        list((intent or {}).get("structured_filters") or [])
         if isinstance(intent, dict)
         else []
     )
-    if requested_filter_count == 1 and _has_close_role_ambiguity(filter_candidates):
+    requested_filter_count = len(
+        structured_filter_clauses or list((intent or {}).get("requested_filters") or [])
+        if isinstance(intent, dict)
+        else []
+    )
+    has_filter_ambiguity = (
+        _has_structured_filter_ambiguity(filter_candidates, structured_filter_clauses)
+        if structured_filter_clauses
+        else requested_filter_count == 1 and _has_close_role_ambiguity(filter_candidates)
+    )
+    if requested_filter_count and has_filter_ambiguity:
         ambiguities.append("filter_selection")
     blocking_ambiguities: set[str] = set()
     if (

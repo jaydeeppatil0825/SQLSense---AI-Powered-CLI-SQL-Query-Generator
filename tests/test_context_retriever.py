@@ -569,6 +569,132 @@ def test_context_retriever_structured_filter_uses_field_not_sample_value():
     assert [entry["column"] for entry in context["filter_candidates"]] == ["paid_value"]
 
 
+def test_context_retriever_supplements_each_structured_filter_field_from_vector_evidence():
+    class FakeVectorRetriever:
+        def __init__(self):
+            self.column_queries = []
+
+        def get_normalized_evidence_package(self, query, top_k=8):
+            return {
+                "candidate_tables": [{"table_name": "bills", "score": 0.9}],
+                "candidate_columns": [
+                    {
+                        "table_name": "bills",
+                        "column_name": "bill_status",
+                        "semantic_type": "status",
+                        "business_terms": ["bill status"],
+                        "score": 0.9,
+                    }
+                ],
+                "candidate_metrics": [],
+                "candidate_dimensions": [],
+                "candidate_dates": [],
+                "relationships": [],
+                "glossary_matches": [],
+                "retrieval_sources": ["vector"],
+                "ambiguity_candidates": {},
+                "missing_evidence_indicators": {},
+                "source_metadata": {"query": query},
+            }
+
+        def get_relevant_columns(self, query, top_k=4):
+            self.column_queries.append(query)
+            if query == "paid value":
+                return [
+                    {
+                        "table_name": "bills",
+                        "column_name": "paid_value",
+                        "semantic_type": "numeric_candidate",
+                        "business_terms": ["paid value"],
+                        "score": 0.96,
+                    }
+                ]
+            return []
+
+    retriever = FakeVectorRetriever()
+    intent = {
+        "requested_dimensions": [],
+        "requested_metrics": [],
+        "requested_filters": ["bill status is pending", "paid value equals 0"],
+        "structured_filters": [
+            {"field_phrase": "bill status", "operator": "eq", "value": "pending"},
+            {"field_phrase": "paid value", "operator": "eq", "value": "0", "conjunction": "and"},
+        ],
+        "raw_business_terms": ["bills", "bill status", "paid value"],
+        "source_scope": ["bills"],
+    }
+
+    context = retrieve_context(
+        "show bills where bill status is pending and paid value equals 0",
+        intent,
+        {"bills": {"columns": [], "primary_keys": [], "foreign_keys": [], "relationships": []}},
+        business_glossary={},
+        vector_retriever=retriever,
+    )
+
+    assert retriever.column_queries == ["bill status", "paid value"]
+    assert {entry["column"] for entry in context["filter_candidates"]} == {"bill_status", "paid_value"}
+    assert "targeted_filter_vector_evidence" in context["retrieval_sources"]
+
+
+def test_context_retriever_supplements_structured_filters_from_schema_identifiers():
+    class SparseVectorRetriever:
+        def get_normalized_evidence_package(self, query, top_k=8):
+            return {
+                "candidate_tables": [{"table_name": "bills", "score": 0.9}],
+                "candidate_columns": [],
+                "candidate_metrics": [],
+                "candidate_dimensions": [],
+                "candidate_dates": [],
+                "relationships": [],
+                "glossary_matches": [],
+                "retrieval_sources": ["vector"],
+                "ambiguity_candidates": {},
+                "missing_evidence_indicators": {},
+                "source_metadata": {"query": query},
+            }
+
+        def get_relevant_columns(self, query, top_k=4):
+            return []
+
+    knowledge_base = {
+        "bills": {
+            "columns": [
+                {"name": "bill_status", "type": "VARCHAR(30)", "semantic_type": "status"},
+                {"name": "paid_value", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+            ],
+            "primary_keys": [],
+            "foreign_keys": [],
+            "relationships": [],
+        }
+    }
+    intent = {
+        "requested_dimensions": [],
+        "requested_metrics": [],
+        "requested_filters": ["bill status is pending", "paid value equals 0"],
+        "structured_filters": [
+            {"field_phrase": "bill status", "operator": "eq", "value": "pending"},
+            {"field_phrase": "paid value", "operator": "eq", "value": "0", "conjunction": "and"},
+        ],
+        "raw_business_terms": ["bills", "bill status", "paid value"],
+        "source_scope": ["bills"],
+    }
+
+    context = retrieve_context(
+        "show bills where bill status is pending and paid value equals 0",
+        intent,
+        knowledge_base,
+        business_glossary={},
+        vector_retriever=SparseVectorRetriever(),
+    )
+
+    assert {entry["column"] for entry in context["filter_candidates"]} == {"bill_status", "paid_value"}
+    assert all(
+        "structured_filter_schema_identifier" in entry["evidence_sources"]
+        for entry in context["filter_candidates"]
+    )
+
+
 def test_context_retriever_fails_closed_when_normalized_runtime_evidence_is_unavailable():
     intent = {
         "intent_type": "list",

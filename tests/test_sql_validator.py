@@ -354,6 +354,7 @@ GENERIC_KB = {
             {"name": "record_id", "type": "INTEGER", "semantic_type": "id"},
             {"name": "record_name", "type": "VARCHAR(100)", "semantic_type": "name"},
             {"name": "owner_id", "type": "INTEGER", "semantic_type": "id"},
+            {"name": "created_on", "type": "DATE", "semantic_type": "date"},
         ],
         "primary_keys": ["record_id"],
         "foreign_keys": [],
@@ -562,3 +563,39 @@ class TestValidateSqlStructure:
 
         assert valid is False
         assert "GROUP BY is missing non-aggregate SELECT expression" in msg
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT record_id FROM alpha_records WHERE record_id BETWEEN 1 AND 5",
+        "SELECT record_name FROM alpha_records WHERE record_name LIKE '%John%'",
+        "SELECT record_name FROM alpha_records WHERE record_name <> 'closed'",
+        "SELECT created_on FROM alpha_records WHERE created_on > '2026-02-01'",
+        "SELECT created_on FROM alpha_records WHERE created_on BETWEEN '2026-01-01' AND '2026-03-01'",
+        "SELECT record_id FROM alpha_records WHERE owner_id IS NULL",
+        "SELECT record_id FROM alpha_records WHERE owner_id IS NOT NULL",
+        "SELECT record_id FROM alpha_records WHERE record_id > 1 AND owner_id <> 5",
+        "SELECT record_id FROM alpha_records WHERE record_id = 1 OR record_id = 2",
+    ],
+)
+def test_advanced_single_table_filter_sql_is_structurally_valid(sql):
+    valid, message = validate_sql_structure(sql, GENERIC_KB)
+
+    assert valid is True
+    assert message == "SQL structure is valid"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT record_id FROM alpha_records WHERE record_name LIKE;",
+        "SELECT record_id FROM alpha_records WHERE owner_id IS;",
+        "SELECT record_id FROM alpha_records WHERE record_id BETWEEN 1;",
+        "SELECT record_id FROM alpha_records WHERE record_id = 1 OR;",
+    ],
+)
+def test_partial_advanced_filter_sql_is_rejected(sql):
+    valid, _ = validate_sql_structure(sql, GENERIC_KB)
+
+    assert valid is False

@@ -807,14 +807,17 @@ def _extract_structured_filters(question: str) -> list[dict[str, Any]]:
     structured: list[dict[str, Any]] = []
     patterns = (
         (r"^(.+?)\s+between\s+(.+?)\s+and\s+(.+)$", "between"),
-        (r"^(.+?)\s+(?:is\s+not|!=|<>)\s+(.+)$", "neq"),
+        (r"^(.+?)\s+is\s+not\s+null$", "is_not_null"),
+        (r"^(.+?)\s+is\s+null$", "is_null"),
+        (r"^(.+?)\s+(?:is\s+not|not\s+equals?(?:\s+to)?|!=|<>)\s+(.+)$", "neq"),
         (r"^(.+?)\s+(?:greater\s+than\s+or\s+equal\s+to|at\s+least|>=)\s+(.+)$", "gte"),
         (r"^(.+?)\s+(?:less\s+than\s+or\s+equal\s+to|at\s+most|<=)\s+(.+)$", "lte"),
         (r"^(.+?)\s+(?:greater\s+than|>)\s+(.+)$", "gt"),
         (r"^(.+?)\s+(?:less\s+than|<)\s+(.+)$", "lt"),
+        (r"^(.+?)\s+(?:is\s+)?before\s+(.+)$", "before"),
+        (r"^(.+?)\s+(?:is\s+)?after\s+(.+)$", "after"),
+        (r"^(.+?)\s+(?:is\s+on|on)\s+(.+)$", "eq"),
         (r"^(.+?)\s+(?:equals?|is|=)\s+(.+)$", "eq"),
-        (r"^(.+?)\s+before\s+(.+)$", "before"),
-        (r"^(.+?)\s+after\s+(.+)$", "after"),
         (r"^(.+?)\s+contains\s+(.+)$", "contains"),
     )
     for phrase, conjunction in phrases:
@@ -835,7 +838,11 @@ def _extract_structured_filters(question: str) -> list[dict[str, Any]]:
             entry["field_phrase"] = _cleanup_phrase(match.group(1))
             entry["field"] = entry["field_phrase"]
             entry["operator"] = operator
-            if operator == "between":
+            if operator in {"is_null", "is_not_null"}:
+                entry["values"] = []
+                entry["value_phrase"] = ""
+                entry["value"] = ""
+            elif operator == "between":
                 entry["values"] = [_cleanup_phrase(match.group(2)), _cleanup_phrase(match.group(3))]
                 entry["value_phrase"] = " and ".join(entry["values"])
                 entry["value"] = list(entry["values"])

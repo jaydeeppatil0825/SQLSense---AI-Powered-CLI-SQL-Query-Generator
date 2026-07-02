@@ -277,6 +277,116 @@ def test_active_planner_selects_only_best_nonambiguous_filter_candidate():
     ]
 
 
+def test_active_planner_resolves_every_and_filter_from_evidence():
+    question = "show bills where status is pending and paid value equals 0"
+    intent = build_intent(question)
+    status = {
+        "table": "bills",
+        "column": "status_code",
+        "semantic_type": "status",
+        "score": 0.96,
+        "matched_terms": ["status"],
+        "source": "vector",
+    }
+    paid_value = {
+        "table": "bills",
+        "column": "paid_value",
+        "semantic_type": "numeric_candidate",
+        "score": 0.95,
+        "matched_terms": ["paid value"],
+        "source": "vector",
+    }
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.97, "source": "vector"}],
+        columns=[status, paid_value],
+        filters=[status, paid_value],
+    )
+
+    context = build_query_context(question, {}, intent=intent, retrieved_context=evidence)
+
+    assert context["route"] == "deterministic_sql_required"
+    assert [entry["column"] for entry in context["selected_filters"]] == ["status_code", "paid_value"]
+    assert context["selected_filters"][1]["conjunction"] == "and"
+
+
+def test_active_planner_resolves_repeated_or_filter_from_same_evidence():
+    question = "show bills where status is paid or status is partial"
+    intent = build_intent(question)
+    status = {
+        "table": "bills",
+        "column": "status_code",
+        "semantic_type": "status",
+        "score": 0.96,
+        "matched_terms": ["status"],
+        "source": "vector",
+    }
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.97, "source": "vector"}],
+        columns=[status],
+        filters=[status],
+    )
+
+    context = build_query_context(question, {}, intent=intent, retrieved_context=evidence)
+
+    assert context["route"] == "deterministic_sql_required"
+    assert [entry["column"] for entry in context["selected_filters"]] == ["status_code", "status_code"]
+    assert context["selected_filters"][1]["conjunction"] == "or"
+
+
+def test_active_planner_fails_closed_when_one_of_multiple_filter_fields_is_unknown():
+    question = "show bills where status is pending and unknown field is active"
+    intent = build_intent(question)
+    status = {
+        "table": "bills",
+        "column": "status_code",
+        "semantic_type": "status",
+        "score": 0.96,
+        "matched_terms": ["status"],
+        "source": "vector",
+    }
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.97, "source": "vector"}],
+        columns=[status],
+        filters=[status],
+    )
+
+    context = build_query_context(question, {}, intent=intent, retrieved_context=evidence)
+
+    assert context["route"] == "cannot_plan_safely"
+    assert "missing_filter_column" in context["missing_evidence"]
+
+
+def test_active_planner_fails_closed_for_ambiguous_clause_in_multiple_filters():
+    question = "show bills where amount is 100 and status is pending"
+    intent = build_intent(question)
+    candidates = [
+        {
+            "table": "bills",
+            "column": column,
+            "semantic_type": semantic_type,
+            "score": score,
+            "matched_terms": matched_terms,
+            "source": "vector",
+        }
+        for column, semantic_type, score, matched_terms in (
+            ("billed_amount", "numeric_candidate", 0.95, ["amount"]),
+            ("paid_amount", "numeric_candidate", 0.93, ["amount"]),
+            ("status_code", "status", 0.96, ["status"]),
+        )
+    ]
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "bills", "score": 0.97, "source": "vector"}],
+        columns=candidates,
+        filters=candidates,
+    )
+
+    context = build_query_context(question, {}, intent=intent, retrieved_context=evidence)
+
+    assert context["route"] == "cannot_plan_safely"
+    assert context["selected_filters"] == []
+    assert "filter_selection" in context["ambiguities"]
+
+
 def test_active_planner_prioritizes_lowest_ranking_intent():
     intent = build_intent("show lowest 5 paid value from bills")
     metric = {
