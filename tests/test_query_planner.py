@@ -1459,7 +1459,7 @@ def test_query_planner_leaves_pending_billed_amount_unresolved_without_formula_e
     assert "Requested metric remains unresolved in dynamic context." in context["warnings"]
 
 
-def test_query_planner_builds_grouped_aggregation_complex_plan_from_dynamic_context():
+def test_query_planner_fails_closed_for_multi_table_grouped_aggregation():
     knowledge_base = {
         "clients": {
             "columns": [
@@ -1548,7 +1548,8 @@ def test_query_planner_builds_grouped_aggregation_complex_plan_from_dynamic_cont
         retrieved_context=retrieved_context,
     )
 
-    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert context["can_plan"] is False
     assert context["query_shape"] == "grouped_aggregate"
     assert context["complex_sql_plan"]["query_shape"] == "grouped_aggregate"
     assert context["complex_sql_plan"]["aggregation_type"] == "sum"

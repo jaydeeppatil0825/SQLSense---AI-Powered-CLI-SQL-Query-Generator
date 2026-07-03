@@ -683,8 +683,9 @@ def _validate_group_by_for_aggregates(sql: str) -> tuple[bool, str]:
     select_segment = _strip_string_literals(select_match.group(1))
     expressions = _split_select_expressions(select_segment)
     has_aggregate = any(re.search(r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\(", expression, re.IGNORECASE) for expression in expressions)
-    if not has_aggregate:
-        return True, "No aggregate GROUP BY validation needed."
+    group_match = re.search(r"\bGROUP\s+BY\s+(.*?)(?=\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|\bUNION\b|;|$)", sql, re.IGNORECASE | re.DOTALL)
+    if not has_aggregate and not group_match:
+        return True, "No GROUP BY validation needed."
 
     non_aggregate_expressions = [
         expression
@@ -695,7 +696,6 @@ def _validate_group_by_for_aggregates(sql: str) -> tuple[bool, str]:
     if not non_aggregate_expressions:
         return True, "Aggregate query has no non-aggregate SELECT expressions."
 
-    group_match = re.search(r"\bGROUP\s+BY\s+(.*?)(?=\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|\bUNION\b|;|$)", sql, re.IGNORECASE | re.DOTALL)
     if not group_match:
         return False, "Aggregate queries with non-aggregate SELECT columns must include GROUP BY."
 
@@ -714,6 +714,54 @@ def _validate_group_by_for_aggregates(sql: str) -> tuple[bool, str]:
         return False, f"GROUP BY is missing non-aggregate SELECT expression '{expression_without_alias}'."
 
     return True, "GROUP BY matches non-aggregate SELECT expressions."
+
+
+def _validate_aggregate_clause_placement(sql: str) -> tuple[bool, str]:
+    aggregate_pattern = r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\("
+    where_match = re.search(
+        r"\bWHERE\s+(.*?)(?=\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|;|$)",
+        sql,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if where_match and re.search(aggregate_pattern, where_match.group(1), re.IGNORECASE):
+        return False, "Aggregate conditions must use HAVING, not WHERE."
+
+    having_match = re.search(
+        r"\bHAVING\s+(.*?)(?=\bORDER\s+BY\b|\bLIMIT\b|;|$)",
+        sql,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not having_match:
+        return True, "No HAVING clause to validate."
+    if not re.search(r"\bGROUP\s+BY\b", sql, re.IGNORECASE):
+        return False, "HAVING requires GROUP BY in deterministic grouped SQL."
+
+    select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", sql, re.IGNORECASE | re.DOTALL)
+    aggregate_aliases: set[str] = set()
+    for expression in _split_select_expressions(select_match.group(1) if select_match else ""):
+        if re.search(aggregate_pattern, expression, re.IGNORECASE):
+            alias = _expression_alias(expression)
+            if alias:
+                aggregate_aliases.add(alias.lower())
+
+    having_segment = _strip_string_literals(having_match.group(1))
+    has_aggregate_expression = bool(re.search(aggregate_pattern, having_segment, re.IGNORECASE))
+    remaining = re.sub(
+        r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\([^()]*\)",
+        " ",
+        having_segment,
+        flags=re.IGNORECASE,
+    )
+    remaining_identifiers = {
+        token.lower()
+        for token in _tokenize_sql(remaining)
+        if _is_identifier(token) and token.upper() not in _SQL_KEYWORDS
+    }
+    if remaining_identifiers - aggregate_aliases:
+        return False, "HAVING may reference only aggregate expressions or aggregate aliases."
+    if not has_aggregate_expression and not (remaining_identifiers & aggregate_aliases):
+        return False, "HAVING must contain an aggregate condition."
+    return True, "Aggregate predicates are in valid SQL clauses."
 
 
 def _has_dangling_comma(sql: str) -> bool:
@@ -1017,6 +1065,10 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
     group_ok, group_reason = _validate_group_by_for_aggregates(stripped)
     if not group_ok:
         return False, group_reason
+
+    placement_ok, placement_reason = _validate_aggregate_clause_placement(stripped)
+    if not placement_ok:
+        return False, placement_reason
 
     if _has_dangling_comma(stripped):
         return False, "SQL contains a dangling comma before the next clause."

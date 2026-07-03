@@ -1686,42 +1686,41 @@ class QuestionService:
                 _set_route(query_context, "cannot_plan_safely", deterministic_aggregate.reason)
                 return False, _deterministic_aggregate_failure_message(query_context, deterministic_aggregate.reason), None, None
 
-        if query_shape == "filtered_query":
-            deterministic_filtered = generate_deterministic_sql(
+        if query_shape in {"filtered_query", "grouped_aggregate"}:
+            deterministic_result = generate_deterministic_sql(
                 query_context=query_context,
                 knowledge_base=knowledge_base,
             )
-            if deterministic_filtered.status == "generated" and deterministic_filtered.sql:
-                safety_ok, safety_reason = validate_sql(deterministic_filtered.sql)
-                struct_ok, struct_reason = validate_sql_structure(deterministic_filtered.sql, knowledge_base)
+            if deterministic_result.status == "generated" and deterministic_result.sql:
+                safety_ok, safety_reason = validate_sql(deterministic_result.sql)
+                struct_ok, struct_reason = validate_sql_structure(deterministic_result.sql, knowledge_base)
                 if safety_ok and struct_ok:
                     _set_route(
                         query_context,
                         "deterministic_sql_required",
-                        f"deterministic SQL generated for {query_shape}: {deterministic_filtered.reason}",
+                        f"deterministic SQL generated for {query_shape}: {deterministic_result.reason}",
                     )
                     self.conversation_memory.add_turn(
                         user_question=question,
                         is_follow_up=is_follow_up,
                         rewritten_question=rewritten_question,
-                        generated_sql=deterministic_filtered.sql,
+                        generated_sql=deterministic_result.sql,
                     )
-                    return True, "SQL generated successfully (deterministic)", deterministic_filtered.sql, None
+                    return True, "SQL generated successfully (deterministic)", deterministic_result.sql, None
                 fail_reason = safety_reason if not safety_ok else struct_reason
                 return False, f"SQL validation failed: {fail_reason}", None, None
-            if deterministic_filtered.status == "not_applicable":
+            if deterministic_result.status == "not_applicable":
                 _set_route(
                     query_context,
                     "deterministic_sql_required",
-                    deterministic_filtered.reason,
+                    deterministic_result.reason,
                 )
                 return False, _not_implemented_query_shape_message(query_shape), None, None
-            _set_route(query_context, "cannot_plan_safely", deterministic_filtered.reason)
-            detail = str(deterministic_filtered.reason or "filter evidence is incomplete").replace("_", " ")
-            return False, f"Cannot generate filtered SQL safely: {detail}.", None, None
+            _set_route(query_context, "cannot_plan_safely", deterministic_result.reason)
+            detail = str(deterministic_result.reason or "planner evidence is incomplete").replace("_", " ")
+            return False, f"Cannot generate {query_shape} SQL safely: {detail}.", None, None
 
         if query_shape in {
-            "grouped_aggregate",
             "ranking_query",
             "joined_lookup",
             "multi_metric_aggregate",

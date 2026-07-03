@@ -169,7 +169,11 @@ def classify_query_shape(
     intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
     planner_intent = str(plan.get("intent") or "").strip().lower()
     aggregate_hint = _aggregate_function_hint(question)
-    is_count = planner_intent == "count" or intent_type == "count"
+    is_count = (
+        planner_intent == "count"
+        or intent_type == "count"
+        or str((intent or {}).get("aggregate_function") or "").strip().lower() == "count"
+    )
     ranking_limit = plan.get("limit")
     if ranking_limit is None:
         ranking_limit = (intent or {}).get("limit")
@@ -189,18 +193,18 @@ def classify_query_shape(
 
     if bool((intent or {}).get("unsafe")) or _UNSAFE_QUERY_RE.search(question):
         return "blocked_unsafe"
-    if has_filters:
-        return "filtered_query"
     if explicit_metric_count > 1 and _question_requests_multiple_metrics(question):
         return "multi_metric_aggregate"
     if is_ranking and has_explicit_rank_count:
         return "ranking_query"
-    if aggregate_hint and table_count == 1 and not has_grouping and not has_join:
-        return "single_table_aggregate"
     if is_ranking:
         return "ranking_query"
-    if has_grouping and has_metric:
+    if has_grouping and (has_metric or is_count):
         return "grouped_aggregate"
+    if has_filters:
+        return "filtered_query"
+    if aggregate_hint and table_count == 1 and not has_grouping and not has_join:
+        return "single_table_aggregate"
     if has_join_paths:
         return "joined_lookup"
     if is_count and table_count == 1:
@@ -1881,9 +1885,10 @@ def _build_query_context_from_retrieved_context(
     requested_dimensions = list((intent or {}).get("requested_dimensions") or [])
     requested_filters = list((intent or {}).get("requested_filters") or [])
     intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
-    requires_metric_evidence = bool(
+    aggregate_function = str((intent or {}).get("aggregate_function") or "").strip().lower()
+    requires_metric_evidence = aggregate_function != "count" and bool(
         (intent or {}).get("needs_aggregation")
-        or (intent or {}).get("aggregate_function")
+        or aggregate_function
         or intent_type in {"aggregate", "grouped_summary", "ranking"}
     )
     required_metric_phrases = requested_metrics if requires_metric_evidence else []
@@ -2523,6 +2528,40 @@ def _ambiguity_details_for_contract(
     return details
 
 
+def _selected_having_for_contract(
+    intent: dict[str, Any],
+    selected_metric: dict[str, Any] | None,
+    selected_tables: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    conditions = [
+        dict(entry)
+        for entry in (intent.get("structured_having") or [])
+        if isinstance(entry, dict)
+    ]
+    if not conditions:
+        return []
+
+    table_name = ""
+    if len(selected_tables) == 1:
+        table_name = str(selected_tables[0].get("table") or "").strip()
+    selected: list[dict[str, Any]] = []
+    for condition in conditions:
+        aggregate_function = str(condition.get("aggregate_function") or "").strip().lower()
+        resolved = dict(condition)
+        resolved["table"] = table_name
+        if aggregate_function == "count":
+            resolved["column"] = ""
+        elif isinstance(selected_metric, dict):
+            resolved["table"] = str(selected_metric.get("table") or table_name).strip()
+            resolved["column"] = str(
+                selected_metric.get("column") or selected_metric.get("column_name") or ""
+            ).strip()
+        else:
+            resolved["column"] = ""
+        selected.append(resolved)
+    return selected
+
+
 def _evidence_summary_for_contract(
     retrieved_context: dict[str, Any] | None,
     *,
@@ -2903,11 +2942,15 @@ def _normalize_planner_output(
         blocking_ambiguities.add("dimension_selection")
     if "filter_selection" in ambiguities and query_shape == "filtered_query":
         blocking_ambiguities.add("filter_selection")
+    grouped_table_scope_is_safe = query_shape != "grouped_aggregate" or (
+        len(selected_tables) == 1 and not join_paths
+    )
     can_plan = bool(
         selected_table_names
         and query_shape not in {"unknown", "blocked_unsafe"}
         and not missing_evidence
         and not blocking_ambiguities
+        and grouped_table_scope_is_safe
     )
     route_recommendation, route_reason = _route_recommendation_from_contract(
         query_shape=query_shape,
@@ -2935,6 +2978,11 @@ def _normalize_planner_output(
     selected_filters = [] if "filter_selection" in blocking_ambiguities else [
         dict(entry) for entry in (plan.get("filters") or [])
     ]
+    selected_having = _selected_having_for_contract(
+        intent if isinstance(intent, dict) else {},
+        selected_metric,
+        selected_tables,
+    )
     selected_relationship_path = dict(join_paths[0]) if join_paths else None
     aggregate_function = str(
         (intent or {}).get("aggregate_function")
@@ -2978,6 +3026,7 @@ def _normalize_planner_output(
     elif normalized_complex_sql_plan:
         normalized_complex_sql_plan["query_shape"] = query_shape
         normalized_complex_sql_plan["required_joins"] = required_joins
+        normalized_complex_sql_plan["having"] = list(selected_having)
         normalized_complex_sql_plan["route_recommendation"] = route_recommendation
 
     debug_trace = [
@@ -3007,6 +3056,7 @@ def _normalize_planner_output(
         "selected_metric": selected_metric,
         "selected_dimensions": selected_dimensions,
         "selected_filters": selected_filters,
+        "selected_having": selected_having,
         "selected_relationship_path": selected_relationship_path,
         "aggregate_function": aggregate_function,
         "sorting": sorting,

@@ -60,14 +60,22 @@ _FROM_RE = re.compile(r"\s+from\s+(.+)$", re.IGNORECASE)
 _IN_RE = re.compile(r"\s+in\s+(.+)$", re.IGNORECASE)
 _FOR_RE = re.compile(r"\s+for\s+(.+)$", re.IGNORECASE)
 _WHERE_RE = re.compile(
-    r"\s+where\s+(.+?)(?=\s+(?:group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit\s+\d+)\b|$)",
+    r"\s+where\s+(.+?)(?=\s+(?:having|group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit\s+\d+|from)\b|$)",
     re.IGNORECASE,
 )
 _FILTER_RE = re.compile(
-    r"\s+filter(?:ed)?(?:\s+by)?\s+(.+?)(?=\s+(?:group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit\s+\d+)\b|$)",
+    r"\s+filter(?:ed)?(?:\s+by)?\s+(.+?)(?=\s+(?:having|group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit\s+\d+|from)\b|$)",
     re.IGNORECASE,
 )
-_GROUP_BY_RE = re.compile(r"\s+group(?:ed)?\s+by\s+(.+)$", re.IGNORECASE)
+_GROUP_BY_RE = re.compile(r"\s+group(?:ed)?\s+by\s+(.+?)(?=\s+having\b|$)", re.IGNORECASE)
+_HAVING_RE = re.compile(
+    r"\s+having\s+(.+?)(?=\s+(?:from|sort(?:ed)?|order(?:ed)?|limit\s+\d+)\b|$)",
+    re.IGNORECASE,
+)
+_WITH_RE = re.compile(
+    r"\s+with\s+(.+?)(?=\s+(?:from|where|having|group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit\s+\d+)\b|$)",
+    re.IGNORECASE,
+)
 _BETWEEN_RE = re.compile(r"\bbetween\s+(.+?)\s+and\s+(.+?)(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|$))", re.IGNORECASE)
 _BEFORE_RE = re.compile(r"\bbefore\s+(.+?)(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|$))", re.IGNORECASE)
 _AFTER_RE = re.compile(r"\bafter\s+(.+?)(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|$))", re.IGNORECASE)
@@ -129,6 +137,7 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
     """Attach additive, versioned diagnostics without changing legacy fields."""
     normalized = dict(intent or {})
     structured_filters = _extract_structured_filters(question)
+    structured_having = _extract_structured_having(question)
     intent_type = str(normalized.get("intent_type") or "unknown").strip().lower()
     confidence_reasons = ["deterministic_pattern_match"]
     missing_phrases: list[str] = []
@@ -147,6 +156,8 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
         confidence_reasons.append("explicit_sorting")
     if normalized.get("requested_filters"):
         confidence_reasons.append("explicit_filter_clause")
+    if structured_having:
+        confidence_reasons.append("explicit_having_clause")
     if normalized.get("grouping_phrase"):
         confidence_reasons.append("explicit_grouping_phrase")
     if normalized.get("source_scope"):
@@ -155,7 +166,11 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
     if not normalized.get("unsafe"):
         if intent_type in {"list", "count", "sorted_list"} and not normalized.get("target_entity_phrase"):
             missing_phrases.append("target_entity_phrase")
-        if intent_type in {"aggregate", "ranking", "grouped_summary"} and not normalized.get("metric_phrase"):
+        if (
+            intent_type in {"aggregate", "ranking", "grouped_summary"}
+            and str(normalized.get("aggregate_function") or "").strip().lower() != "count"
+            and not normalized.get("metric_phrase")
+        ):
             missing_phrases.append("metric_phrase")
         if intent_type == "grouped_summary" and not normalized.get("grouping_phrase"):
             missing_phrases.append("grouping_phrase")
@@ -168,11 +183,22 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
         confidence_reasons.append("vague_language")
     if any(entry.get("operator") == "unknown" for entry in structured_filters):
         unsupported_constructs.append("unparsed_filter_expression")
+    if any(entry.get("operator") == "unknown" for entry in structured_having):
+        unsupported_constructs.append("unparsed_having_expression")
+    if any(not entry.get("aggregate_function") for entry in structured_having):
+        unsupported_constructs.append("having_aggregate_missing")
     if len([part for part in str(question or "").split(";") if part.strip()]) > 1:
         unsupported_constructs.append("multiple_statements")
 
     normalized["intent_contract_version"] = INTENT_CONTRACT_VERSION
     normalized["structured_filters"] = structured_filters
+    normalized["structured_having"] = structured_having
+    normalized["requested_having"] = [
+        str(entry.get("raw_phrase") or "").strip()
+        for entry in structured_having
+        if str(entry.get("raw_phrase") or "").strip()
+    ]
+    normalized["having_phrase"] = normalized["requested_having"][0] if normalized["requested_having"] else ""
     normalized["confidence_reasons"] = _merge_unique(confidence_reasons)
     normalized["missing_phrases"] = _merge_unique(missing_phrases)
     normalized["unsupported_constructs"] = _merge_unique(unsupported_constructs)
@@ -278,6 +304,7 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     business_operation = "browse"
     requested_metrics: list[str] = []
     requested_dimensions: list[str] = []
+    structured_having = _extract_structured_having(body)
     requested_filters = _extract_requested_filters(body)
     requested_sort: dict[str, Any] = {}
     source_scope = _extract_source_scope(body)
@@ -351,12 +378,36 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
             elif not requested_metrics and primary_phrase:
                 requested_metrics = [primary_phrase]
 
+    if structured_having:
+        having = structured_having[0]
+        having_function = str(having.get("aggregate_function") or "").strip().lower()
+        having_metric = str(having.get("metric_phrase") or "").strip()
+        if having_function:
+            aggregate_function = having_function
+            intent_type = "grouped_summary"
+            business_operation = "summarize"
+            if having_function == "count":
+                requested_metrics = []
+            elif having_metric:
+                requested_metrics = [having_metric]
+            if not _has_explicit_grouping_marker(body) or not requested_dimensions:
+                implicit_dimension = _extract_implicit_having_dimension(body)
+                if implicit_dimension:
+                    requested_dimensions = [implicit_dimension]
+
     if (_TOP_RE.search(normalized_question) or _FIRST_RE.search(normalized_question)) and not requested_sort:
         requested_sort = {"direction": "desc", "terms": requested_metrics[0] if requested_metrics else "ranking"}
     if _BOTTOM_RE.search(normalized_question) and not requested_sort:
         requested_sort = {"direction": "asc", "terms": requested_metrics[0] if requested_metrics else "ranking"}
 
-    needs_grouping = bool(requested_dimensions and requested_metrics and _BY_RE.search(body_without_sort))
+    needs_grouping = bool(
+        requested_dimensions
+        and (
+            (requested_metrics and _BY_RE.search(body_without_sort))
+            or structured_having
+            or (aggregate_function == "count" and _has_explicit_grouping_marker(body_without_sort))
+        )
+    )
     needs_aggregation = intent_type in {"count", "aggregate", "grouped_summary", "ranking", "comparison"} or bool(
         requested_metrics and (aggregate_function or _BY_RE.search(body_without_sort))
     )
@@ -431,6 +482,13 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         "metric_is_generic": _metric_is_generic_phrase(metric_phrase),
         "source_scope_phrase": source_scope[0] if source_scope else "",
         "filter_phrase": requested_filters[0] if requested_filters else "",
+        "structured_having": structured_having,
+        "requested_having": [
+            str(entry.get("raw_phrase") or "").strip()
+            for entry in structured_having
+            if str(entry.get("raw_phrase") or "").strip()
+        ],
+        "having_phrase": str(structured_having[0].get("raw_phrase") or "") if structured_having else "",
         "grouping_phrase": grouping_phrase,
         "ranking_phrase": ranking_phrase,
         "limit_phrase": limit_phrase,
@@ -738,6 +796,8 @@ def _extract_requested_filters(question: str) -> list[str]:
     filter_text = _extract_filter_text(question)
     if filter_text:
         return [phrase for phrase, _ in _split_filter_phrases(filter_text)]
+    if _extract_structured_having(question):
+        return []
 
     filters: list[str] = []
     between_match = _BETWEEN_RE.search(question)
@@ -766,7 +826,10 @@ def _extract_filter_text(question: str) -> str:
     for pattern in (_WHERE_RE, _FILTER_RE):
         match = pattern.search(question)
         if match:
-            return _cleanup_phrase(match.group(1))
+            candidate = _cleanup_phrase(match.group(1))
+            if _parse_having_condition(candidate).get("aggregate_function"):
+                continue
+            return candidate
     return ""
 
 
@@ -855,6 +918,107 @@ def _extract_structured_filters(question: str) -> list[dict[str, Any]]:
     return structured
 
 
+def _extract_structured_having(question: str) -> list[dict[str, Any]]:
+    explicit_match = _HAVING_RE.search(question)
+    if explicit_match:
+        phrase = _cleanup_phrase(explicit_match.group(1))
+        return [_parse_having_condition(phrase)] if phrase else []
+
+    where_match = _WHERE_RE.search(question)
+    if where_match:
+        phrase = _cleanup_phrase(where_match.group(1))
+        condition = _parse_having_condition(phrase)
+        if condition.get("aggregate_function"):
+            return [condition]
+
+    with_match = _WITH_RE.search(question)
+    if with_match:
+        phrase = _cleanup_phrase(with_match.group(1))
+        condition = _parse_having_condition(phrase)
+        if condition.get("aggregate_function"):
+            return [condition]
+    return []
+
+
+def _parse_having_condition(phrase: str) -> dict[str, Any]:
+    cleaned = _cleanup_phrase(phrase)
+    entry = {
+        "raw_phrase": cleaned,
+        "aggregate_function": "",
+        "metric_phrase": "",
+        "operator": "unknown",
+        "value": "",
+        "value_phrase": "",
+        "values": [],
+        "conjunction": None,
+    }
+    if not cleaned:
+        return entry
+
+    operator_patterns = (
+        (r"\s+(?:is\s+)?greater\s+than\s+or\s+equal\s+to\s+", "gte"),
+        (r"\s+(?:is\s+)?less\s+than\s+or\s+equal\s+to\s+", "lte"),
+        (r"\s+(?:is\s+)?greater\s+than\s+", "gt"),
+        (r"\s+(?:is\s+)?less\s+than\s+", "lt"),
+        (r"\s+(?:is\s+)?not\s+equal(?:s)?(?:\s+to)?\s+", "neq"),
+        (r"\s+(?:equals?|is)\s+", "eq"),
+        (r"\s*(>=)\s*", "gte"),
+        (r"\s*(<=)\s*", "lte"),
+        (r"\s*(!=|<>)\s*", "neq"),
+        (r"\s*(>)\s*", "gt"),
+        (r"\s*(<)\s*", "lt"),
+        (r"\s*(=)\s*", "eq"),
+    )
+    left = ""
+    right = ""
+    for pattern, operator in operator_patterns:
+        match = re.search(pattern, cleaned, re.IGNORECASE)
+        if not match:
+            continue
+        left = _cleanup_phrase(cleaned[: match.start()])
+        right = _cleanup_phrase(cleaned[match.end() :])
+        entry["operator"] = operator
+        break
+    if not left or not right:
+        return entry
+
+    aggregate_match = re.match(
+        r"^(sum|total|average|avg|mean|highest|maximum|max|lowest|minimum|min|count)\b\s*(.*)$",
+        left,
+        re.IGNORECASE,
+    )
+    if aggregate_match:
+        aggregate_word = aggregate_match.group(1).lower()
+        entry["aggregate_function"] = {
+            "total": "sum",
+            "average": "avg",
+            "mean": "avg",
+            "highest": "max",
+            "maximum": "max",
+            "lowest": "min",
+            "minimum": "min",
+        }.get(aggregate_word, aggregate_word)
+        metric_phrase = _cleanup_phrase(aggregate_match.group(2))
+        entry["metric_phrase"] = "" if entry["aggregate_function"] == "count" else metric_phrase
+    else:
+        entry["metric_phrase"] = left
+
+    entry["value"] = right
+    entry["value_phrase"] = right
+    entry["values"] = [right]
+    return entry
+
+
+def _extract_implicit_having_dimension(question: str) -> str:
+    body = _strip_leading_action(question)
+    boundary = re.search(r"\s+(?:from|where|with|having)\b", body, re.IGNORECASE)
+    candidate = body[: boundary.start()] if boundary else ""
+    candidate = _cleanup_phrase(candidate)
+    if not candidate or _detect_aggregate_function(candidate) or _COUNT_RE.search(candidate):
+        return ""
+    return candidate
+
+
 def _source_scope_match(question: str) -> Optional[re.Match[str]]:
     from_match = _FROM_RE.search(question)
     if from_match:
@@ -876,7 +1040,7 @@ def _scope_parts(question: str) -> Optional[tuple[re.Match[str], str, Optional[r
         return None
     tail = match.group(1)
     split_match = re.search(
-        r"\s+(?:where|filter(?:ed)?(?:\s+by)?|before|after|between|greater\s+than|less\s+than|sort(?:ed)?|order(?:ed)?|by|per|each|group(?:ed)?\s+by)\b",
+        r"\s+(?:where|having|filter(?:ed)?(?:\s+by)?|before|after|between|greater\s+than|less\s+than|sort(?:ed)?|order(?:ed)?|by|per|each|group(?:ed)?\s+by)\b",
         tail,
         flags=re.IGNORECASE,
     )
@@ -913,6 +1077,9 @@ def _remove_filter_clauses(question: str) -> str:
         if not match:
             continue
         stripped = _clean_scalar(f"{stripped[: match.start()]} {stripped[match.end() :]}")
+    having_match = _HAVING_RE.search(stripped)
+    if having_match:
+        stripped = _clean_scalar(f"{stripped[: having_match.start()]} {stripped[having_match.end() :]}")
     for pattern in (_BETWEEN_RE, _BEFORE_RE, _AFTER_RE, _GREATER_THAN_RE, _LESS_THAN_RE):
         match = pattern.search(stripped)
         if match:

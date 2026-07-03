@@ -403,7 +403,6 @@ def test_pipeline_blocked_unsafe_route_blocks_sql_generation(monkeypatch):
 @pytest.mark.parametrize(
     "query_shape",
     [
-        "grouped_aggregate",
         "ranking_query",
         "joined_lookup",
         "multi_metric_aggregate",
@@ -711,7 +710,7 @@ def test_sum_amount_from_bills_stays_ambiguous_without_sql():
     assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
 
 
-def test_grouped_aggregate_shape_returns_not_implemented_capability_message():
+def test_multi_table_grouped_aggregate_fails_closed_without_sql():
     knowledge_base = {
         "partners": {
             "columns": [
@@ -745,10 +744,7 @@ def test_grouped_aggregate_shape_returns_not_implemented_capability_message():
 
     assert success is False
     assert sql is None
-    assert message == (
-        "This query was understood, but deterministic SQL generation for this query shape "
-        "is not implemented yet: grouped_aggregate."
-    )
-    assert service.get_last_query_context()["route_recommendation"] == "deterministic_sql_required"
+    assert "could not be planned safely" in message.lower()
+    assert service.get_last_query_context()["route_recommendation"] == "cannot_plan_safely"
     assert service.get_last_query_context()["query_shape"] == "grouped_aggregate"
-    assert service.get_last_query_context()["route_used"] == "deterministic_sql_required"
+    assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
