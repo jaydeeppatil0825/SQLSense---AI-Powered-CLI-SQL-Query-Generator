@@ -80,6 +80,11 @@ def test_query_pipeline_returns_structured_debug_fields_without_calling_question
         },
         "route_used": "deterministic_sql_required",
         "query_shape": "single_table_list",
+        "clause_plan": {
+            "clause_shape": "unsupported",
+            "requires": {"aggregate": False, "metric": False, "dimension": False, "where": False, "having": False},
+            "decision_path": [],
+        },
         "route_reason": "single-table deterministic browse/count query",
         "can_plan": True,
     }
@@ -111,6 +116,7 @@ def test_query_pipeline_returns_structured_debug_fields_without_calling_question
     assert result.validation_result == {}
     assert result.route == "deterministic_sql_required"
     assert result.query_shape == "single_table_list"
+    assert result.clause_plan["clause_shape"] == "unsupported"
     assert result.route_reason == "single-table deterministic browse/count query"
     assert result.can_plan is True
     assert retrieval_call["require_normalized_vector_evidence"] is True
@@ -122,6 +128,7 @@ def test_query_pipeline_returns_structured_debug_fields_without_calling_question
     assert pipeline_context["retrieved_context"] == retrieved_context
     assert pipeline_context["plan"]["intent"] == "list"
     assert pipeline_context["route_recommendation"] == "deterministic_sql_required"
+    assert pipeline_context["clause_plan"] == result.clause_plan
     assert pipeline_context["complex_sql_plan"] == {}
     assert pipeline_context["formula_evidence"] == []
     assert pipeline_context["evidence_sources"] == ["kb_identifier"]

@@ -1695,10 +1695,16 @@ class QuestionService:
                 safety_ok, safety_reason = validate_sql(deterministic_result.sql)
                 struct_ok, struct_reason = validate_sql_structure(deterministic_result.sql, knowledge_base)
                 if safety_ok and struct_ok:
+                    clause_shape = str(
+                        deterministic_result.plan.clause_shape
+                        if deterministic_result.plan
+                        else (query_context.get("clause_plan") or {}).get("clause_shape")
+                        or "unsupported"
+                    )
                     _set_route(
                         query_context,
                         "deterministic_sql_required",
-                        f"deterministic SQL generated for {query_shape}: {deterministic_result.reason}",
+                        f"deterministic SQL generated for {query_shape}/{clause_shape}: {deterministic_result.reason}",
                     )
                     self.conversation_memory.add_turn(
                         user_question=question,
@@ -1720,10 +1726,17 @@ class QuestionService:
             detail = str(deterministic_result.reason or "planner evidence is incomplete").replace("_", " ")
             return False, f"Cannot generate {query_shape} SQL safely: {detail}.", None, None
 
+        if query_shape == "multi_metric_aggregate":
+            _set_route(
+                query_context,
+                "cannot_plan_safely",
+                "multi-metric deterministic SQL is outside the supported single-metric clause plan",
+            )
+            return False, _planning_block_message(query_context, "cannot_plan_safely"), None, None
+
         if query_shape in {
             "ranking_query",
             "joined_lookup",
-            "multi_metric_aggregate",
             "formula_query",
         }:
             _set_route(

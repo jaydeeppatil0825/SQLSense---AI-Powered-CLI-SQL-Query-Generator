@@ -7,6 +7,7 @@ Central AI backend service for CLI AI configuration, testing, and chat calls.
 from __future__ import annotations
 
 from typing import Optional, Tuple
+import json
 import os
 
 from dotenv import load_dotenv
@@ -156,7 +157,11 @@ def _check_local_backend_status(
 
     try:
         payload = response.json()
-    except Exception:
+    except json.JSONDecodeError as exc:
+        logger.warning(f"Failed to parse Ollama status response as JSON: {exc}")
+        payload = {}
+    except Exception as exc:
+        logger.error(f"Unexpected error parsing Ollama response: {exc}")
         payload = {}
 
     available_models = _extract_model_names(payload)

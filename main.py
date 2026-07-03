@@ -1023,8 +1023,9 @@ def handle_choice(choice: int, state: SessionState) -> None:
             try:
                 state.app_service.get_conversation_memory().end_session()
                 state.app_service.get_conversation_memory().save_session()
-            except Exception:
-                pass
+            except Exception as exc:
+                # Log but don't block exit if session cleanup fails
+                logger.warning(f"Failed to save conversation session on exit: {exc}")
             print("  Goodbye!")
             sys.exit(0)
     except SystemExit:

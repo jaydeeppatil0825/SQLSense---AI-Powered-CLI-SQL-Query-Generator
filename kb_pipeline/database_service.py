@@ -217,7 +217,8 @@ class DatabaseService:
         try:
             glossary = load_business_glossary("semantic/business_glossary.json")
             self.business_glossary = self._align_glossary_with_active_knowledge_base(glossary)
-        except Exception:
+        except FileNotFoundError:
+            logger.debug("Business glossary file not found during warm start, will regenerate if needed")
             try:
                 has_ai_terms = any(
                     column_business_terms(column)
@@ -229,7 +230,22 @@ class DatabaseService:
                     use_ai_enrichment=bool(has_ai_terms),
                 )
             except Exception as exc:
-                logger.debug(f"Warm start skipped because glossary could not be prepared: {exc}")
+                logger.warning(f"Failed to generate business glossary during warm start: {exc}")
+                self.business_glossary = None
+        except Exception as exc:
+            logger.warning(f"Failed to load or align business glossary during warm start: {exc}")
+            try:
+                has_ai_terms = any(
+                    column_business_terms(column)
+                    for table_data in (self.knowledge_base or {}).values()
+                    for column in table_data.get("columns", [])
+                )
+                self.business_glossary = generate_business_glossary(
+                    self.knowledge_base or {},
+                    use_ai_enrichment=bool(has_ai_terms),
+                )
+            except Exception as exc2:
+                logger.warning(f"Failed to generate fallback business glossary: {exc2}")
                 self.business_glossary = None
 
         try:

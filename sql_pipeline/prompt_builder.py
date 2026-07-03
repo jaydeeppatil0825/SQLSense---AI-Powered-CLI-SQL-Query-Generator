@@ -22,6 +22,9 @@ from copy import deepcopy
 from typing import Any
 
 from kb_pipeline.schema_facts import column_profile_facts
+from utils.logger import get_logger
+
+logger = get_logger()
 
 
 _QUERY_RULES = """
@@ -191,7 +194,14 @@ def _get_relevant_glossary_terms(
                 loaded_glossary = payload
             else:
                 loaded_glossary = {}
-        except Exception:
+        except FileNotFoundError:
+            logger.debug(f"Business glossary file not found: {glossary_path}")
+            loaded_glossary = {}
+        except json.JSONDecodeError as exc:
+            logger.warning(f"Failed to parse business glossary JSON: {exc}")
+            loaded_glossary = {}
+        except Exception as exc:
+            logger.error(f"Unexpected error loading business glossary: {exc}")
             loaded_glossary = {}
 
     matches = []

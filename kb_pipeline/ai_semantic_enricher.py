@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import threading
 
 from core.ai_backend_service import call_ai_backend as _call_ai_backend
 from kb_pipeline.schema_facts import (
@@ -30,9 +31,77 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
-_LAST_ENRICHMENT_REASON: str | None = None
-_LAST_ENRICHED_TABLES: list[str] = []
-_LAST_FALLBACK_TABLES: dict[str, str] = {}
+
+# Thread-safe enrichment state management
+class EnrichmentState:
+    """Thread-safe storage for AI enrichment state."""
+    
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._reason: str | None = None
+        self._enriched_tables: list[str] = []
+        self._fallback_tables: dict[str, str] = {}
+    
+    def reset(self):
+        """Reset all enrichment state."""
+        with self._lock:
+            self._reason = None
+            self._enriched_tables = []
+            self._fallback_tables = {}
+    
+    def set_reason(self, reason: str | None):
+        """Set the enrichment reason."""
+        with self._lock:
+            self._reason = reason
+    
+    def get_reason(self) -> str | None:
+        """Get the enrichment reason."""
+        with self._lock:
+            return self._reason
+    
+    def add_enriched_table(self, table_name: str):
+        """Add a successfully enriched table."""
+        with self._lock:
+            self._enriched_tables.append(table_name)
+    
+    def add_fallback_table(self, table_name: str, reason: str):
+        """Add a table that fell back to rule-based enrichment."""
+        with self._lock:
+            self._fallback_tables[table_name] = reason
+    
+    def get_enriched_tables(self) -> list[str]:
+        """Get copy of enriched tables list."""
+        with self._lock:
+            return list(self._enriched_tables)
+    
+    def get_fallback_tables(self) -> dict[str, str]:
+        """Get copy of fallback tables dict."""
+        with self._lock:
+            return dict(self._fallback_tables)
+    
+    def has_enriched_tables(self) -> bool:
+        """Check if any tables were enriched."""
+        with self._lock:
+            return bool(self._enriched_tables)
+    
+    def has_fallback_tables(self) -> bool:
+        """Check if any tables fell back."""
+        with self._lock:
+            return bool(self._fallback_tables)
+    
+    def get_first_fallback_reason(self) -> str | None:
+        """Get the first fallback reason if any exist."""
+        with self._lock:
+            return next(iter(self._fallback_tables.values())) if self._fallback_tables else None
+    
+    def get_fallback_count(self) -> int:
+        """Get count of fallback tables."""
+        with self._lock:
+            return len(self._fallback_tables)
+
+
+# Global enrichment state instance (thread-safe)
+_enrichment_state = EnrichmentState()
 
 _SYSTEM_PROMPT = """You are a database semantics assistant.
 Return ONLY compact valid JSON.
@@ -159,12 +228,12 @@ def _describe_ai_enrichment_failure(exc: Exception, backend: str) -> str:
 
 def get_last_enrichment_reason() -> str | None:
     """Return the last AI enrichment fallback reason for CLI reporting."""
-    return _LAST_ENRICHMENT_REASON
+    return _enrichment_state.get_reason()
 
 
 def get_last_enrichment_report() -> tuple[list[str], dict[str, str]]:
     """Return enriched tables and per-table fallback reasons from the last run."""
-    return list(_LAST_ENRICHED_TABLES), dict(_LAST_FALLBACK_TABLES)
+    return _enrichment_state.get_enriched_tables(), _enrichment_state.get_fallback_tables()
 
 
 def _clean_ai_response(response: str) -> str:
@@ -892,11 +961,9 @@ def enrich_knowledge_base_with_ai(knowledge_base: dict, backend: str = "local") 
     If one table fails, only that table falls back to the rule-based version and
     the rest of the enrichment continues.
     """
-    global _LAST_ENRICHMENT_REASON, _LAST_ENRICHED_TABLES, _LAST_FALLBACK_TABLES
-
-    _LAST_ENRICHMENT_REASON = None
-    _LAST_ENRICHED_TABLES = []
-    _LAST_FALLBACK_TABLES = {}
+    # Reset enrichment state at start of enrichment process
+    _enrichment_state.reset()
+    
     logger.info("Starting AI semantic enrichment")
     enriched_kb = copy.deepcopy(knowledge_base)
 
@@ -942,23 +1009,24 @@ def enrich_knowledge_base_with_ai(knowledge_base: dict, backend: str = "local") 
                 _apply_column_enrichment(working_table, column_enrichment)
 
             enriched_kb[table_name] = working_table
-            _LAST_ENRICHED_TABLES.append(table_name)
+            _enrichment_state.add_enriched_table(table_name)
             print(f"  [OK] AI enrichment completed for table: {table_name}")
         except Exception as exc:
             reason = _describe_ai_enrichment_failure(exc, backend)
-            _LAST_FALLBACK_TABLES[table_name] = reason
+            _enrichment_state.add_fallback_table(table_name, reason)
             logger.debug(f"AI enrichment unavailable for table '{table_name}': {reason}. Using rule-based knowledge base.")
             logger.debug("AI enrichment technical details", exc_info=True)
 
-    if _LAST_FALLBACK_TABLES and not _LAST_ENRICHED_TABLES:
-        _LAST_ENRICHMENT_REASON = next(iter(_LAST_FALLBACK_TABLES.values()))
-        logger.info(f"AI semantic enrichment fallback: {_LAST_ENRICHMENT_REASON}.")
+    if _enrichment_state.has_fallback_tables() and not _enrichment_state.has_enriched_tables():
+        reason = _enrichment_state.get_first_fallback_reason()
+        _enrichment_state.set_reason(reason)
+        logger.info(f"AI semantic enrichment fallback: {reason}.")
         return knowledge_base
 
-    if _LAST_FALLBACK_TABLES:
-        _LAST_ENRICHMENT_REASON = "Partial AI enrichment fallback"
+    if _enrichment_state.has_fallback_tables():
+        _enrichment_state.set_reason("Partial AI enrichment fallback")
         logger.info(
-            f"AI semantic enrichment completed with fallback for {len(_LAST_FALLBACK_TABLES)} table(s)."
+            f"AI semantic enrichment completed with fallback for {_enrichment_state.get_fallback_count()} table(s)."
         )
     else:
         logger.info("AI semantic enrichment completed")

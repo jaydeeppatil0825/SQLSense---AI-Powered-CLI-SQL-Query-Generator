@@ -152,7 +152,8 @@ class ChromaStore:
             return False
         try:
             collections = self._client.list_collections()
-        except Exception:
+        except Exception as exc:
+            logger.debug(f"Failed to list ChromaDB collections: {exc}")
             return False
         for collection in collections:
             name = getattr(collection, "name", None)
@@ -185,7 +186,11 @@ class ChromaStore:
             if isinstance(raw, str):
                 try:
                     restored[key] = json.loads(raw)
-                except Exception:
+                except json.JSONDecodeError as exc:
+                    logger.debug(f"Failed to parse JSON metadata field '{key}': {exc}")
+                    continue
+                except Exception as exc:
+                    logger.warning(f"Unexpected error parsing metadata field '{key}': {exc}")
                     continue
         if "doc_type" in restored and "type" not in restored:
             restored["type"] = restored["doc_type"]

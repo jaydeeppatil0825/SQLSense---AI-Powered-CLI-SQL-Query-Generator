@@ -257,6 +257,37 @@ def test_grouping_after_filter_is_preserved():
     assert intent["grouping_phrase"] == "partner"
 
 
+def test_where_and_having_are_kept_in_separate_intent_contracts():
+    intent = build_intent(
+        "show sum gross amount from service invoices where invoice status is paid "
+        "group by customer name having sum gross amount greater than 10000"
+    )
+
+    assert [entry["field_phrase"] for entry in intent["structured_filters"]] == ["invoice status"]
+    assert intent["structured_having"] == [
+        {
+            "raw_phrase": "sum gross amount greater than 10000",
+            "aggregate_function": "sum",
+            "metric_phrase": "gross amount",
+            "operator": "gt",
+            "value": "10000",
+            "value_phrase": "10000",
+            "values": ["10000"],
+            "conjunction": None,
+        }
+    ]
+
+
+def test_implicit_aggregate_filter_uses_having_not_where():
+    intent = build_intent(
+        "show invoice status where sum gross amount is greater than 10000 from service invoices"
+    )
+
+    assert intent["structured_filters"] == []
+    assert intent["structured_having"][0]["aggregate_function"] == "sum"
+    assert intent["structured_having"][0]["metric_phrase"] == "gross amount"
+
+
 @pytest.mark.parametrize("ranking_word", ["lowest", "bottom"])
 def test_lowest_and_bottom_n_are_ranking_with_ascending_sort(ranking_word):
     intent = build_intent(f"show {ranking_word} 5 paid value from bills", ai_backend="local")

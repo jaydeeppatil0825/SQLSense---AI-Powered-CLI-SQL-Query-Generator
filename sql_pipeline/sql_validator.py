@@ -41,6 +41,7 @@ _SQL_FUNCTIONS = {
     "DAY", "NOW", "CURDATE", "COALESCE", "IFNULL", "ROUND", "CAST", "UPPER",
     "LOWER", "TRIM", "SUBSTRING", "CONCAT", "ABS", "IF", "NULLIF",
 }
+_UNSUPPORTED_GROUP_AGGREGATES = {"MEDIAN", "GROUP_CONCAT", "STDDEV", "STDDEV_POP", "STDDEV_SAMP", "VARIANCE", "VAR_POP", "VAR_SAMP"}
 _SQL_KEYWORDS = {
     "SELECT", "FROM", "WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER",
     "FULL", "CROSS", "NATURAL", "ON", "USING", "GROUP", "ORDER", "BY",
@@ -718,6 +719,12 @@ def _validate_group_by_for_aggregates(sql: str) -> tuple[bool, str]:
 
 def _validate_aggregate_clause_placement(sql: str) -> tuple[bool, str]:
     aggregate_pattern = r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\("
+    if re.search(r"\b(?:GROUP\s+BY|HAVING)\b", sql, re.IGNORECASE):
+        unsupported_pattern = r"\b(?:" + "|".join(sorted(_UNSUPPORTED_GROUP_AGGREGATES)) + r")\s*\("
+        unsupported_match = re.search(unsupported_pattern, sql, re.IGNORECASE)
+        if unsupported_match:
+            function_name = unsupported_match.group(0).split("(", 1)[0].strip().upper()
+            return False, f"Unsupported aggregate function in grouped SQL: {function_name}."
     where_match = re.search(
         r"\bWHERE\s+(.*?)(?=\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|;|$)",
         sql,

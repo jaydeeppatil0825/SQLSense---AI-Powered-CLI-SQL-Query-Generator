@@ -925,7 +925,10 @@ def test_qp3_multi_metric_aggregate_classification():
     )
 
     assert context["query_shape"] == "multi_metric_aggregate"
-    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert context["can_plan"] is False
+    assert context["clause_plan"]["clause_shape"] == "unsupported"
+    assert context["clause_plan"]["decision_path"][-1]["status"] == "blocked"
     metric_names = {candidate["column"] for candidate in context["metric_candidates"]}
     assert {"amount_total", "tax_total"} <= metric_names
 

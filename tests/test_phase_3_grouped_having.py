@@ -1,9 +1,14 @@
 import pytest
+from unittest.mock import MagicMock
 
 from query_pipeline.intent_builder import build_intent
 from query_pipeline.query_planner import build_query_context
-from sql_pipeline.deterministic_sql_generator import generate_deterministic_sql
+from sql_pipeline.deterministic_sql_generator import (
+    build_deterministic_sql_plan,
+    generate_deterministic_sql,
+)
 from sql_pipeline.question_service import QuestionService
+from sql_pipeline.query_executor import execute_query
 from sql_pipeline.sql_validator import validate_sql_structure
 
 
@@ -117,6 +122,99 @@ def _pipeline_context(question, context):
         "formula_evidence": [],
         "evidence_sources": context["evidence_sources"],
     }
+
+
+@pytest.mark.parametrize(
+    ("question", "context_kwargs", "clause_shape", "expected_statuses"),
+    [
+        (
+            "show service invoices where invoice status is paid",
+            {"filter_column": "invoice_status"},
+            "where_only",
+            ("resolved", "resolved", "resolved", "not_required", "not_required", "not_required", "resolved", "not_required", "resolved"),
+        ),
+        (
+            "show sum gross amount from service invoices",
+            {"metric": "gross_amount"},
+            "aggregate_only",
+            ("resolved", "resolved", "resolved", "resolved", "resolved", "not_required", "not_required", "not_required", "resolved"),
+        ),
+        (
+            "show sum gross amount from service invoices where invoice status is paid",
+            {"metric": "gross_amount", "filter_column": "invoice_status"},
+            "aggregate_where",
+            ("resolved", "resolved", "resolved", "resolved", "resolved", "not_required", "resolved", "not_required", "resolved"),
+        ),
+        (
+            "show sum gross amount by invoice status from service invoices",
+            {"metric": "gross_amount", "dimension": "invoice_status"},
+            "group_by",
+            ("resolved", "resolved", "resolved", "resolved", "resolved", "resolved", "not_required", "not_required", "resolved"),
+        ),
+        (
+            "show sum gross amount from service invoices where invoice status is paid group by customer name",
+            {"metric": "gross_amount", "dimension": "customer_name", "filter_column": "invoice_status"},
+            "where_group_by",
+            ("resolved", "resolved", "resolved", "resolved", "resolved", "resolved", "resolved", "not_required", "resolved"),
+        ),
+        (
+            "show invoice status where sum gross amount is greater than 10000 from service invoices",
+            {"metric": "gross_amount", "dimension": "invoice_status"},
+            "group_by_having",
+            ("resolved", "resolved", "resolved", "resolved", "resolved", "resolved", "not_required", "resolved", "resolved"),
+        ),
+        (
+            "show sum gross amount from service invoices where invoice status is paid group by customer name having sum gross amount greater than 10000",
+            {"metric": "gross_amount", "dimension": "customer_name", "filter_column": "invoice_status"},
+            "where_group_by_having",
+            ("resolved", "resolved", "resolved", "resolved", "resolved", "resolved", "resolved", "resolved", "resolved"),
+        ),
+    ],
+)
+def test_clause_plan_exposes_ordered_deterministic_decision_tree(
+    question,
+    context_kwargs,
+    clause_shape,
+    expected_statuses,
+):
+    context = _context(question, **context_kwargs)
+    clause_plan = context["clause_plan"]
+
+    assert clause_plan["clause_shape"] == clause_shape
+    assert [entry["node"] for entry in clause_plan["decision_path"]] == [
+        "unsafe_check",
+        "table_scope",
+        "query_shape",
+        "aggregate",
+        "metric",
+        "dimension",
+        "where",
+        "having",
+        "route",
+    ]
+    assert tuple(entry["status"] for entry in clause_plan["decision_path"]) == expected_statuses
+
+    sql_plan = build_deterministic_sql_plan(
+        query_context=context,
+        knowledge_base=INVOICE_KB,
+    )
+    assert sql_plan.clause_shape == clause_shape
+    assert sql_plan.decision_path == clause_plan["decision_path"]
+    assert sql_plan.status == "ready"
+
+
+def test_generator_rejects_planner_clause_shape_mismatch():
+    question = "show sum gross amount by invoice status from service invoices"
+    context = _context(question, metric="gross_amount", dimension="invoice_status")
+    context["clause_plan"] = dict(context["clause_plan"])
+    context["clause_plan"]["clause_shape"] = "where_group_by"
+
+    result = generate_deterministic_sql(query_context=context, knowledge_base=INVOICE_KB)
+
+    assert result.status == "cannot_plan_safely"
+    assert result.sql is None
+    assert result.plan is not None
+    assert "clause_plan_mismatch" in result.plan.missing_evidence
 
 
 @pytest.mark.parametrize(
@@ -326,6 +424,33 @@ def test_having_generic_metric_fails_closed():
     assert "metric_selection" in context["ambiguities"]
 
 
+def test_having_on_a_different_metric_fails_closed_as_multi_metric():
+    question = (
+        "show sum gross amount by invoice status from service invoices "
+        "having sum received amount greater than 10000"
+    )
+    context = _context(question, metric="received_amount", dimension="invoice_status")
+
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert "multi_metric_having_not_supported" in context["intent"]["unsupported_constructs"]
+    assert generate_deterministic_sql(query_context=context, knowledge_base=INVOICE_KB).sql is None
+
+
+def test_grouped_multi_metric_output_fails_closed():
+    question = "show sum gross amount and received amount by invoice status from service invoices"
+    context = _context(
+        question,
+        metric="gross_amount",
+        dimension="invoice_status",
+        extra_metrics=[_candidate("received_amount", role="metric", term="received amount", score=0.97)],
+    )
+
+    assert context["query_shape"] == "multi_metric_aggregate"
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert context["clause_plan"]["clause_shape"] == "unsupported"
+    assert generate_deterministic_sql(query_context=context, knowledge_base=INVOICE_KB).sql is None
+
+
 def test_unsafe_grouped_request_stays_blocked():
     context = _context("delete service invoices by invoice status", dimension="invoice_status")
 
@@ -337,8 +462,9 @@ def test_question_service_dispatches_grouped_aggregate_without_runtime_ai():
     question = "show sum gross amount by invoice status from service invoices"
     context = _context(question, metric="gross_amount", dimension="invoice_status")
     pipeline_context = _pipeline_context(question, context)
+    service = QuestionService()
 
-    success, message, sql, error = QuestionService().process_question(
+    success, message, sql, error = service.process_question(
         question,
         INVOICE_KB,
         pipeline_context=pipeline_context,
@@ -351,6 +477,7 @@ def test_question_service_dispatches_grouped_aggregate_without_runtime_ai():
         "SELECT invoice_status, SUM(gross_amount) AS sum_gross_amount "
         "FROM service_invoices GROUP BY invoice_status;"
     )
+    assert "grouped_aggregate/group_by" in service.get_last_query_context()["route_reason"]
 
 
 @pytest.mark.parametrize(
@@ -428,7 +555,21 @@ def test_validator_accepts_safe_grouped_having_sql():
         "SELECT invoice_status, SUM(gross_amount) FROM service_invoices GROUP BY invoice_status HAVING gross_amount > 10000;",
         "SELECT invoice_status, SUM(gross_amount) FROM service_invoices HAVING SUM(gross_amount) > 10000;",
         "SELECT invoice_status, gross_amount FROM service_invoices GROUP BY invoice_status;",
+        "SELECT invoice_status, MEDIAN(gross_amount) FROM service_invoices GROUP BY invoice_status;",
     ],
 )
 def test_validator_rejects_invalid_grouped_having_semantics(sql):
     assert validate_sql_structure(sql, INVOICE_KB)[0] is False
+
+
+def test_executor_revalidates_invalid_grouped_sql_before_connecting():
+    engine = MagicMock()
+    sql = (
+        "SELECT invoice_status, SUM(gross_amount) FROM service_invoices "
+        "WHERE SUM(gross_amount) > 10000 GROUP BY invoice_status;"
+    )
+
+    with pytest.raises(ValueError, match="Aggregate conditions must use HAVING"):
+        execute_query(sql, engine, knowledge_base=INVOICE_KB)
+
+    engine.connect.assert_not_called()

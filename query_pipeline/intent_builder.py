@@ -187,6 +187,10 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
         unsupported_constructs.append("unparsed_having_expression")
     if any(not entry.get("aggregate_function") for entry in structured_having):
         unsupported_constructs.append("having_aggregate_missing")
+    if normalized.get("having_metric_conflict"):
+        unsupported_constructs.append("multi_metric_having_not_supported")
+    if normalized.get("having_aggregate_conflict"):
+        unsupported_constructs.append("multi_aggregate_having_not_supported")
     if len([part for part in str(question or "").split(";") if part.strip()]) > 1:
         unsupported_constructs.append("multiple_statements")
 
@@ -308,6 +312,8 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     requested_filters = _extract_requested_filters(body)
     requested_sort: dict[str, Any] = {}
     source_scope = _extract_source_scope(body)
+    having_metric_conflict = False
+    having_aggregate_conflict = False
 
     sort_match = _SORTED_BY_RE.search(normalized_question)
     requested_sort = _extract_requested_sort(normalized_question)
@@ -378,11 +384,21 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
             elif not requested_metrics and primary_phrase:
                 requested_metrics = [primary_phrase]
 
+    output_aggregate_function = _aggregate_function_before_having(body)
+    output_metric_phrase = requested_metrics[0] if output_aggregate_function and requested_metrics else ""
     if structured_having:
         having = structured_having[0]
         having_function = str(having.get("aggregate_function") or "").strip().lower()
         having_metric = str(having.get("metric_phrase") or "").strip()
         if having_function:
+            if output_aggregate_function and output_aggregate_function != having_function:
+                having_aggregate_conflict = True
+            if (
+                output_metric_phrase
+                and having_metric
+                and _cleanup_phrase(output_metric_phrase).lower() != _cleanup_phrase(having_metric).lower()
+            ):
+                having_metric_conflict = True
             aggregate_function = having_function
             intent_type = "grouped_summary"
             business_operation = "summarize"
@@ -489,6 +505,8 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
             if str(entry.get("raw_phrase") or "").strip()
         ],
         "having_phrase": str(structured_having[0].get("raw_phrase") or "") if structured_having else "",
+        "having_metric_conflict": having_metric_conflict,
+        "having_aggregate_conflict": having_aggregate_conflict,
         "grouping_phrase": grouping_phrase,
         "ranking_phrase": ranking_phrase,
         "limit_phrase": limit_phrase,
@@ -1017,6 +1035,21 @@ def _extract_implicit_having_dimension(question: str) -> str:
     if not candidate or _detect_aggregate_function(candidate) or _COUNT_RE.search(candidate):
         return ""
     return candidate
+
+
+def _aggregate_function_before_having(question: str) -> str | None:
+    boundary_match = _HAVING_RE.search(question)
+    if boundary_match:
+        return _detect_aggregate_function(question[: boundary_match.start()])
+
+    where_match = _WHERE_RE.search(question)
+    if where_match and _parse_having_condition(_cleanup_phrase(where_match.group(1))).get("aggregate_function"):
+        return _detect_aggregate_function(question[: where_match.start()])
+
+    with_match = _WITH_RE.search(question)
+    if with_match and _parse_having_condition(_cleanup_phrase(with_match.group(1))).get("aggregate_function"):
+        return _detect_aggregate_function(question[: with_match.start()])
+    return _detect_aggregate_function(question)
 
 
 def _source_scope_match(question: str) -> Optional[re.Match[str]]:

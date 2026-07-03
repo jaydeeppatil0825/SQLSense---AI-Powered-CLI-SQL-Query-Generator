@@ -19,7 +19,7 @@ aggregate rendering with evidence-bound HAVING predicates.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import re
@@ -65,6 +65,8 @@ class DeterministicCapabilityResult:
 @dataclass(frozen=True)
 class DeterministicSqlPlan:
     query_shape: str
+    clause_shape: str = "unsupported"
+    decision_path: list[dict[str, str]] = field(default_factory=list)
     status: str = "not_applicable"
     supported_now: bool = False
     base_table: Optional[str] = None
@@ -117,6 +119,14 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
 
     if contract_shape == "grouped_aggregate":
         intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
+        if intent.get("unsupported_constructs"):
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="grouped_aggregate",
+                supported_now=True,
+                blocked_by=["unsupported_intent"],
+                reason="grouped intent contains an unsupported deterministic construct",
+            )
         if len(selected_tables) != 1 or context.get("join_paths"):
             return DeterministicCapabilityResult(
                 status="cannot_plan_safely",
@@ -348,6 +358,99 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
     )
 
 
+def _actual_clause_shape(plan: DeterministicSqlPlan) -> str:
+    has_where = bool(plan.where_clauses)
+    has_grouping = bool(plan.group_by)
+    has_having = bool(plan.having_clauses)
+    has_aggregate = bool(plan.aggregation_type)
+    if has_grouping:
+        if has_where and has_having:
+            return "where_group_by_having"
+        if has_where:
+            return "where_group_by"
+        if has_having:
+            return "group_by_having"
+        return "group_by"
+    if has_where:
+        return "aggregate_where" if has_aggregate else "where_only"
+    if has_aggregate:
+        return "aggregate_only"
+    return "unsupported"
+
+
+def _decision_path_from_plan(plan: DeterministicSqlPlan, clause_shape: str) -> list[dict[str, str]]:
+    requires_grouping = clause_shape in {
+        "group_by",
+        "where_group_by",
+        "group_by_having",
+        "where_group_by_having",
+    }
+    requires_where = clause_shape in {"where_only", "aggregate_where", "where_group_by", "where_group_by_having"}
+    requires_having = clause_shape in {"group_by_having", "where_group_by_having"}
+    requires_aggregate = clause_shape not in {"where_only", "unsupported"}
+    requires_metric = requires_aggregate and plan.aggregation_type != "count"
+
+    def node(name: str, status: str, reason: str) -> dict[str, str]:
+        return {"node": name, "status": status, "reason": reason}
+
+    ready = plan.status == "ready" and plan.can_render
+    return [
+        node("unsafe_check", "resolved", "request reached deterministic generation"),
+        node("table_scope", "resolved" if plan.base_table else "blocked", "single table resolved" if plan.base_table else "table missing"),
+        node("query_shape", "resolved" if clause_shape != "unsupported" else "blocked", f"resolved clause shape '{clause_shape}'"),
+        node("aggregate", "resolved" if requires_aggregate and plan.aggregation_type else "blocked" if requires_aggregate else "not_required", "aggregate resolved" if requires_aggregate and plan.aggregation_type else "aggregate not required" if not requires_aggregate else "aggregate missing"),
+        node("metric", "resolved" if requires_metric and plan.metric_columns else "blocked" if requires_metric else "not_required", "metric resolved" if requires_metric and plan.metric_columns else "metric not required" if not requires_metric else "metric missing"),
+        node("dimension", "resolved" if requires_grouping and plan.dimension_columns else "blocked" if requires_grouping else "not_required", "dimension resolved" if requires_grouping and plan.dimension_columns else "dimension not required" if not requires_grouping else "dimension missing"),
+        node("where", "resolved" if requires_where and plan.where_clauses else "blocked" if requires_where else "not_required", "WHERE resolved" if requires_where and plan.where_clauses else "WHERE not required" if not requires_where else "WHERE evidence missing"),
+        node("having", "resolved" if requires_having and plan.having_clauses else "blocked" if requires_having else "not_required", "HAVING resolved" if requires_having and plan.having_clauses else "HAVING not required" if not requires_having else "HAVING evidence missing"),
+        node("route", "resolved" if ready else "blocked", "deterministic SQL generation is allowed" if ready else plan.route_reason or "plan is not renderable"),
+    ]
+
+
+def _apply_clause_plan_contract(
+    plan: DeterministicSqlPlan,
+    query_context: dict[str, Any],
+) -> DeterministicSqlPlan:
+    context = query_context if isinstance(query_context, dict) else {}
+    clause_plan = context.get("clause_plan") if isinstance(context.get("clause_plan"), dict) else {}
+    declared_shape = str(clause_plan.get("clause_shape") or "").strip()
+    actual_shape = _actual_clause_shape(plan)
+    clause_shape = declared_shape or actual_shape
+    decision_path = [
+        dict(entry)
+        for entry in (clause_plan.get("decision_path") or [])
+        if isinstance(entry, dict)
+    ] or _decision_path_from_plan(plan, clause_shape)
+
+    if plan.status == "ready" and declared_shape and declared_shape != actual_shape:
+        return replace(
+            plan,
+            clause_shape=declared_shape,
+            decision_path=decision_path,
+            status="cannot_plan_safely",
+            can_render=False,
+            missing_evidence=list(plan.missing_evidence) + ["clause_plan_mismatch"],
+            route_reason=f"planner clause shape '{declared_shape}' does not match resolved SQL clauses '{actual_shape}'",
+        )
+    if plan.status == "ready" and any(
+        entry.get("status") == "blocked" for entry in decision_path
+    ):
+        return replace(
+            plan,
+            clause_shape=clause_shape,
+            decision_path=decision_path,
+            status="cannot_plan_safely",
+            can_render=False,
+            missing_evidence=list(plan.missing_evidence) + ["clause_plan_blocked"],
+            route_reason="planner clause decision path contains a blocked node",
+        )
+    return replace(
+        plan,
+        clause_shape=clause_shape,
+        decision_path=decision_path,
+    )
+
+
 def build_deterministic_sql_plan(
     *,
     query_context: dict[str, Any],
@@ -356,7 +459,7 @@ def build_deterministic_sql_plan(
     """Build a normalized deterministic SQL plan from runtime pipeline evidence."""
     capability = analyze_deterministic_capabilities(query_context)
     if capability.status != "supported":
-        return DeterministicSqlPlan(
+        plan = DeterministicSqlPlan(
             query_shape=capability.query_shape,
             status=capability.status,
             supported_now=capability.supported_now,
@@ -365,31 +468,34 @@ def build_deterministic_sql_plan(
             route_reason=capability.reason,
             formula_evidence=list((query_context or {}).get("formula_evidence") or []),
         )
+        return _apply_clause_plan_contract(plan, query_context)
 
     if capability.query_shape == "single_table_aggregate":
-        return _build_single_table_aggregate_plan(
+        plan = _build_single_table_aggregate_plan(
             query_context=query_context,
             knowledge_base=knowledge_base,
             capability=capability,
         )
-    if capability.query_shape == "filtered_query":
-        return _build_filtered_single_table_plan(
+    elif capability.query_shape == "filtered_query":
+        plan = _build_filtered_single_table_plan(
             query_context=query_context,
             knowledge_base=knowledge_base,
             capability=capability,
         )
-    if capability.query_shape == "grouped_aggregate":
-        return _build_grouped_aggregate_plan(
+    elif capability.query_shape == "grouped_aggregate":
+        plan = _build_grouped_aggregate_plan(
             query_context=query_context,
             knowledge_base=knowledge_base,
             capability=capability,
         )
-    return DeterministicSqlPlan(
-        query_shape=capability.query_shape,
-        status="not_applicable",
-        supported_now=False,
-        route_reason=f"no deterministic planner is registered for {capability.query_shape}",
-    )
+    else:
+        plan = DeterministicSqlPlan(
+            query_shape=capability.query_shape,
+            status="not_applicable",
+            supported_now=False,
+            route_reason=f"no deterministic planner is registered for {capability.query_shape}",
+        )
+    return _apply_clause_plan_contract(plan, query_context)
 
 
 def generate_deterministic_sql(
@@ -548,8 +654,7 @@ def _build_single_table_aggregate_plan(
 
 
 def _render_single_table_aggregate(plan: DeterministicSqlPlan) -> str:
-    select_item = plan.select_items[0]
-    return f"SELECT {select_item['expression']} AS {select_item['alias']} FROM {plan.base_table};"
+    return _render_plan_in_canonical_order(plan)
 
 
 def _build_grouped_aggregate_plan(
@@ -1027,19 +1132,14 @@ def _date_filter_literal(text: str, schema_column: dict[str, Any]) -> tuple[str,
 
 
 def _render_filtered_query(plan: DeterministicSqlPlan) -> str:
-    select_parts = []
-    for item in plan.select_items:
-        expression = str(item.get("expression") or "").strip()
-        alias = str(item.get("alias") or "").strip()
-        select_parts.append(f"{expression} AS {alias}" if alias else expression)
-    predicate = _render_predicates(plan.where_clauses, plan.where_conjunctions)
-    sql = f"SELECT {', '.join(select_parts)} FROM {plan.base_table} WHERE {predicate}"
-    if plan.limit:
-        sql += f" LIMIT {plan.limit}"
-    return sql + ";"
+    return _render_plan_in_canonical_order(plan)
 
 
 def _render_grouped_aggregate(plan: DeterministicSqlPlan) -> str:
+    return _render_plan_in_canonical_order(plan)
+
+
+def _render_plan_in_canonical_order(plan: DeterministicSqlPlan) -> str:
     select_parts = []
     for item in plan.select_items:
         expression = str(item.get("expression") or "").strip()
@@ -1048,9 +1148,12 @@ def _render_grouped_aggregate(plan: DeterministicSqlPlan) -> str:
     sql = f"SELECT {', '.join(select_parts)} FROM {plan.base_table}"
     if plan.where_clauses:
         sql += f" WHERE {_render_predicates(plan.where_clauses, plan.where_conjunctions)}"
-    sql += f" GROUP BY {', '.join(plan.group_by)}"
+    if plan.group_by:
+        sql += f" GROUP BY {', '.join(plan.group_by)}"
     if plan.having_clauses:
         sql += f" HAVING {_render_predicates(plan.having_clauses, plan.having_conjunctions)}"
+    if plan.limit:
+        sql += f" LIMIT {plan.limit}"
     return sql + ";"
 
 

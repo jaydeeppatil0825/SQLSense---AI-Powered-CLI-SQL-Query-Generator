@@ -2562,6 +2562,166 @@ def _selected_having_for_contract(
     return selected
 
 
+def _clause_shape_for_contract(
+    *,
+    query_shape: str,
+    aggregate_function: str,
+    has_where: bool,
+    has_having: bool,
+) -> str:
+    if query_shape == "filtered_query":
+        return "aggregate_where" if aggregate_function else "where_only"
+    if query_shape in {"single_table_aggregate", "single_table_count"}:
+        return "aggregate_only"
+    if query_shape == "grouped_aggregate":
+        if has_where and has_having:
+            return "where_group_by_having"
+        if has_where:
+            return "where_group_by"
+        if has_having:
+            return "group_by_having"
+        return "group_by"
+    return "unsupported"
+
+
+def _build_clause_plan_for_contract(
+    *,
+    query_shape: str,
+    route_recommendation: str,
+    can_plan: bool,
+    aggregate_function: str,
+    intent: dict[str, Any],
+    selected_tables: list[dict[str, Any]],
+    selected_metric: dict[str, Any] | None,
+    selected_dimensions: list[dict[str, Any]],
+    selected_filters: list[dict[str, Any]],
+    selected_having: list[dict[str, Any]],
+    join_paths: list[dict[str, Any]],
+) -> dict[str, Any]:
+    requested_where = list(intent.get("structured_filters") or intent.get("requested_filters") or [])
+    requested_having = list(intent.get("structured_having") or intent.get("requested_having") or [])
+    has_where = bool(requested_where or selected_filters)
+    has_having = bool(requested_having or selected_having)
+    clause_shape = _clause_shape_for_contract(
+        query_shape=query_shape,
+        aggregate_function=aggregate_function,
+        has_where=has_where,
+        has_having=has_having,
+    )
+    requires_grouping = clause_shape in {
+        "group_by",
+        "where_group_by",
+        "group_by_having",
+        "where_group_by_having",
+    }
+    requires_aggregate = clause_shape not in {"where_only", "unsupported"}
+    requires_metric = requires_aggregate and aggregate_function != "count"
+
+    def node(name: str, status: str, reason: str) -> dict[str, str]:
+        return {"node": name, "status": status, "reason": reason}
+
+    unsafe_blocked = query_shape == "blocked_unsafe" or bool(intent.get("unsafe"))
+    table_scope_ok = len(selected_tables) == 1 and not join_paths
+    aggregate_ok = aggregate_function in {"count", "sum", "avg", "min", "max"}
+    clause_tree_not_required = query_shape == "single_table_list"
+    where_ok = bool(selected_filters) and len(selected_filters) == len(requested_where or selected_filters)
+    having_ok = (
+        len(selected_having) == 1
+        and len(selected_having) == len(requested_having or selected_having)
+    )
+
+    decision_path = [
+        node(
+            "unsafe_check",
+            "blocked" if unsafe_blocked else "resolved",
+            "unsafe request was blocked" if unsafe_blocked else "request is read-only",
+        ),
+        node(
+            "table_scope",
+            "resolved" if table_scope_ok else "blocked",
+            "exactly one table and no joins were selected"
+            if table_scope_ok
+            else "single-table evidence is missing, ambiguous, or requires a join",
+        ),
+        node(
+            "query_shape",
+            "resolved" if clause_shape != "unsupported" else "not_required" if clause_tree_not_required else "blocked",
+            f"resolved clause shape '{clause_shape}'"
+            if clause_shape != "unsupported"
+            else "plain list SQL remains handled by the existing simple deterministic path"
+            if clause_tree_not_required
+            else f"query shape '{query_shape}' is outside this deterministic clause tree",
+        ),
+        node(
+            "aggregate",
+            "resolved" if requires_aggregate and aggregate_ok else "blocked" if requires_aggregate else "not_required",
+            f"aggregate function '{aggregate_function}' was resolved"
+            if requires_aggregate and aggregate_ok
+            else "aggregate function is missing or unsupported"
+            if requires_aggregate
+            else "this clause shape does not aggregate",
+        ),
+        node(
+            "metric",
+            "resolved" if requires_metric and isinstance(selected_metric, dict) else "blocked" if requires_metric else "not_required",
+            "metric evidence was resolved"
+            if requires_metric and isinstance(selected_metric, dict)
+            else "metric evidence is missing or ambiguous"
+            if requires_metric
+            else "COUNT(*) or a non-aggregate shape does not require a metric column",
+        ),
+        node(
+            "dimension",
+            "resolved" if requires_grouping and bool(selected_dimensions) else "blocked" if requires_grouping else "not_required",
+            "group dimension evidence was resolved"
+            if requires_grouping and bool(selected_dimensions)
+            else "group dimension evidence is missing or ambiguous"
+            if requires_grouping
+            else "this clause shape does not group rows",
+        ),
+        node(
+            "where",
+            "resolved" if has_where and where_ok else "blocked" if has_where else "not_required",
+            "row-level filter evidence was resolved"
+            if has_where and where_ok
+            else "row-level filter evidence is missing or ambiguous"
+            if has_where
+            else "no row-level filter was requested",
+        ),
+        node(
+            "having",
+            "resolved" if has_having and having_ok else "blocked" if has_having else "not_required",
+            "aggregate filter evidence was resolved"
+            if has_having and having_ok
+            else "aggregate filter evidence is missing, ambiguous, or unsupported"
+            if has_having
+            else "no aggregate filter was requested",
+        ),
+    ]
+    prior_blocked = any(entry["status"] == "blocked" for entry in decision_path)
+    route_ok = route_recommendation == "deterministic_sql_required" and can_plan and not prior_blocked
+    decision_path.append(
+        node(
+            "route",
+            "resolved" if route_ok else "blocked",
+            "deterministic SQL generation is allowed"
+            if route_ok
+            else "deterministic SQL generation is blocked by unresolved evidence or unsupported scope",
+        )
+    )
+    return {
+        "clause_shape": clause_shape,
+        "requires": {
+            "aggregate": requires_aggregate,
+            "metric": requires_metric,
+            "dimension": requires_grouping,
+            "where": has_where,
+            "having": has_having,
+        },
+        "decision_path": decision_path,
+    }
+
+
 def _evidence_summary_for_contract(
     retrieved_context: dict[str, Any] | None,
     *,
@@ -2948,6 +3108,7 @@ def _normalize_planner_output(
     can_plan = bool(
         selected_table_names
         and query_shape not in {"unknown", "blocked_unsafe"}
+        and query_shape != "multi_metric_aggregate"
         and not missing_evidence
         and not blocking_ambiguities
         and grouped_table_scope_is_safe
@@ -2984,11 +3145,25 @@ def _normalize_planner_output(
         selected_tables,
     )
     selected_relationship_path = dict(join_paths[0]) if join_paths else None
-    aggregate_function = str(
+    raw_aggregate_function = (
         (intent or {}).get("aggregate_function")
         if isinstance(intent, dict)
         else ""
-    ).strip().lower() or _aggregate_function_hint(question)
+    )
+    aggregate_function = str(raw_aggregate_function or "").strip().lower() or _aggregate_function_hint(question)
+    clause_plan = _build_clause_plan_for_contract(
+        query_shape=query_shape,
+        route_recommendation=route_recommendation,
+        can_plan=can_plan,
+        aggregate_function=aggregate_function or "",
+        intent=intent if isinstance(intent, dict) else {},
+        selected_tables=selected_tables,
+        selected_metric=selected_metric,
+        selected_dimensions=selected_dimensions,
+        selected_filters=selected_filters,
+        selected_having=selected_having,
+        join_paths=join_paths,
+    )
     sorting = dict(
         ((intent or {}).get("requested_sort") or plan.get("sorting") or {})
         if isinstance(intent, dict)
@@ -3027,6 +3202,7 @@ def _normalize_planner_output(
         normalized_complex_sql_plan["query_shape"] = query_shape
         normalized_complex_sql_plan["required_joins"] = required_joins
         normalized_complex_sql_plan["having"] = list(selected_having)
+        normalized_complex_sql_plan["clause_plan"] = dict(clause_plan)
         normalized_complex_sql_plan["route_recommendation"] = route_recommendation
 
     debug_trace = [
@@ -3037,6 +3213,7 @@ def _normalize_planner_output(
         {"stage": "join_count", "value": len(join_paths)},
         {"stage": "route_recommendation", "value": route_recommendation},
         {"stage": "route_reason", "value": route_reason},
+        {"stage": "clause_shape", "value": clause_plan["clause_shape"]},
     ]
     if missing_evidence:
         debug_trace.append({"stage": "missing_evidence", "value": list(missing_evidence)})
@@ -3057,6 +3234,7 @@ def _normalize_planner_output(
         "selected_dimensions": selected_dimensions,
         "selected_filters": selected_filters,
         "selected_having": selected_having,
+        "clause_plan": clause_plan,
         "selected_relationship_path": selected_relationship_path,
         "aggregate_function": aggregate_function,
         "sorting": sorting,

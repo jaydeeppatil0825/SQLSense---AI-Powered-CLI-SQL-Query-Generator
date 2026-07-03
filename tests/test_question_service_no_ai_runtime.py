@@ -405,7 +405,6 @@ def test_pipeline_blocked_unsafe_route_blocks_sql_generation(monkeypatch):
     [
         "ranking_query",
         "joined_lookup",
-        "multi_metric_aggregate",
     ],
 )
 def test_clean_planner_known_unimplemented_shapes_return_capability_message(monkeypatch, query_shape):
@@ -432,6 +431,22 @@ def test_clean_planner_known_unimplemented_shapes_return_capability_message(monk
         "This query was understood, but deterministic SQL generation for this query shape "
         f"is not implemented yet: {query_shape}."
     )
+
+
+def test_stale_multi_metric_route_is_forced_to_cannot_plan_safely():
+    service = QuestionService()
+    pipeline_context = _planner_pipeline_context("show amount and tax from bills", "multi_metric_aggregate")
+
+    success, message, sql, error = service.process_question(
+        "show amount and tax from bills",
+        PIPELINE_BILLS_KB,
+        pipeline_context=pipeline_context,
+    )
+
+    assert success is False
+    assert sql is None
+    assert "could not be planned safely" in message.lower()
+    assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
 
 
 def test_filtered_query_dispatches_deterministic_generator_and_validates():

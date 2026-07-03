@@ -42,6 +42,7 @@ class QueryPipelineResult:
     evidence_sources: list[str]
     query_context: Dict[str, Any]
     query_shape: str
+    clause_plan: Dict[str, Any]
     route_reason: str
     can_plan: bool
 
@@ -59,6 +60,7 @@ class QueryPipelineResult:
             "query_context": dict(self.query_context or {}),
             "plan": dict(self.plan or {}),
             "route_recommendation": self.route_recommendation,
+            "clause_plan": dict(self.clause_plan or {}),
             "complex_sql_plan": dict(self.complex_sql_plan or {}),
             "formula_evidence": list(self.formula_evidence or []),
             "evidence_sources": list(self.evidence_sources or []),
@@ -135,6 +137,7 @@ class QueryPipeline:
             evidence_sources=evidence_sources,
             query_context=query_context,
             query_shape=query_shape,
+            clause_plan=dict(query_context.get("clause_plan") or {}),
             route_reason=route_reason,
             can_plan=can_plan,
         )
@@ -163,6 +166,27 @@ class QueryPipeline:
                 "normalized_question": question,
                 "intent": dict(intent or {}),
                 "query_shape": "unknown",
+                "clause_plan": {
+                    "clause_shape": "unsupported",
+                    "requires": {
+                        "aggregate": False,
+                        "metric": False,
+                        "dimension": False,
+                        "where": False,
+                        "having": False,
+                    },
+                    "decision_path": [
+                        {"node": "unsafe_check", "status": "resolved", "reason": "request reached planner context construction"},
+                        {"node": "table_scope", "status": "blocked", "reason": "planner context construction failed"},
+                        {"node": "query_shape", "status": "blocked", "reason": "query shape could not be resolved"},
+                        {"node": "aggregate", "status": "not_required", "reason": "query shape was unresolved"},
+                        {"node": "metric", "status": "not_required", "reason": "query shape was unresolved"},
+                        {"node": "dimension", "status": "not_required", "reason": "query shape was unresolved"},
+                        {"node": "where", "status": "not_required", "reason": "query shape was unresolved"},
+                        {"node": "having", "status": "not_required", "reason": "query shape was unresolved"},
+                        {"node": "route", "status": "blocked", "reason": "planner context construction failed"},
+                    ],
+                },
                 "route_recommendation": "cannot_plan_safely",
                 "route_reason": "query pipeline could not build planner context",
                 "selected_table_names": [],
