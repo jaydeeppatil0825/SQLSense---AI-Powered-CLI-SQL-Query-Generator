@@ -470,20 +470,12 @@ def build_deterministic_sql_plan(
         )
         return _apply_clause_plan_contract(plan, query_context)
 
-    if capability.query_shape == "single_table_aggregate":
-        plan = _build_single_table_aggregate_plan(
-            query_context=query_context,
-            knowledge_base=knowledge_base,
-            capability=capability,
-        )
-    elif capability.query_shape == "filtered_query":
-        plan = _build_filtered_single_table_plan(
-            query_context=query_context,
-            knowledge_base=knowledge_base,
-            capability=capability,
-        )
-    elif capability.query_shape == "grouped_aggregate":
-        plan = _build_grouped_aggregate_plan(
+    if capability.query_shape in {
+        "single_table_aggregate",
+        "filtered_query",
+        "grouped_aggregate",
+    }:
+        plan = _build_single_table_clause_plan(
             query_context=query_context,
             knowledge_base=knowledge_base,
             capability=capability,
@@ -560,95 +552,308 @@ def generate_single_table_aggregate_sql(
     )
 
 
-def _build_single_table_aggregate_plan(
+def _single_table_clause_shape(
+    context: dict[str, Any],
+    capability: DeterministicCapabilityResult,
+    aggregate_function: str | None,
+) -> str:
+    intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
+    has_where = bool(
+        intent.get("structured_filters")
+        or intent.get("requested_filters")
+        or context.get("selected_filters")
+    )
+    has_having = bool(
+        intent.get("structured_having")
+        or intent.get("requested_having")
+        or context.get("selected_having")
+    )
+    if capability.query_shape == "single_table_aggregate":
+        return "aggregate_only"
+    if capability.query_shape == "filtered_query":
+        return "aggregate_where" if aggregate_function else "where_only"
+    if capability.query_shape == "grouped_aggregate":
+        if has_where and has_having:
+            return "where_group_by_having"
+        if has_where:
+            return "where_group_by"
+        if has_having:
+            return "group_by_having"
+        return "group_by"
+    return "unsupported"
+
+
+def _cannot_plan_single_table(
+    capability: DeterministicCapabilityResult,
+    *,
+    table_name: str | None,
+    reason: str,
+    aggregation_type: str | None = None,
+    metric_columns: list[str] | None = None,
+    dimension_columns: list[str] | None = None,
+    filter_columns: list[str] | None = None,
+    having_columns: list[str] | None = None,
+) -> DeterministicSqlPlan:
+    return DeterministicSqlPlan(
+        query_shape=capability.query_shape,
+        status="cannot_plan_safely",
+        supported_now=True,
+        base_table=table_name,
+        aggregation_type=aggregation_type,
+        metric_columns=list(metric_columns or []),
+        dimension_columns=list(dimension_columns or []),
+        filter_columns=list(filter_columns or []),
+        having_columns=list(having_columns or []),
+        required_evidence=list(capability.required_evidence),
+        missing_evidence=[reason],
+        route_reason=reason,
+    )
+
+
+def _build_single_table_clause_plan(
     *,
     query_context: dict[str, Any],
     knowledge_base: dict[str, Any],
     capability: DeterministicCapabilityResult,
 ) -> DeterministicSqlPlan:
+    """Resolve one single-table clause tree before choosing SQL expressions."""
     context = query_context if isinstance(query_context, dict) else {}
-    plan = context.get("plan") if isinstance(context.get("plan"), dict) else {}
-    selected_tables = [entry for entry in (context.get("selected_tables") or []) if isinstance(entry, dict)]
+    planner_plan = context.get("plan") if isinstance(context.get("plan"), dict) else {}
+    selected_tables = [
+        entry for entry in (context.get("selected_tables") or [])
+        if isinstance(entry, dict)
+    ]
+    if len(selected_tables) != 1 or context.get("join_paths"):
+        return _cannot_plan_single_table(
+            capability,
+            table_name=None,
+            reason="single_table_scope_required",
+        )
+
     table_name = str(selected_tables[0].get("table") or "").strip()
-    if not table_name:
-        return DeterministicSqlPlan(
-            query_shape="single_table_aggregate",
-            status="cannot_plan_safely",
-            supported_now=True,
-            required_evidence=list(capability.required_evidence),
-            missing_evidence=["selected_table_missing"],
-            route_reason="selected table is missing",
-            formula_evidence=list(context.get("formula_evidence") or []),
-        )
-
-    scoped_kb = context.get("selected_knowledge_base") if isinstance(context.get("selected_knowledge_base"), dict) else {}
-    # The retrieval projection may omit physical SQL types. Prefer the full KB
-    # schema for deterministic type validation, while retaining scoped fallback.
-    table_data = (knowledge_base or {}).get(table_name) or scoped_kb.get(table_name)
-    if not isinstance(table_data, dict):
-        return DeterministicSqlPlan(
-            query_shape="single_table_aggregate",
-            status="cannot_plan_safely",
-            supported_now=True,
-            base_table=table_name,
-            required_evidence=list(capability.required_evidence),
-            missing_evidence=["table_schema_missing"],
-            route_reason=f"schema metadata for table '{table_name}' is missing",
-            formula_evidence=list(context.get("formula_evidence") or []),
-        )
-
-    aggregate_function = _planner_aggregate_function(context, plan)
-    if aggregate_function is None or aggregate_function == "count":
-        return DeterministicSqlPlan(
-            query_shape="single_table_aggregate",
-            status="not_applicable",
-            supported_now=False,
-            base_table=table_name,
-            required_evidence=list(capability.required_evidence),
-            missing_evidence=["aggregate_function_missing"],
-            route_reason="aggregate intent is not supported in phase 1A",
-            formula_evidence=list(context.get("formula_evidence") or []),
-        )
-
-    metric_column, metric_reason = _resolve_metric_column(
-        query_context=context,
-        table_name=table_name,
-        table_data=table_data,
+    scoped_kb = (
+        context.get("selected_knowledge_base")
+        if isinstance(context.get("selected_knowledge_base"), dict)
+        else {}
     )
-    if metric_column is None:
-        return DeterministicSqlPlan(
-            query_shape="single_table_aggregate",
-            status="cannot_plan_safely",
-            supported_now=True,
-            base_table=table_name,
-            aggregation_type=aggregate_function,
-            required_evidence=list(capability.required_evidence),
-            missing_evidence=[metric_reason],
-            route_reason=metric_reason,
-            formula_evidence=list(context.get("formula_evidence") or []),
+    table_data = (knowledge_base or {}).get(table_name) or scoped_kb.get(table_name)
+    if not table_name or not _SAFE_IDENTIFIER_RE.fullmatch(table_name) or not isinstance(table_data, dict):
+        return _cannot_plan_single_table(
+            capability,
+            table_name=table_name or None,
+            reason="table_schema_missing",
         )
 
-    aggregate_alias = _aggregate_alias(aggregate_function, metric_column)
-    return DeterministicSqlPlan(
-        query_shape="single_table_aggregate",
-        status="ready",
-        supported_now=True,
-        base_table=table_name,
-        select_items=[
+    schema_columns = {
+        str(column.get("name") or "").strip(): column
+        for column in (table_data.get("columns") or [])
+        if isinstance(column, dict)
+        and _SAFE_IDENTIFIER_RE.fullmatch(str(column.get("name") or "").strip())
+    }
+    if not schema_columns:
+        return _cannot_plan_single_table(
+            capability,
+            table_name=table_name,
+            reason="select_columns_missing",
+        )
+
+    aggregate_function = _planner_aggregate_function(context, planner_plan)
+    clause_shape = _single_table_clause_shape(context, capability, aggregate_function)
+    requires_grouping = clause_shape in {
+        "group_by",
+        "where_group_by",
+        "group_by_having",
+        "where_group_by_having",
+    }
+    requires_where = clause_shape in {
+        "where_only",
+        "aggregate_where",
+        "where_group_by",
+        "where_group_by_having",
+    }
+    requires_having = clause_shape in {"group_by_having", "where_group_by_having"}
+    requires_aggregate = clause_shape not in {"where_only", "unsupported"}
+
+    if clause_shape == "unsupported":
+        return _cannot_plan_single_table(
+            capability,
+            table_name=table_name,
+            reason="clause_shape_not_supported",
+        )
+    if requires_aggregate and aggregate_function not in {"count", "sum", "avg", "min", "max"}:
+        return _cannot_plan_single_table(
+            capability,
+            table_name=table_name,
+            reason="aggregate_function_missing",
+        )
+    if capability.query_shape == "single_table_aggregate" and aggregate_function == "count":
+        return _cannot_plan_single_table(
+            capability,
+            table_name=table_name,
+            reason="count_is_handled_elsewhere",
+            aggregation_type=aggregate_function,
+        )
+
+    metric_column = ""
+    aggregate_expression = ""
+    aggregate_alias = ""
+    if requires_aggregate:
+        if aggregate_function == "count":
+            aggregate_expression = "COUNT(*)"
+            aggregate_alias = "count_rows"
+        else:
+            resolved_metric, metric_reason = _resolve_metric_column(
+                query_context=context,
+                table_name=table_name,
+                table_data=table_data,
+            )
+            if resolved_metric is None:
+                return _cannot_plan_single_table(
+                    capability,
+                    table_name=table_name,
+                    reason=metric_reason,
+                    aggregation_type=aggregate_function,
+                )
+            metric_column = resolved_metric
+            aggregate_expression = f"{aggregate_function.upper()}({metric_column})"
+            aggregate_alias = _aggregate_alias(aggregate_function, metric_column)
+
+    dimension_column = ""
+    if requires_grouping:
+        dimension_candidates = [
+            entry for entry in (context.get("selected_dimensions") or [])
+            if isinstance(entry, dict)
+        ]
+        if len(dimension_candidates) != 1:
+            return _cannot_plan_single_table(
+                capability,
+                table_name=table_name,
+                reason="dimension_not_found" if not dimension_candidates else "dimension_ambiguous",
+                aggregation_type=aggregate_function,
+                metric_columns=[metric_column] if metric_column else [],
+            )
+        dimension_entry = dimension_candidates[0]
+        dimension_table = str(dimension_entry.get("table") or "").strip()
+        dimension_column = str(
+            dimension_entry.get("column") or dimension_entry.get("column_name") or ""
+        ).strip()
+        if (
+            dimension_table != table_name
+            or not _SAFE_IDENTIFIER_RE.fullmatch(dimension_column)
+            or dimension_column not in schema_columns
+        ):
+            return _cannot_plan_single_table(
+                capability,
+                table_name=table_name,
+                reason="dimension_not_in_schema",
+                aggregation_type=aggregate_function,
+                metric_columns=[metric_column] if metric_column else [],
+            )
+
+    where_clauses: list[str] = []
+    where_conjunctions: list[str] = []
+    filter_columns: list[str] = []
+    if requires_where:
+        where_clauses, where_conjunctions, filter_columns, filter_reason = _resolve_filter_clauses(
+            query_context=context,
+            table_name=table_name,
+            table_data=table_data,
+        )
+        if filter_reason:
+            return _cannot_plan_single_table(
+                capability,
+                table_name=table_name,
+                reason=filter_reason,
+                aggregation_type=aggregate_function,
+                metric_columns=[metric_column] if metric_column else [],
+                dimension_columns=[dimension_column] if dimension_column else [],
+            )
+
+    having_clauses: list[str] = []
+    having_columns: list[str] = []
+    if requires_having:
+        having_clauses, having_columns, having_reason = _resolve_having_clauses(
+            query_context=context,
+            table_name=table_name,
+            aggregate_function=aggregate_function or "",
+            aggregate_expression=aggregate_expression,
+            metric_column=metric_column,
+        )
+        if having_reason:
+            return _cannot_plan_single_table(
+                capability,
+                table_name=table_name,
+                reason=having_reason,
+                aggregation_type=aggregate_function,
+                metric_columns=[metric_column] if metric_column else [],
+                dimension_columns=[dimension_column] if dimension_column else [],
+                filter_columns=filter_columns,
+            )
+
+    if requires_grouping:
+        select_items = [
+            {"expression": dimension_column, "source_column": dimension_column, "kind": "dimension"},
             {
-                "expression": f"{aggregate_function.upper()}({metric_column})",
+                "expression": aggregate_expression,
+                "alias": aggregate_alias,
+                "source_column": metric_column,
+                "kind": "aggregate",
+            },
+        ]
+        sql_skeleton_type = "grouped_aggregate"
+        limit = None
+    elif requires_aggregate:
+        select_items = [
+            {
+                "expression": aggregate_expression,
                 "alias": aggregate_alias,
                 "source_column": metric_column,
                 "kind": "aggregate",
             }
-        ],
+        ]
+        sql_skeleton_type = (
+            "filtered_single_table_aggregate"
+            if requires_where
+            else "single_table_aggregate"
+        )
+        limit = None
+    else:
+        select_items = [
+            {"expression": column_name, "source_column": column_name, "kind": "column"}
+            for column_name in schema_columns
+        ]
+        sql_skeleton_type = "filtered_single_table_list"
+        requested_limit = context.get("limit", planner_plan.get("limit"))
+        limit = requested_limit if isinstance(requested_limit, int) and requested_limit > 0 else 50
+
+    return DeterministicSqlPlan(
+        query_shape=capability.query_shape,
+        status="ready",
+        supported_now=True,
+        base_table=table_name,
+        select_items=select_items,
+        where_clauses=where_clauses,
+        where_conjunctions=where_conjunctions,
+        having_clauses=having_clauses,
+        group_by=[dimension_column] if dimension_column else [],
         aggregation_type=aggregate_function,
-        metric_columns=[metric_column],
+        limit=limit,
+        metric_columns=[metric_column] if metric_column else [],
+        dimension_columns=[dimension_column] if dimension_column else [],
+        filter_columns=filter_columns,
+        having_columns=having_columns,
         required_evidence=list(capability.required_evidence),
-        evidence_sources=["query_context.selected_tables", "query_context.selected_columns", "knowledge_base.columns"],
-        sql_skeleton_type="single_table_aggregate",
+        evidence_sources=[
+            "query_context.selected_tables",
+            "query_context.selected_metric",
+            "query_context.selected_dimensions",
+            "query_context.selected_filters",
+            "query_context.selected_having",
+            "knowledge_base.columns",
+        ],
+        sql_skeleton_type=sql_skeleton_type,
         can_render=True,
-        route_reason="single-table aggregate generated deterministically",
+        route_reason=f"single-table {clause_shape} SQL generated deterministically",
         formula_evidence=list(context.get("formula_evidence") or []),
     )
 
@@ -657,326 +862,62 @@ def _render_single_table_aggregate(plan: DeterministicSqlPlan) -> str:
     return _render_plan_in_canonical_order(plan)
 
 
-def _build_grouped_aggregate_plan(
+def _resolve_having_clauses(
     *,
     query_context: dict[str, Any],
-    knowledge_base: dict[str, Any],
-    capability: DeterministicCapabilityResult,
-) -> DeterministicSqlPlan:
-    context = query_context if isinstance(query_context, dict) else {}
-    plan = context.get("plan") if isinstance(context.get("plan"), dict) else {}
-    intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
-    selected_tables = [entry for entry in (context.get("selected_tables") or []) if isinstance(entry, dict)]
-    table_name = str(selected_tables[0].get("table") or "").strip() if len(selected_tables) == 1 else ""
-    scoped_kb = context.get("selected_knowledge_base") if isinstance(context.get("selected_knowledge_base"), dict) else {}
-    table_data = (knowledge_base or {}).get(table_name) or scoped_kb.get(table_name)
-    if not table_name or not _SAFE_IDENTIFIER_RE.fullmatch(table_name) or not isinstance(table_data, dict):
-        return _cannot_plan_grouped(capability, table_name=table_name or None, reason="table_schema_missing")
-
-    schema_columns = {
-        str(column.get("name") or "").strip(): column
-        for column in (table_data.get("columns") or [])
-        if isinstance(column, dict) and str(column.get("name") or "").strip()
-    }
-    dimension_candidates = [
-        entry for entry in (context.get("selected_dimensions") or [])
-        if isinstance(entry, dict)
-        and str(entry.get("table") or "").strip() == table_name
-        and _SAFE_IDENTIFIER_RE.fullmatch(str(entry.get("column") or entry.get("column_name") or "").strip())
-    ]
-    if not dimension_candidates:
-        return _cannot_plan_grouped(capability, table_name=table_name, reason="dimension_not_found")
-    dimension_column = str(
-        dimension_candidates[0].get("column") or dimension_candidates[0].get("column_name") or ""
-    ).strip()
-    if dimension_column not in schema_columns:
-        return _cannot_plan_grouped(capability, table_name=table_name, reason="dimension_not_in_schema")
-
-    aggregate_function = _planner_aggregate_function(context, plan)
-    if aggregate_function not in {"sum", "avg", "min", "max", "count"}:
-        return _cannot_plan_grouped(capability, table_name=table_name, reason="aggregate_function_missing")
-
-    metric_column = ""
-    if aggregate_function == "count":
-        aggregate_expression = "COUNT(*)"
-        aggregate_alias = "count_rows"
-    else:
-        resolved_metric, metric_reason = _resolve_metric_column(
-            query_context=context,
-            table_name=table_name,
-            table_data=table_data,
-        )
-        if resolved_metric is None:
-            return _cannot_plan_grouped(
-                capability,
-                table_name=table_name,
-                reason=metric_reason,
-                dimension_columns=[dimension_column],
-            )
-        metric_column = resolved_metric
-        aggregate_expression = f"{aggregate_function.upper()}({metric_column})"
-        aggregate_alias = _aggregate_alias(aggregate_function, metric_column)
-
-    where_clauses: list[str] = []
-    where_conjunctions: list[str] = []
-    filter_columns: list[str] = []
-    requested_filters = list(intent.get("structured_filters") or intent.get("requested_filters") or [])
-    if requested_filters or context.get("selected_filters"):
-        where_clauses, where_conjunctions, filter_columns, filter_reason = _resolve_filter_clauses(
-            query_context=context,
-            table_name=table_name,
-            table_data=table_data,
-        )
-        if filter_reason:
-            return _cannot_plan_grouped(
-                capability,
-                table_name=table_name,
-                reason=filter_reason,
-                dimension_columns=[dimension_column],
-                metric_columns=[metric_column] if metric_column else [],
-            )
-
-    having_clauses: list[str] = []
-    having_columns: list[str] = []
+    table_name: str,
+    aggregate_function: str,
+    aggregate_expression: str,
+    metric_column: str,
+) -> tuple[list[str], list[str], str]:
+    intent = (
+        query_context.get("intent")
+        if isinstance(query_context.get("intent"), dict)
+        else {}
+    )
     structured_having = [
         entry for entry in (intent.get("structured_having") or [])
         if isinstance(entry, dict)
     ]
     selected_having = [
-        entry for entry in (context.get("selected_having") or [])
+        entry for entry in (query_context.get("selected_having") or [])
         if isinstance(entry, dict)
     ]
+    if len(selected_having) != 1:
+        return [], [], "having_evidence_incomplete"
     if structured_having and len(selected_having) != len(structured_having):
-        return _cannot_plan_grouped(
-            capability,
-            table_name=table_name,
-            reason="having_evidence_incomplete",
-            dimension_columns=[dimension_column],
-            metric_columns=[metric_column] if metric_column else [],
-        )
-    for condition in selected_having:
-        having_function = str(condition.get("aggregate_function") or "").strip().lower()
-        operator = str(condition.get("operator") or "").strip().lower()
-        if having_function != aggregate_function:
-            return _cannot_plan_grouped(
-                capability,
-                table_name=table_name,
-                reason="having_aggregate_mismatch",
-                dimension_columns=[dimension_column],
-                metric_columns=[metric_column] if metric_column else [],
-            )
-        sql_operator = _FILTER_OPERATORS.get(operator)
-        if operator not in {"eq", "neq", "gt", "lt", "gte", "lte"} or not sql_operator:
-            return _cannot_plan_grouped(
-                capability,
-                table_name=table_name,
-                reason="having_operator_not_supported",
-                dimension_columns=[dimension_column],
-                metric_columns=[metric_column] if metric_column else [],
-            )
-        if aggregate_function != "count":
-            having_table = str(condition.get("table") or "").strip()
-            having_column = str(condition.get("column") or "").strip()
-            if having_table != table_name or having_column != metric_column:
-                return _cannot_plan_grouped(
-                    capability,
-                    table_name=table_name,
-                    reason="having_metric_not_selected",
-                    dimension_columns=[dimension_column],
-                    metric_columns=[metric_column],
-                )
-            having_columns.append(metric_column)
-        literal, literal_reason = _filter_literal(
-            condition.get("value", condition.get("value_phrase")),
-            {"type": "DECIMAL(38,10)", "semantic_type": "numeric_candidate"},
-            operator,
-        )
-        if literal_reason:
-            return _cannot_plan_grouped(
-                capability,
-                table_name=table_name,
-                reason="having_value_type_mismatch",
-                dimension_columns=[dimension_column],
-                metric_columns=[metric_column] if metric_column else [],
-            )
-        having_clauses.append(f"{aggregate_expression} {sql_operator} {literal}")
+        return [], [], "having_evidence_incomplete"
 
-    return DeterministicSqlPlan(
-        query_shape="grouped_aggregate",
-        status="ready",
-        supported_now=True,
-        base_table=table_name,
-        select_items=[
-            {"expression": dimension_column, "source_column": dimension_column, "kind": "dimension"},
-            {
-                "expression": aggregate_expression,
-                "alias": aggregate_alias,
-                "source_column": metric_column,
-                "kind": "aggregate",
-            },
-        ],
-        where_clauses=where_clauses,
-        where_conjunctions=where_conjunctions,
-        having_clauses=having_clauses,
-        group_by=[dimension_column],
-        aggregation_type=aggregate_function,
-        metric_columns=[metric_column] if metric_column else [],
-        dimension_columns=[dimension_column],
-        filter_columns=filter_columns,
-        having_columns=having_columns,
-        required_evidence=list(capability.required_evidence),
-        evidence_sources=[
-            "query_context.selected_tables",
-            "query_context.selected_dimensions",
-            "query_context.selected_metric",
-            "query_context.selected_having",
-            "knowledge_base.columns",
-        ],
-        sql_skeleton_type="grouped_aggregate",
-        can_render=True,
-        route_reason="single-table grouped aggregate generated deterministically",
-    )
+    condition = selected_having[0]
+    having_function = str(condition.get("aggregate_function") or "").strip().lower()
+    operator = str(condition.get("operator") or "").strip().lower()
+    if having_function != aggregate_function:
+        return [], [], "having_aggregate_mismatch"
+    sql_operator = _FILTER_OPERATORS.get(operator)
+    if operator not in {"eq", "neq", "gt", "lt", "gte", "lte"} or not sql_operator:
+        return [], [], "having_operator_not_supported"
 
-
-def _cannot_plan_grouped(
-    capability: DeterministicCapabilityResult,
-    *,
-    table_name: str | None,
-    reason: str,
-    dimension_columns: list[str] | None = None,
-    metric_columns: list[str] | None = None,
-) -> DeterministicSqlPlan:
-    return DeterministicSqlPlan(
-        query_shape="grouped_aggregate",
-        status="cannot_plan_safely",
-        supported_now=True,
-        base_table=table_name,
-        dimension_columns=list(dimension_columns or []),
-        metric_columns=list(metric_columns or []),
-        required_evidence=list(capability.required_evidence),
-        missing_evidence=[reason],
-        route_reason=reason,
-    )
-
-
-def _build_filtered_single_table_plan(
-    *,
-    query_context: dict[str, Any],
-    knowledge_base: dict[str, Any],
-    capability: DeterministicCapabilityResult,
-) -> DeterministicSqlPlan:
-    context = query_context if isinstance(query_context, dict) else {}
-    plan = context.get("plan") if isinstance(context.get("plan"), dict) else {}
-    selected_tables = [entry for entry in (context.get("selected_tables") or []) if isinstance(entry, dict)]
-    table_name = str(selected_tables[0].get("table") or "").strip()
-    scoped_kb = context.get("selected_knowledge_base") if isinstance(context.get("selected_knowledge_base"), dict) else {}
-    table_data = (knowledge_base or {}).get(table_name) or scoped_kb.get(table_name)
-    if not table_name or not _SAFE_IDENTIFIER_RE.fullmatch(table_name) or not isinstance(table_data, dict):
-        return _cannot_plan_filtered(
-            capability,
-            table_name=table_name or None,
-            reason="table_schema_missing",
-        )
-
-    where_clauses, where_conjunctions, filter_columns, filter_reason = _resolve_filter_clauses(
-        query_context=context,
-        table_name=table_name,
-        table_data=table_data,
-    )
-    if filter_reason:
-        return _cannot_plan_filtered(
-            capability,
-            table_name=table_name,
-            reason=filter_reason,
-        )
-
-    aggregate_function = _planner_aggregate_function(context, plan)
-    if aggregate_function:
-        metric_column, metric_reason = _resolve_metric_column(
-            query_context=context,
-            table_name=table_name,
-            table_data=table_data,
-        )
-        if metric_column is None:
-            return _cannot_plan_filtered(
-                capability,
-                table_name=table_name,
-                reason=metric_reason,
-                filter_columns=filter_columns,
-            )
-        aggregate_alias = _aggregate_alias(aggregate_function, metric_column)
-        select_items = [
-            {
-                "expression": f"{aggregate_function.upper()}({metric_column})",
-                "alias": aggregate_alias,
-                "source_column": metric_column,
-                "kind": "aggregate",
-            }
-        ]
-        metric_columns = [metric_column]
-        sql_skeleton_type = "filtered_single_table_aggregate"
-        limit = None
+    having_table = str(condition.get("table") or "").strip()
+    having_column = str(condition.get("column") or "").strip()
+    if having_table and having_table != table_name:
+        return [], [], "having_metric_not_selected"
+    having_columns: list[str] = []
+    if aggregate_function == "count":
+        if having_column:
+            return [], [], "having_metric_not_selected"
+    elif having_column != metric_column:
+        return [], [], "having_metric_not_selected"
     else:
-        column_names = [
-            str(column.get("name") or "").strip()
-            for column in (table_data.get("columns") or [])
-            if isinstance(column, dict)
-            and _SAFE_IDENTIFIER_RE.fullmatch(str(column.get("name") or "").strip())
-        ]
-        if not column_names:
-            return _cannot_plan_filtered(
-                capability,
-                table_name=table_name,
-                reason="select_columns_missing",
-                filter_columns=filter_columns,
-            )
-        select_items = [
-            {"expression": column_name, "source_column": column_name, "kind": "column"}
-            for column_name in column_names
-        ]
-        metric_columns = []
-        sql_skeleton_type = "filtered_single_table_list"
-        requested_limit = context.get("limit", plan.get("limit"))
-        limit = int(requested_limit) if isinstance(requested_limit, int) and requested_limit > 0 else 50
+        having_columns.append(metric_column)
 
-    return DeterministicSqlPlan(
-        query_shape="filtered_query",
-        status="ready",
-        supported_now=True,
-        base_table=table_name,
-        select_items=select_items,
-        where_clauses=where_clauses,
-        where_conjunctions=where_conjunctions,
-        limit=limit,
-        aggregation_type=aggregate_function,
-        metric_columns=metric_columns,
-        filter_columns=filter_columns,
-        required_evidence=list(capability.required_evidence),
-        evidence_sources=["query_context.selected_tables", "query_context.selected_filters", "knowledge_base.columns"],
-        sql_skeleton_type=sql_skeleton_type,
-        can_render=True,
-        route_reason="single-table filtered SQL generated deterministically",
-        formula_evidence=list(context.get("formula_evidence") or []),
+    literal, literal_reason = _filter_literal(
+        condition.get("value", condition.get("value_phrase")),
+        {"type": "DECIMAL(38,10)", "semantic_type": "numeric_candidate"},
+        operator,
     )
-
-
-def _cannot_plan_filtered(
-    capability: DeterministicCapabilityResult,
-    *,
-    table_name: str | None,
-    reason: str,
-    filter_columns: list[str] | None = None,
-) -> DeterministicSqlPlan:
-    return DeterministicSqlPlan(
-        query_shape="filtered_query",
-        status="cannot_plan_safely",
-        supported_now=True,
-        base_table=table_name,
-        filter_columns=list(filter_columns or []),
-        required_evidence=list(capability.required_evidence),
-        missing_evidence=[reason],
-        route_reason=reason,
-    )
+    if literal_reason:
+        return [], [], "having_value_type_mismatch"
+    return [f"{aggregate_expression} {sql_operator} {literal}"], having_columns, ""
 
 
 def _resolve_filter_clauses(
