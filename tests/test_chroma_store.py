@@ -102,7 +102,12 @@ def test_chroma_client_disables_anonymized_telemetry_and_still_builds(monkeypatc
 
     built, _, details = store.build_or_refresh_chroma_index(documents, _source_context())
 
-    assert captured["settings_kwargs"] == {"anonymized_telemetry": False}
+    telemetry_impl = "kb_pipeline.vector.chroma_telemetry.NoOpProductTelemetry"
+    assert captured["settings_kwargs"] == {
+        "anonymized_telemetry": False,
+        "chroma_product_telemetry_impl": telemetry_impl,
+        "chroma_telemetry_impl": telemetry_impl,
+    }
     assert captured["client_settings"] is not None
     assert os.environ["ANONYMIZED_TELEMETRY"] == "False"
     assert os.environ["CHROMA_ANONYMIZED_TELEMETRY"] == "False"

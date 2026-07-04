@@ -439,7 +439,7 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         if primary_phrase:
             if intent_type in {"list", "count", "sorted_list"}:
                 requested_dimensions = [primary_phrase]
-            elif not requested_metrics and primary_phrase:
+            elif intent_type != "filter" and not requested_metrics and primary_phrase:
                 requested_metrics = [primary_phrase]
 
     output_aggregate_function = _aggregate_function_before_having(body)

@@ -100,7 +100,12 @@ class ChromaStore:
                 config_module = importlib.import_module("chromadb.config")
                 settings_type = getattr(config_module, "Settings", None)
                 if settings_type is not None:
-                    client_kwargs["settings"] = settings_type(anonymized_telemetry=False)
+                    telemetry_impl = "kb_pipeline.vector.chroma_telemetry.NoOpProductTelemetry"
+                    client_kwargs["settings"] = settings_type(
+                        anonymized_telemetry=False,
+                        chroma_product_telemetry_impl=telemetry_impl,
+                        chroma_telemetry_impl=telemetry_impl,
+                    )
             except (ImportError, AttributeError, TypeError, ValueError) as exc:
                 logger.debug(f"Chroma telemetry settings are unavailable; using environment configuration: {exc}")
 

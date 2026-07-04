@@ -2,9 +2,9 @@
     "db_engine": "mysql",
     "db_host": "localhost",
     "db_port": "3306",
-    "db_name": "sqlsense_invoice_ops_lab",
+    "db_name": "sqlsense_clause_tree_lab",
     "database_type": "mysql",
-    "database_name": "sqlsense_invoice_ops_lab",
-    "schema_hash": "cfb6d309f77a8a29acbc7f6132d7bc3fd0aedc584f1bcbadac2168e3b19d86c1",
-    "schema_fingerprint": "cfb6d309f77a8a29acbc7f6132d7bc3fd0aedc584f1bcbadac2168e3b19d86c1"
+    "database_name": "sqlsense_clause_tree_lab",
+    "schema_hash": "02191252cf6e7f6136974caa5847a057292ee58187eabc4ba15d14cf26841869",
+    "schema_fingerprint": "02191252cf6e7f6136974caa5847a057292ee58187eabc4ba15d14cf26841869"
 }

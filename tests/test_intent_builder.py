@@ -172,6 +172,8 @@ def test_multi_filter_question_preserves_legacy_and_structured_filters():
     )
 
     assert intent["intent_type"] == "filter"
+    assert intent["target_entity_phrase"] == "bills"
+    assert intent["requested_metrics"] == []
     assert intent["requested_filters"] == ["status is pending", "amount greater than 5000"]
     assert intent["structured_filters"] == [
         {
@@ -231,6 +233,7 @@ def test_structured_filter_comparison_operators(phrase, operator, value):
 def test_structured_filter_advanced_operators(phrase, operator, value):
     intent = build_intent(f"show bills where {phrase}")
 
+    assert intent["requested_metrics"] == []
     assert intent["structured_filters"][0]["operator"] == operator
     assert intent["structured_filters"][0]["value"] == value
 
