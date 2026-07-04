@@ -5,6 +5,6 @@
     "db_name": "sqlsense_invoice_ops_lab",
     "database_type": "mysql",
     "database_name": "sqlsense_invoice_ops_lab",
-    "schema_hash": "7bc578152cfaa5f12f4a53fb77274983517f0f73a75b192cadd3582b12ebbac0",
-    "schema_fingerprint": "7bc578152cfaa5f12f4a53fb77274983517f0f73a75b192cadd3582b12ebbac0"
+    "schema_hash": "cfb6d309f77a8a29acbc7f6132d7bc3fd0aedc584f1bcbadac2168e3b19d86c1",
+    "schema_fingerprint": "cfb6d309f77a8a29acbc7f6132d7bc3fd0aedc584f1bcbadac2168e3b19d86c1"
 }

@@ -1686,7 +1686,7 @@ class QuestionService:
                 _set_route(query_context, "cannot_plan_safely", deterministic_aggregate.reason)
                 return False, _deterministic_aggregate_failure_message(query_context, deterministic_aggregate.reason), None, None
 
-        if query_shape in {"filtered_query", "grouped_aggregate"}:
+        if query_shape in {"filtered_query", "grouped_aggregate", "ranking_query"}:
             deterministic_result = generate_deterministic_sql(
                 query_context=query_context,
                 knowledge_base=knowledge_base,
@@ -1735,7 +1735,6 @@ class QuestionService:
             return False, _planning_block_message(query_context, "cannot_plan_safely"), None, None
 
         if query_shape in {
-            "ranking_query",
             "joined_lookup",
             "formula_query",
         }:

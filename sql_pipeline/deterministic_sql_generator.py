@@ -117,6 +117,85 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
     aggregate_function = _planner_aggregate_function(context, plan)
     contract_shape = str(context.get("query_shape") or "").strip()
 
+    if contract_shape == "ranking_query":
+        intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
+        if intent.get("unsupported_constructs"):
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="ranking_query",
+                supported_now=True,
+                blocked_by=["unsupported_intent"],
+                reason="ranking intent contains an unsupported deterministic construct",
+            )
+        if len(selected_tables) != 1 or context.get("join_paths"):
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="ranking_query",
+                supported_now=True,
+                blocked_by=["single_table_ranking_required"],
+                reason="ranking requires exactly one selected table and no joins",
+            )
+        if context.get("formula_evidence") or len(list(intent.get("requested_metrics") or [])) > 1:
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="ranking_query",
+                supported_now=True,
+                blocked_by=["unsupported_ranking_scope"],
+                reason="formula and multi-metric ranking are not supported",
+            )
+        if not isinstance(context.get("selected_order_by"), dict):
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="ranking_query",
+                supported_now=True,
+                blocked_by=["selected_order_by_missing"],
+                reason="planner-selected ORDER BY evidence is missing",
+            )
+        limit = context.get("limit")
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 1000
+        ):
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="ranking_query",
+                supported_now=True,
+                blocked_by=["limit_out_of_safe_range"],
+                reason="ranking LIMIT must be between 1 and 1000",
+            )
+        ranking_mode = str((intent.get("ranking_diagnostics") or {}).get("mode_hint") or "")
+        if ranking_mode == "grouped_aggregate":
+            if aggregate_function not in {"sum", "avg", "min", "max", "count"}:
+                return DeterministicCapabilityResult(
+                    status="cannot_plan_safely",
+                    query_shape="ranking_query",
+                    supported_now=True,
+                    blocked_by=["aggregate_function_missing"],
+                    reason="grouped ranking aggregate function is missing",
+                )
+            if len(list(context.get("selected_dimensions") or [])) != 1:
+                return DeterministicCapabilityResult(
+                    status="cannot_plan_safely",
+                    query_shape="ranking_query",
+                    supported_now=True,
+                    blocked_by=["selected_dimension_missing"],
+                    reason="grouped ranking requires one selected dimension",
+                )
+            if aggregate_function != "count" and not isinstance(context.get("selected_metric"), dict):
+                return DeterministicCapabilityResult(
+                    status="cannot_plan_safely",
+                    query_shape="ranking_query",
+                    supported_now=True,
+                    blocked_by=["selected_metric_missing"],
+                    reason="grouped ranking metric evidence is missing",
+                )
+        return DeterministicCapabilityResult(
+            status="supported",
+            query_shape="ranking_query",
+            supported_now=True,
+            required_evidence=["selected_table", "selected_order_by"],
+            reason="single-table ranking can be planned deterministically",
+        )
+
     if contract_shape == "grouped_aggregate":
         intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
         if intent.get("unsupported_constructs"):
@@ -375,6 +454,8 @@ def _actual_clause_shape(plan: DeterministicSqlPlan) -> str:
         return "aggregate_where" if has_aggregate else "where_only"
     if has_aggregate:
         return "aggregate_only"
+    if plan.select_items:
+        return "list_only"
     return "unsupported"
 
 
@@ -387,8 +468,10 @@ def _decision_path_from_plan(plan: DeterministicSqlPlan, clause_shape: str) -> l
     }
     requires_where = clause_shape in {"where_only", "aggregate_where", "where_group_by", "where_group_by_having"}
     requires_having = clause_shape in {"group_by_having", "where_group_by_having"}
-    requires_aggregate = clause_shape not in {"where_only", "unsupported"}
+    requires_aggregate = clause_shape not in {"list_only", "where_only", "unsupported"}
     requires_metric = requires_aggregate and plan.aggregation_type != "count"
+    requires_order_by = bool(plan.order_by)
+    requires_limit = plan.limit is not None
 
     def node(name: str, status: str, reason: str) -> dict[str, str]:
         return {"node": name, "status": status, "reason": reason}
@@ -403,6 +486,9 @@ def _decision_path_from_plan(plan: DeterministicSqlPlan, clause_shape: str) -> l
         node("dimension", "resolved" if requires_grouping and plan.dimension_columns else "blocked" if requires_grouping else "not_required", "dimension resolved" if requires_grouping and plan.dimension_columns else "dimension not required" if not requires_grouping else "dimension missing"),
         node("where", "resolved" if requires_where and plan.where_clauses else "blocked" if requires_where else "not_required", "WHERE resolved" if requires_where and plan.where_clauses else "WHERE not required" if not requires_where else "WHERE evidence missing"),
         node("having", "resolved" if requires_having and plan.having_clauses else "blocked" if requires_having else "not_required", "HAVING resolved" if requires_having and plan.having_clauses else "HAVING not required" if not requires_having else "HAVING evidence missing"),
+        node("order_by", "resolved" if requires_order_by else "not_required", "ORDER BY resolved" if requires_order_by else "ORDER BY not required"),
+        node("limit", "resolved" if requires_limit else "not_required", "LIMIT resolved" if requires_limit else "LIMIT not required"),
+        node("clause_shape", "resolved" if clause_shape != "unsupported" else "blocked", f"resolved clause shape '{clause_shape}'"),
         node("route", "resolved" if ready else "blocked", "deterministic SQL generation is allowed" if ready else plan.route_reason or "plan is not renderable"),
     ]
 
@@ -421,8 +507,31 @@ def _apply_clause_plan_contract(
         for entry in (clause_plan.get("decision_path") or [])
         if isinstance(entry, dict)
     ] or _decision_path_from_plan(plan, clause_shape)
+    declared_requires = clause_plan.get("requires") if isinstance(clause_plan.get("requires"), dict) else {}
+    declared_order_by = (
+        clause_plan.get("selected_order_by")
+        if isinstance(clause_plan.get("selected_order_by"), dict)
+        else {}
+    )
+    context_order_by = (
+        context.get("selected_order_by")
+        if isinstance(context.get("selected_order_by"), dict)
+        else {}
+    )
+    order_by_mismatch = bool(declared_requires) and (
+        bool(declared_requires.get("order_by")) != bool(plan.order_by)
+        or (bool(declared_requires.get("order_by")) and declared_order_by != context_order_by)
+    )
+    limit_mismatch = bool(declared_requires) and (
+        bool(declared_requires.get("limit")) != (plan.limit is not None)
+        or clause_plan.get("limit") != plan.limit
+    )
 
-    if plan.status == "ready" and declared_shape and declared_shape != actual_shape:
+    if plan.status == "ready" and (
+        (declared_shape and declared_shape != actual_shape)
+        or order_by_mismatch
+        or limit_mismatch
+    ):
         return replace(
             plan,
             clause_shape=declared_shape,
@@ -430,7 +539,7 @@ def _apply_clause_plan_contract(
             status="cannot_plan_safely",
             can_render=False,
             missing_evidence=list(plan.missing_evidence) + ["clause_plan_mismatch"],
-            route_reason=f"planner clause shape '{declared_shape}' does not match resolved SQL clauses '{actual_shape}'",
+            route_reason="planner clause requirements do not match resolved SQL clauses",
         )
     if plan.status == "ready" and any(
         entry.get("status") == "blocked" for entry in decision_path
@@ -474,6 +583,7 @@ def build_deterministic_sql_plan(
         "single_table_aggregate",
         "filtered_query",
         "grouped_aggregate",
+        "ranking_query",
     }:
         plan = _build_single_table_clause_plan(
             query_context=query_context,
@@ -572,7 +682,12 @@ def _single_table_clause_shape(
         return "aggregate_only"
     if capability.query_shape == "filtered_query":
         return "aggregate_where" if aggregate_function else "where_only"
-    if capability.query_shape == "grouped_aggregate":
+    ranking_mode = str((intent.get("ranking_diagnostics") or {}).get("mode_hint") or "")
+    if capability.query_shape == "ranking_query" and ranking_mode != "grouped_aggregate":
+        return "where_only" if has_where else "list_only"
+    if capability.query_shape == "grouped_aggregate" or (
+        capability.query_shape == "ranking_query" and ranking_mode == "grouped_aggregate"
+    ):
         if has_where and has_having:
             return "where_group_by_having"
         if has_where:
@@ -672,7 +787,7 @@ def _build_single_table_clause_plan(
         "where_group_by_having",
     }
     requires_having = clause_shape in {"group_by_having", "where_group_by_having"}
-    requires_aggregate = clause_shape not in {"where_only", "unsupported"}
+    requires_aggregate = clause_shape not in {"list_only", "where_only", "unsupported"}
 
     if clause_shape == "unsupported":
         return _cannot_plan_single_table(
@@ -790,6 +905,60 @@ def _build_single_table_clause_plan(
                 filter_columns=filter_columns,
             )
 
+    order_by: list[str] = []
+    selected_order_by = context.get("selected_order_by")
+    if selected_order_by is not None:
+        if not isinstance(selected_order_by, dict):
+            return _cannot_plan_single_table(
+                capability,
+                table_name=table_name,
+                reason="selected_order_by_invalid",
+            )
+        direction = str(selected_order_by.get("direction") or "").strip().lower()
+        target_type = str(selected_order_by.get("target_type") or "").strip()
+        order_table = str(selected_order_by.get("table") or "").strip()
+        order_column = str(selected_order_by.get("column") or "").strip()
+        if direction not in {"asc", "desc"} or order_table != table_name:
+            return _cannot_plan_single_table(
+                capability,
+                table_name=table_name,
+                reason="selected_order_by_invalid",
+            )
+        if target_type == "column":
+            if order_column not in schema_columns:
+                return _cannot_plan_single_table(
+                    capability,
+                    table_name=table_name,
+                    reason="order_by_column_not_in_schema",
+                )
+            order_expression = order_column
+        elif target_type == "aggregate_expression":
+            order_function = str(selected_order_by.get("aggregate_function") or "").strip().lower()
+            if order_function != aggregate_function or order_column != metric_column:
+                return _cannot_plan_single_table(
+                    capability,
+                    table_name=table_name,
+                    reason="order_by_aggregate_mismatch",
+                )
+            order_expression = aggregate_expression
+        else:
+            return _cannot_plan_single_table(
+                capability,
+                table_name=table_name,
+                reason="order_by_target_type_invalid",
+            )
+        order_by = [f"{order_expression} {direction.upper()}"]
+
+    limit = context.get("limit")
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 1000
+    ):
+        return _cannot_plan_single_table(
+            capability,
+            table_name=table_name,
+            reason="limit_out_of_safe_range",
+        )
+
     if requires_grouping:
         select_items = [
             {"expression": dimension_column, "source_column": dimension_column, "kind": "dimension"},
@@ -801,7 +970,6 @@ def _build_single_table_clause_plan(
             },
         ]
         sql_skeleton_type = "grouped_aggregate"
-        limit = None
     elif requires_aggregate:
         select_items = [
             {
@@ -816,15 +984,12 @@ def _build_single_table_clause_plan(
             if requires_where
             else "single_table_aggregate"
         )
-        limit = None
     else:
         select_items = [
             {"expression": column_name, "source_column": column_name, "kind": "column"}
             for column_name in schema_columns
         ]
-        sql_skeleton_type = "filtered_single_table_list"
-        requested_limit = context.get("limit", planner_plan.get("limit"))
-        limit = requested_limit if isinstance(requested_limit, int) and requested_limit > 0 else 50
+        sql_skeleton_type = "ranked_single_table_list" if order_by else "filtered_single_table_list"
 
     return DeterministicSqlPlan(
         query_shape=capability.query_shape,
@@ -836,6 +1001,7 @@ def _build_single_table_clause_plan(
         where_conjunctions=where_conjunctions,
         having_clauses=having_clauses,
         group_by=[dimension_column] if dimension_column else [],
+        order_by=order_by,
         aggregation_type=aggregate_function,
         limit=limit,
         metric_columns=[metric_column] if metric_column else [],
@@ -1093,6 +1259,8 @@ def _render_plan_in_canonical_order(plan: DeterministicSqlPlan) -> str:
         sql += f" GROUP BY {', '.join(plan.group_by)}"
     if plan.having_clauses:
         sql += f" HAVING {_render_predicates(plan.having_clauses, plan.having_conjunctions)}"
+    if plan.order_by:
+        sql += f" ORDER BY {', '.join(plan.order_by)}"
     if plan.limit:
         sql += f" LIMIT {plan.limit}"
     return sql + ";"
@@ -1110,6 +1278,7 @@ _PLAN_RENDERERS = {
     "single_table_aggregate": _render_single_table_aggregate,
     "filtered_query": _render_filtered_query,
     "grouped_aggregate": _render_grouped_aggregate,
+    "ranking_query": _render_plan_in_canonical_order,
 }
 
 
@@ -1132,6 +1301,9 @@ def _detect_aggregate_function(plan: dict[str, Any]) -> str | None:
 
 
 def _planner_aggregate_function(context: dict[str, Any], plan: dict[str, Any]) -> str | None:
+    intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
+    if str((intent.get("ranking_diagnostics") or {}).get("mode_hint") or "") == "row":
+        return None
     selected_function = str(context.get("aggregate_function") or "").strip().lower()
     if selected_function:
         normalized = {"average": "avg", "mean": "avg", "total": "sum"}.get(

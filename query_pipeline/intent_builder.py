@@ -52,7 +52,16 @@ _BOTTOM_RE = re.compile(r"\b(?:bottom|lowest)\s+(\d+)\b", re.IGNORECASE)
 _FIRST_RE = re.compile(r"\bfirst\s+(\d+)\b", re.IGNORECASE)
 _LIMIT_RE = re.compile(r"\blimit\s+(\d+)\b", re.IGNORECASE)
 _LATEST_RE = re.compile(r"\b(?:latest|recent|newest|oldest)\b", re.IGNORECASE)
-_SORTED_BY_RE = re.compile(r"\b(?:sort(?:ed)?|order(?:ed)?)\s+by\s+(.+)$", re.IGNORECASE)
+_SORTED_BY_RE = re.compile(
+    r"\b(?:sort(?:ed)?|order(?:ed)?)\s+by\s+(.+?)(?=\s+limit\b|$)",
+    re.IGNORECASE,
+)
+_RANKING_BY_RE = re.compile(
+    r"^\s*(top|highest|largest|maximum|bottom|lowest|smallest|minimum)"
+    r"(?:\s+(\d+))?\s+(.+?)\s+by\s+(.+?)"
+    r"(?=\s+(?:where|having|group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit|from)\b|$)",
+    re.IGNORECASE,
+)
 _BY_RE = re.compile(r"\s+by\s+", re.IGNORECASE)
 _PER_RE = re.compile(r"\s+per\s+", re.IGNORECASE)
 _WISE_RE = re.compile(r"\b[a-z0-9_ ]+\s+wise\b", re.IGNORECASE)
@@ -67,7 +76,10 @@ _FILTER_RE = re.compile(
     r"\s+filter(?:ed)?(?:\s+by)?\s+(.+?)(?=\s+(?:having|group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit\s+\d+|from)\b|$)",
     re.IGNORECASE,
 )
-_GROUP_BY_RE = re.compile(r"\s+group(?:ed)?\s+by\s+(.+?)(?=\s+having\b|$)", re.IGNORECASE)
+_GROUP_BY_RE = re.compile(
+    r"\s+group(?:ed)?\s+by\s+(.+?)(?=\s+(?:having|sort(?:ed)?|order(?:ed)?|limit|from)\b|$)",
+    re.IGNORECASE,
+)
 _HAVING_RE = re.compile(
     r"\s+having\s+(.+?)(?=\s+(?:from|sort(?:ed)?|order(?:ed)?|limit\s+\d+)\b|$)",
     re.IGNORECASE,
@@ -143,6 +155,19 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
     missing_phrases: list[str] = []
     ambiguous_phrases: list[str] = []
     unsupported_constructs: list[str] = []
+    ranking_diagnostics = dict(normalized.get("ranking_diagnostics") or {})
+    if normalized.get("requested_sort") and not ranking_diagnostics.get("requested"):
+        ranking_diagnostics = {
+            "requested": True,
+            "mode_hint": (
+                "grouped_aggregate"
+                if normalized.get("needs_grouping") and normalized.get("aggregate_function")
+                else "ordered_list"
+            ),
+            "direction_source": "explicit_order_by",
+            "limit_source": "explicit" if normalized.get("limit") is not None else "not_requested",
+            "issues": [],
+        }
 
     if normalized.get("unsafe"):
         confidence_reasons.append("explicit_unsafe_operation")
@@ -211,6 +236,13 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
         "ambiguous_phrases": _merge_unique(ambiguous_phrases),
         "unsupported_constructs": list(normalized["unsupported_constructs"]),
         "has_issues": bool(missing_phrases or ambiguous_phrases or unsupported_constructs),
+    }
+    normalized["ranking_diagnostics"] = {
+        "requested": bool(ranking_diagnostics.get("requested")),
+        "mode_hint": ranking_diagnostics.get("mode_hint"),
+        "direction_source": ranking_diagnostics.get("direction_source"),
+        "limit_source": ranking_diagnostics.get("limit_source") or "not_requested",
+        "issues": _merge_unique(ranking_diagnostics.get("issues") or []),
     }
     normalized["source"] = "deterministic"
     return normalized
@@ -314,6 +346,14 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     source_scope = _extract_source_scope(body)
     having_metric_conflict = False
     having_aggregate_conflict = False
+    ranking_request = _extract_ranking_request(normalized_question)
+    ranking_diagnostics = {
+        "requested": bool(ranking_request),
+        "mode_hint": ranking_request.get("mode_hint") if ranking_request else None,
+        "direction_source": ranking_request.get("direction_source") if ranking_request else None,
+        "limit_source": ranking_request.get("limit_source") if ranking_request else "not_requested",
+        "issues": [],
+    }
 
     sort_match = _SORTED_BY_RE.search(normalized_question)
     requested_sort = _extract_requested_sort(normalized_question)
@@ -334,7 +374,7 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     elif _COMPARE_RE.search(normalized_question):
         intent_type = "comparison"
         business_operation = "compare"
-    elif _TOP_RE.search(normalized_question) or _BOTTOM_RE.search(normalized_question) or _FIRST_RE.search(normalized_question):
+    elif ranking_request or _TOP_RE.search(normalized_question) or _BOTTOM_RE.search(normalized_question) or _FIRST_RE.search(normalized_question):
         intent_type = "ranking"
         business_operation = "rank"
     elif aggregate_function:
@@ -346,13 +386,31 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     elif requested_filters:
         intent_type = "filter"
 
-    if limit is None:
+    if ranking_request:
+        limit = int(ranking_request["limit"])
+        aggregate_function = ranking_request.get("aggregate_function")
+        requested_sort = {
+            "direction": str(ranking_request["direction"]),
+            "terms": str(ranking_request["target_phrase"]),
+        }
+    elif limit is None:
         top_match = _TOP_RE.search(normalized_question) or _BOTTOM_RE.search(normalized_question) or _FIRST_RE.search(normalized_question) or _LIMIT_RE.search(normalized_question)
         if top_match:
             limit = int(top_match.group(1))
 
     by_parts = _extract_grouping_parts(body_without_scope)
-    if by_parts:
+    if ranking_request:
+        requested_metrics = [str(ranking_request["metric_phrase"])]
+        requested_dimensions = (
+            [str(ranking_request["entity_phrase"])]
+            if ranking_request.get("mode_hint") == "grouped_aggregate"
+            else []
+        )
+    elif intent_type == "sorted_list":
+        primary_phrase = _cleanup_phrase(body_without_scope)
+        if primary_phrase:
+            requested_dimensions = [primary_phrase]
+    elif by_parts:
         left, right = by_parts
         left = _cleanup_phrase(left)
         right = _cleanup_phrase(right)
@@ -417,15 +475,20 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         requested_sort = {"direction": "asc", "terms": requested_metrics[0] if requested_metrics else "ranking"}
 
     needs_grouping = bool(
-        requested_dimensions
-        and (
-            (requested_metrics and _BY_RE.search(body_without_sort))
-            or structured_having
-            or (aggregate_function == "count" and _has_explicit_grouping_marker(body_without_sort))
+        ranking_request.get("mode_hint") == "grouped_aggregate"
+        or (
+            requested_dimensions
+            and (
+                (requested_metrics and _BY_RE.search(body_without_sort))
+                or structured_having
+                or (aggregate_function == "count" and _has_explicit_grouping_marker(body_without_sort))
+            )
         )
     )
-    needs_aggregation = intent_type in {"count", "aggregate", "grouped_summary", "ranking", "comparison"} or bool(
-        requested_metrics and (aggregate_function or _BY_RE.search(body_without_sort))
+    needs_aggregation = bool(
+        ranking_request.get("mode_hint") == "grouped_aggregate"
+        or intent_type in {"count", "aggregate", "grouped_summary", "comparison"}
+        or (requested_metrics and aggregate_function)
     )
     needs_join = "likely" if needs_grouping and requested_metrics and requested_dimensions else False
 
@@ -468,6 +531,8 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         body_without_scope=body_without_scope,
         question=normalized_question,
     )
+    if ranking_request:
+        target_entity_phrase = str(ranking_request["entity_phrase"])
     metric_phrase = requested_metrics[0] if requested_metrics else ""
     grouping_phrase = requested_dimensions[0] if intent_type in {"grouped_summary", "ranking"} and requested_dimensions else ""
     ranking_phrase = ""
@@ -510,15 +575,21 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         "grouping_phrase": grouping_phrase,
         "ranking_phrase": ranking_phrase,
         "limit_phrase": limit_phrase,
+        "ranking_diagnostics": ranking_diagnostics,
         "source": "fallback",
     }, normalized_question)
 
 
 def _has_explicit_grouping_marker(question: str) -> bool:
+    ranking = _extract_ranking_request(question)
+    if ranking:
+        return ranking.get("mode_hint") == "grouped_aggregate"
+    without_order_by = _SORTED_BY_RE.sub("", str(question or ""))
     return bool(
-        _BY_RE.search(question)
-        or _PER_RE.search(question)
-        or _WISE_RE.search(question)
+        _GROUP_BY_RE.search(without_order_by)
+        or _BY_RE.search(without_order_by)
+        or _PER_RE.search(without_order_by)
+        or _WISE_RE.search(without_order_by)
     )
 
 
@@ -762,7 +833,47 @@ def _metric_is_generic_phrase(metric_phrase: str) -> bool:
     return all(token in _GENERIC_METRIC_TERMS for token in tokens)
 
 
+def _extract_ranking_request(question: str) -> dict[str, Any]:
+    body = _strip_leading_action(question)
+    match = _RANKING_BY_RE.search(body)
+    if not match:
+        return {}
+
+    keyword = match.group(1).lower()
+    explicit_limit = int(match.group(2)) if match.group(2) else None
+    entity_phrase = _cleanup_phrase(match.group(3))
+    target_phrase = _cleanup_phrase(match.group(4))
+    direction = "asc" if keyword in {"bottom", "lowest", "smallest", "minimum"} else "desc"
+    aggregate_function = _detect_aggregate_function(target_phrase)
+    if (
+        explicit_limit is None
+        and keyword in {"highest", "largest", "maximum", "lowest", "smallest", "minimum"}
+        and aggregate_function is None
+    ):
+        return {}
+    metric_phrase = _metric_phrase_from_segment(target_phrase, aggregate_function)
+    grouped = bool(aggregate_function)
+    return {
+        "keyword": keyword,
+        "entity_phrase": entity_phrase,
+        "target_phrase": target_phrase,
+        "metric_phrase": metric_phrase or target_phrase,
+        "aggregate_function": aggregate_function,
+        "mode_hint": "grouped_aggregate" if grouped else "row",
+        "direction": direction,
+        "direction_source": "ranking_keyword",
+        "limit": explicit_limit if explicit_limit is not None else 50,
+        "limit_source": "explicit" if explicit_limit is not None else "default_top_n",
+    }
+
+
 def _extract_requested_sort(question: str) -> dict[str, str]:
+    ranking = _extract_ranking_request(question)
+    if ranking:
+        return {
+            "direction": str(ranking["direction"]),
+            "terms": str(ranking["target_phrase"]),
+        }
     match = _SORTED_BY_RE.search(question)
     if match:
         terms = _clean_scalar(match.group(1))

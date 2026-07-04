@@ -35,11 +35,13 @@ def test_fallback_intent_builder_handles_ranking_query():
     assert intent["intent_type"] == "ranking"
     assert intent["limit"] == 5
     assert intent["requested_metrics"] == ["amount"]
-    assert intent["requested_dimensions"] == ["partners"]
-    assert intent["needs_grouping"] is True
-    assert intent["needs_aggregation"] is True
-    assert intent["needs_join"] == "likely"
+    assert intent["requested_dimensions"] == []
+    assert intent["target_entity_phrase"] == "partners"
+    assert intent["needs_grouping"] is False
+    assert intent["needs_aggregation"] is False
+    assert intent["needs_join"] is False
     assert intent["requested_sort"] == {"direction": "desc", "terms": "amount"}
+    assert intent["ranking_diagnostics"]["mode_hint"] == "row"
 
 
 def test_fallback_intent_builder_handles_grouped_metric_query():

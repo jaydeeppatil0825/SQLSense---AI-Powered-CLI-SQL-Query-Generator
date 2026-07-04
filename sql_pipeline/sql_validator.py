@@ -771,6 +771,77 @@ def _validate_aggregate_clause_placement(sql: str) -> tuple[bool, str]:
     return True, "Aggregate predicates are in valid SQL clauses."
 
 
+def _validate_clause_order_and_limit(sql: str) -> tuple[bool, str]:
+    masked = _strip_string_literals(sql)
+    clause_patterns = [
+        ("SELECT", r"\bSELECT\b"),
+        ("FROM", r"\bFROM\b"),
+        ("WHERE", r"\bWHERE\b"),
+        ("GROUP BY", r"\bGROUP\s+BY\b"),
+        ("HAVING", r"\bHAVING\b"),
+        ("ORDER BY", r"\bORDER\s+BY\b"),
+        ("LIMIT", r"\bLIMIT\b"),
+    ]
+    positions: list[tuple[str, int]] = []
+    for label, pattern in clause_patterns:
+        matches = list(re.finditer(pattern, masked, re.IGNORECASE))
+        if len(matches) > 1:
+            return False, f"SQL contains duplicate {label} clauses."
+        if matches:
+            positions.append((label, matches[0].start()))
+    if positions != sorted(positions, key=lambda item: item[1]):
+        return False, "SQL clauses are not in canonical SELECT/FROM/WHERE/GROUP BY/HAVING/ORDER BY/LIMIT order."
+
+    if re.search(r"\bLIMIT\b", masked, re.IGNORECASE):
+        limit_match = re.search(r"\bLIMIT\s+([+-]?\d+)\s*;?\s*$", masked, re.IGNORECASE)
+        if not limit_match:
+            return False, "LIMIT must be the final clause and contain one numeric row count."
+        limit_value = int(limit_match.group(1))
+        if limit_value < 1 or limit_value > 1000:
+            return False, "LIMIT must be between 1 and 1000."
+    return True, "SQL clauses are in canonical order."
+
+
+def _validate_order_by_expression(sql: str) -> tuple[bool, str]:
+    order_match = re.search(
+        r"\bORDER\s+BY\s+(.*?)(?=\bLIMIT\b|;|$)",
+        sql,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not order_match:
+        return True, "No ORDER BY clause to validate."
+    expressions = _split_select_expressions(order_match.group(1))
+    if len(expressions) != 1:
+        return False, "Deterministic ranking supports exactly one ORDER BY target."
+    expression = expressions[0].strip()
+    direction_match = re.search(r"\s+(ASC|DESC)\s*$", expression, re.IGNORECASE)
+    if direction_match:
+        expression = expression[: direction_match.start()].strip()
+    elif re.search(r"\s+[A-Za-z_][A-Za-z0-9_]*\s*$", expression):
+        trailing = expression.rsplit(None, 1)[-1]
+        if trailing.upper() not in {"ASC", "DESC"}:
+            return False, "ORDER BY direction must be ASC or DESC."
+
+    function_match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", expression)
+    if not function_match:
+        return True, "ORDER BY uses a column or selected alias."
+    function_name = function_match.group(1).upper()
+    if function_name not in {"COUNT", "SUM", "AVG", "MIN", "MAX"}:
+        return False, f"Unsupported ORDER BY aggregate function: {function_name}."
+    select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", sql, re.IGNORECASE | re.DOTALL)
+    selected_aggregates = {
+        _normalize_expression(match.group(0))
+        for match in re.finditer(
+            r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\([^()]*\)",
+            select_match.group(1) if select_match else "",
+            re.IGNORECASE,
+        )
+    }
+    if _normalize_expression(expression) not in selected_aggregates:
+        return False, "Aggregate ORDER BY must match an aggregate expression in SELECT."
+    return True, "ORDER BY aggregate matches the SELECT output."
+
+
 def _has_dangling_comma(sql: str) -> bool:
     return bool(re.search(r",\s*(FROM|WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|JOIN|;|$)", sql, re.IGNORECASE))
 
@@ -1029,6 +1100,14 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
     # Check 6: ORDER BY must name an expression before LIMIT/end.
     if re.search(r"\bORDER\s+BY\s*(?:LIMIT\b|;|$)", stripped, re.IGNORECASE):
         return False, "SQL has an incomplete ORDER BY clause."
+
+    clause_order_ok, clause_order_reason = _validate_clause_order_and_limit(stripped)
+    if not clause_order_ok:
+        return False, clause_order_reason
+
+    order_by_ok, order_by_reason = _validate_order_by_expression(stripped)
+    if not order_by_ok:
+        return False, order_by_reason
 
     select_ok, select_reason = _validate_select_list(stripped)
     if not select_ok:

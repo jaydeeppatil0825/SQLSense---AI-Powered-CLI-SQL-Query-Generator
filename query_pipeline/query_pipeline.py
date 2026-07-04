@@ -174,6 +174,8 @@ class QueryPipeline:
                         "dimension": False,
                         "where": False,
                         "having": False,
+                        "order_by": False,
+                        "limit": False,
                     },
                     "decision_path": [
                         {"node": "unsafe_check", "status": "resolved", "reason": "request reached planner context construction"},
@@ -184,6 +186,9 @@ class QueryPipeline:
                         {"node": "dimension", "status": "not_required", "reason": "query shape was unresolved"},
                         {"node": "where", "status": "not_required", "reason": "query shape was unresolved"},
                         {"node": "having", "status": "not_required", "reason": "query shape was unresolved"},
+                        {"node": "order_by", "status": "not_required", "reason": "query shape was unresolved"},
+                        {"node": "limit", "status": "not_required", "reason": "query shape was unresolved"},
+                        {"node": "clause_shape", "status": "blocked", "reason": "query shape was unresolved"},
                         {"node": "route", "status": "blocked", "reason": "planner context construction failed"},
                     ],
                 },

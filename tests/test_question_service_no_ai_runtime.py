@@ -403,7 +403,6 @@ def test_pipeline_blocked_unsafe_route_blocks_sql_generation(monkeypatch):
 @pytest.mark.parametrize(
     "query_shape",
     [
-        "ranking_query",
         "joined_lookup",
     ],
 )
@@ -475,6 +474,8 @@ def test_filtered_query_dispatches_deterministic_generator_and_validates():
     query_context["intent"] = {"intent_type": "filter", "structured_filters": [structured_filter]}
     query_context["selected_filters"] = [selected_filter]
     query_context["plan"]["filters"] = [selected_filter]
+    query_context["limit"] = 50
+    query_context["plan"]["limit"] = 50
     query_context["selected_knowledge_base"] = PIPELINE_BILLS_KB
     pipeline_context["plan"] = dict(query_context["plan"])
 

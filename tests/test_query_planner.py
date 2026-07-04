@@ -1366,7 +1366,8 @@ def test_query_planner_uses_retrieved_context_for_ranking_query():
     assert context["dimension_candidates"][0]["column"] == "account_label"
     assert context["evidence_sources"] == ["kb_identifier", "glossary"]
     assert context["query_shape"] == "ranking_query"
-    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert context["clause_plan"]["decision_path"][1]["status"] == "blocked"
     assert context["complex_sql_plan"]["query_shape"] == "ranking_query"
     assert context["complex_sql_plan"]["aggregation_type"] == "sum"
     assert context["complex_sql_plan"]["required_joins"] == ["accounts.account_id = deals.account_id"]

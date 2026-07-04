@@ -115,6 +115,8 @@ SUPPORTED_CASES: List[Dict[str, Any]] = [
         "expected_kind": "scalar",
         "expected_value": Decimal("3770.00"),
     },
+
+
     {
         "name": "highest paid value",
         "question": "highest paid value from bills",
@@ -123,7 +125,16 @@ SUPPORTED_CASES: List[Dict[str, Any]] = [
         "sql_must_contain": ["MAX", "paid_value", "FROM", "bills"],
         "expected_kind": "scalar",
         "expected_value": Decimal("4500.00"),
-    },
+    }
+    
+    
+    
+    ,
+
+
+
+
+    
     {
         "name": "lowest billed value",
         "question": "lowest billed value from bills",
