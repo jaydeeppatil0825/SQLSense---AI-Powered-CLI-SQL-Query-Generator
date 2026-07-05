@@ -403,7 +403,7 @@ def test_pipeline_blocked_unsafe_route_blocks_sql_generation(monkeypatch):
 @pytest.mark.parametrize(
     "query_shape",
     [
-        "joined_lookup",
+        "formula_query",
     ],
 )
 def test_clean_planner_known_unimplemented_shapes_return_capability_message(monkeypatch, query_shape):

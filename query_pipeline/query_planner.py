@@ -16,6 +16,10 @@ from kb_pipeline.schema_facts import (
     enrich_knowledge_base_schema_facts,
     resolved_semantic_type,
 )
+from kb_pipeline.relationship_graph import (
+    build_relationship_graph,
+    find_safe_direct_join_relationships,
+)
 from kb_pipeline.vector import VectorRetriever
 from utils.logger import get_logger
 
@@ -1871,6 +1875,7 @@ def _build_query_context_from_retrieved_context(
     normalized_question: str,
     intent: dict[str, Any],
     retrieved_context: dict[str, Any],
+    knowledge_base: dict[str, Any],
 ) -> dict:
     planner_intent = _planner_intent_from_structured_intent(intent)
     dimension = _structured_dimension(intent)
@@ -2081,7 +2086,7 @@ def _build_query_context_from_retrieved_context(
         legacy_route_recommendation,
     )
 
-    return _normalize_planner_output(
+    normalized_result = _normalize_planner_output(
         question=question,
         normalized_question=normalized_question,
         intent=intent,
@@ -2108,6 +2113,518 @@ def _build_query_context_from_retrieved_context(
         legacy_route_recommendation=legacy_route_recommendation,
         debug_trace_details=debug_trace_details,
     )
+    return _apply_join_lookup_contract(normalized_result, knowledge_base)
+
+
+_JOIN_DECISION_NODES = (
+    "unsafe_check",
+    "table_scope",
+    "requested_fields",
+    "join_need",
+    "relationship_graph_lookup",
+    "safe_join_path",
+    "ambiguity_check",
+    "where",
+    "selected_output_columns",
+    "route",
+)
+
+
+def _join_failure_context(
+    context: dict[str, Any],
+    *,
+    blocked_node: str,
+    reason: str,
+    query_shape: str = "joined_lookup",
+    resolved_nodes: set[str] | None = None,
+) -> dict[str, Any]:
+    resolved = set(resolved_nodes or set())
+    decision_path = []
+    for node_name in _JOIN_DECISION_NODES:
+        if node_name in resolved:
+            status = "resolved"
+            node_reason = f"{node_name.replace('_', ' ')} resolved"
+        elif node_name == blocked_node:
+            status = "blocked"
+            node_reason = reason
+        else:
+            status = "not_required" if node_name == "where" else "blocked"
+            node_reason = "not evaluated because an earlier join decision was blocked"
+        decision_path.append({"node": node_name, "status": status, "reason": node_reason})
+
+    failed = dict(context)
+    failed.update(
+        {
+            "query_shape": query_shape,
+            "route": "cannot_plan_safely",
+            "route_recommendation": "cannot_plan_safely",
+            "route_reason": reason,
+            "planner_reason": reason,
+            "can_plan": False,
+            "selected_join_path": None,
+            "selected_output_columns": [],
+            "clause_plan": {
+                "clause_shape": "joined_lookup",
+                "selected_join_path": None,
+                "limit": failed.get("limit"),
+                "requires": {
+                    "aggregate": False,
+                    "metric": False,
+                    "dimension": False,
+                    "where": bool((failed.get("intent") or {}).get("structured_filters")),
+                    "having": False,
+                    "order_by": False,
+                    "limit": True,
+                    "join": True,
+                    "requested_fields": True,
+                    "selected_output_columns": True,
+                },
+                "decision_path": decision_path,
+            },
+        }
+    )
+    failed["missing_evidence"] = list(dict.fromkeys([*(failed.get("missing_evidence") or []), blocked_node]))
+    return failed
+
+
+def _table_phrase_score(phrase: str, table_name: str) -> float:
+    phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
+    table_tokens = {_singularize_token(token) for token in _tokenize(table_name)}
+    if not phrase_tokens or not table_tokens:
+        return 0.0
+    if phrase_tokens == table_tokens:
+        return 1.0
+    if phrase_tokens <= table_tokens or table_tokens <= phrase_tokens:
+        return 0.82
+    return round((len(phrase_tokens & table_tokens) / len(phrase_tokens)) * 0.6, 4)
+
+
+def _resolve_join_table(
+    phrase: str,
+    knowledge_base: dict[str, Any],
+    retrieved_tables: list[dict[str, Any]] | None = None,
+) -> tuple[str | None, str]:
+    requested_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
+    retrieval_scores: dict[str, float] = {}
+    for candidate in retrieved_tables or []:
+        table_name = str(candidate.get("table") or "")
+        candidate_terms = [table_name, *(candidate.get("matched_terms") or [])]
+        if any(
+            {_singularize_token(token) for token in _tokenize(term)} == requested_tokens
+            for term in candidate_terms
+            if _tokenize(term)
+        ):
+            retrieval_scores[table_name] = max(
+                retrieval_scores.get(table_name, 0.0),
+                min(float(candidate.get("score") or 0.0), 0.96),
+            )
+    ranked = sorted(
+        (
+            (max(_table_phrase_score(phrase, table_name), retrieval_scores.get(table_name, 0.0)), table_name)
+            for table_name in knowledge_base
+        ),
+        key=lambda item: (-item[0], item[1]),
+    )
+    ranked = [item for item in ranked if item[0] > 0]
+    if not ranked:
+        return None, "missing"
+    if len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) < 0.08:
+        return None, "ambiguous"
+    return ranked[0][1], "resolved"
+
+
+def _column_phrase_score(
+    phrase: str,
+    table_name: str,
+    column: dict[str, Any],
+    retrieved_candidates: list[dict[str, Any]],
+) -> float:
+    phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
+    column_name = str(column.get("name") or "")
+    column_tokens = {_singularize_token(token) for token in _tokenize(column_name)}
+    qualified_tokens = {
+        _singularize_token(token) for token in _tokenize(f"{table_name} {column_name}")
+    }
+    if not phrase_tokens or not column_tokens:
+        return 0.0
+    score = 0.0
+    if phrase_tokens == qualified_tokens:
+        score = 1.0
+    elif phrase_tokens == column_tokens:
+        score = 0.9
+    elif phrase_tokens <= qualified_tokens:
+        score = 0.78
+    elif phrase_tokens & qualified_tokens:
+        score = (len(phrase_tokens & qualified_tokens) / len(phrase_tokens)) * 0.55
+
+    for candidate in retrieved_candidates:
+        if (
+            str(candidate.get("table") or "") != table_name
+            or str(candidate.get("column") or "") != column_name
+        ):
+            continue
+        candidate_texts = [column_name, *(candidate.get("matched_terms") or [])]
+        candidate_token_sets = [
+            {_singularize_token(token) for token in _tokenize(text)}
+            for text in candidate_texts
+            if _tokenize(text)
+        ]
+        if any(tokens == phrase_tokens for tokens in candidate_token_sets):
+            score = max(score, 0.96)
+            score = max(score, min(float(candidate.get("score") or 0.0), 0.88))
+        elif any(phrase_tokens <= tokens for tokens in candidate_token_sets):
+            score = max(score, 0.82)
+            score = max(score, min(float(candidate.get("score") or 0.0), 0.8))
+    return round(score, 4)
+
+
+def _resolve_join_output_field(
+    phrase: str,
+    knowledge_base: dict[str, Any],
+    retrieved_candidates: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, str]:
+    ranked = []
+    for table_name, table_data in knowledge_base.items():
+        for column in table_data.get("columns", []) or []:
+            column_name = str(column.get("name") or "")
+            if not column_name:
+                continue
+            score = _column_phrase_score(phrase, table_name, column, retrieved_candidates)
+            if score > 0:
+                ranked.append((score, table_name, column_name))
+    ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+    if not ranked or ranked[0][0] < 0.7:
+        return None, "missing"
+    if len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) < 0.08:
+        return None, "ambiguous"
+    score, table_name, column_name = ranked[0]
+    return {
+        "table": table_name,
+        "column": column_name,
+        "score": score,
+        "source": "schema_and_retrieval_evidence",
+    }, "resolved"
+
+
+def _qualified_output(table_name: str, column_name: str, source: str) -> dict[str, Any]:
+    return {
+        "table": table_name,
+        "column": column_name,
+        "expression": f"{table_name}.{column_name}",
+        "alias": f"{table_name}__{column_name}",
+        "source": source,
+    }
+
+
+def _all_table_outputs(table_name: str, knowledge_base: dict[str, Any], source: str) -> list[dict[str, Any]]:
+    return [
+        _qualified_output(table_name, str(column.get("name") or ""), source)
+        for column in knowledge_base.get(table_name, {}).get("columns", []) or []
+        if str(column.get("name") or "")
+    ]
+
+
+def _apply_join_lookup_contract(
+    context: dict[str, Any],
+    knowledge_base: dict[str, Any],
+) -> dict[str, Any]:
+    intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
+    if intent.get("unsafe"):
+        return context
+    lookup = dict(intent.get("join_lookup_request") or {})
+    structured_filters = list(intent.get("structured_filters") or [])
+    selected_filters = [
+        dict(entry) for entry in (context.get("selected_filters") or []) if isinstance(entry, dict)
+    ]
+    retrieved = context.get("retrieved_context") if isinstance(context.get("retrieved_context"), dict) else {}
+    retrieved_columns = [
+        dict(entry) for entry in (retrieved.get("matched_columns") or []) if isinstance(entry, dict)
+    ]
+    retrieved_tables = [
+        dict(entry) for entry in (retrieved.get("matched_tables") or []) if isinstance(entry, dict)
+    ]
+
+    base_phrase = str(lookup.get("base_entity_phrase") or intent.get("target_entity_phrase") or "").strip()
+    explicit_base = None
+    base_resolution = "missing"
+    if base_phrase:
+        explicit_base, base_resolution = _resolve_join_table(
+            base_phrase,
+            knowledge_base,
+            retrieved_tables,
+        )
+
+    filter_tables = {
+        str(entry.get("table") or "") for entry in selected_filters if str(entry.get("table") or "")
+    }
+    cross_table_filter = bool(
+        str(intent.get("intent_type") or "") == "filter"
+        and explicit_base
+        and any(table_name != explicit_base for table_name in filter_tables)
+    )
+    if not lookup.get("requested") and not cross_table_filter:
+        return context
+
+    resolved_nodes = {"unsafe_check"}
+    if base_phrase and base_resolution != "resolved":
+        return _join_failure_context(
+            context,
+            blocked_node="table_scope",
+            reason=f"base table evidence is {base_resolution}",
+            resolved_nodes=resolved_nodes,
+        )
+
+    if (
+        intent.get("needs_aggregation")
+        or intent.get("needs_grouping")
+        or intent.get("structured_having")
+        or intent.get("requested_sort")
+        or context.get("formula_evidence")
+    ):
+        return _join_failure_context(
+            context,
+            blocked_node="route",
+            reason="joined analytics, grouping, HAVING, formulas, and ranking are not supported in Phase 5",
+            query_shape="multi_table_aggregate" if intent.get("needs_aggregation") else "ranking_query",
+            resolved_nodes=resolved_nodes | {"table_scope", "requested_fields", "join_need"},
+        )
+
+    requested_fields = list(lookup.get("requested_output_fields") or [])
+    resolved_fields: list[dict[str, Any]] = []
+    for phrase in requested_fields:
+        field, field_status = _resolve_join_output_field(str(phrase), knowledge_base, retrieved_columns)
+        if field_status != "resolved" or field is None:
+            return _join_failure_context(
+                context,
+                blocked_node="requested_fields",
+                reason=f"requested output field '{phrase}' is {field_status}",
+                resolved_nodes=resolved_nodes | {"table_scope"},
+            )
+        resolved_fields.append(field)
+    resolved_nodes.update({"table_scope", "requested_fields", "join_need"})
+
+    projection_mode = str(lookup.get("projection_mode") or "")
+    candidate_tables: set[str] = set(filter_tables)
+    if explicit_base:
+        candidate_tables.add(explicit_base)
+    candidate_tables.update(str(entry.get("table") or "") for entry in resolved_fields)
+    if projection_mode == "broad_related":
+        related_phrase = str(lookup.get("related_request_phrase") or "").strip()
+        related_table, related_status = _resolve_join_table(
+            related_phrase,
+            knowledge_base,
+            retrieved_tables,
+        )
+        if related_status != "resolved" or related_table is None:
+            return _join_failure_context(
+                context,
+                blocked_node="table_scope",
+                reason=f"related table evidence is {related_status}",
+                resolved_nodes={"unsafe_check", "requested_fields", "join_need"},
+            )
+        candidate_tables.add(related_table)
+
+    candidate_tables.discard("")
+    if len(candidate_tables) != 2:
+        return _join_failure_context(
+            context,
+            blocked_node="table_scope",
+            reason="joined lookup requires exactly two uniquely resolved tables",
+            resolved_nodes={"unsafe_check", "requested_fields", "join_need"},
+        )
+    first_table, second_table = sorted(candidate_tables)
+    graph = build_relationship_graph(knowledge_base, infer_relationships=False)
+    graph_edges = find_safe_direct_join_relationships(graph, first_table, second_table)
+    resolved_nodes.add("relationship_graph_lookup")
+    if not graph_edges:
+        return _join_failure_context(
+            context,
+            blocked_node="safe_join_path",
+            reason="no safe direct Relationship Graph edge exists between the selected tables",
+            resolved_nodes=resolved_nodes,
+        )
+    if len(graph_edges) != 1:
+        return _join_failure_context(
+            context,
+            blocked_node="ambiguity_check",
+            reason="multiple distinct safe Relationship Graph edges exist between the selected tables",
+            resolved_nodes=resolved_nodes | {"safe_join_path"},
+        )
+    edge = dict(graph_edges[0])
+    resolved_nodes.update({"safe_join_path", "ambiguity_check"})
+
+    if explicit_base:
+        base_table = explicit_base
+        joined_table = second_table if first_table == explicit_base else first_table
+    else:
+        base_table = str(edge.get("from_table") or "")
+        joined_table = str(edge.get("to_table") or "")
+    if {base_table, joined_table} != candidate_tables:
+        return _join_failure_context(
+            context,
+            blocked_node="table_scope",
+            reason="Relationship Graph direction does not resolve a unique base orientation",
+            resolved_nodes={"unsafe_check", "requested_fields", "join_need"},
+        )
+
+    if structured_filters:
+        if len(selected_filters) != len(structured_filters) or not filter_tables <= candidate_tables:
+            return _join_failure_context(
+                context,
+                blocked_node="where",
+                reason="joined WHERE field evidence is missing or ambiguous",
+                resolved_nodes=resolved_nodes,
+            )
+        resolved_nodes.add("where")
+
+    if projection_mode == "broad_related":
+        output_columns = [
+            *_all_table_outputs(base_table, knowledge_base, "broad_base_projection"),
+            *_all_table_outputs(joined_table, knowledge_base, "broad_related_projection"),
+        ]
+    elif projection_mode == "base_plus_related_fields":
+        if any(str(field.get("table") or "") != joined_table for field in resolved_fields):
+            return _join_failure_context(
+                context,
+                blocked_node="requested_fields",
+                reason="explicit related field did not resolve uniquely on the joined table",
+                resolved_nodes={"unsafe_check", "table_scope", "join_need"},
+            )
+        output_columns = _all_table_outputs(base_table, knowledge_base, "base_projection")
+        output_columns.extend(
+            _qualified_output(joined_table, str(field["column"]), "requested_related_field")
+            for field in resolved_fields
+        )
+    elif projection_mode == "explicit_fields_only":
+        output_columns = [
+            _qualified_output(str(field["table"]), str(field["column"]), "requested_output_field")
+            for field in resolved_fields
+        ]
+    else:
+        output_columns = _all_table_outputs(base_table, knowledge_base, "filtered_base_projection")
+
+    deduped_outputs = []
+    seen_outputs: set[tuple[str, str]] = set()
+    for output in output_columns:
+        signature = (str(output.get("table") or ""), str(output.get("column") or ""))
+        if not all(signature) or signature in seen_outputs:
+            continue
+        seen_outputs.add(signature)
+        deduped_outputs.append(output)
+    if not deduped_outputs:
+        return _join_failure_context(
+            context,
+            blocked_node="selected_output_columns",
+            reason="joined lookup output columns are missing",
+            resolved_nodes=resolved_nodes,
+        )
+    resolved_nodes.add("selected_output_columns")
+
+    raw_limit = intent.get("limit")
+    resolved_limit = 50 if raw_limit is None else raw_limit
+    if isinstance(resolved_limit, bool) or not isinstance(resolved_limit, int) or not 1 <= resolved_limit <= 1000:
+        return _join_failure_context(
+            context,
+            blocked_node="route",
+            reason="joined lookup LIMIT must be between 1 and 1000",
+            resolved_nodes=resolved_nodes,
+        )
+
+    selected_join_path = {
+        "base_table": base_table,
+        "joined_tables": [joined_table],
+        "edges": [edge],
+        "path_source": "relationship_graph",
+        "ambiguity_status": "resolved",
+    }
+    decision_path = [
+        {
+            "node": node_name,
+            "status": "not_required" if node_name == "where" and not structured_filters else "resolved",
+            "reason": (
+                "no row-level filter was requested"
+                if node_name == "where" and not structured_filters
+                else f"{node_name.replace('_', ' ')} resolved from deterministic evidence"
+            ),
+        }
+        for node_name in _JOIN_DECISION_NODES
+    ]
+    selected_tables = []
+    for table_name in (base_table, joined_table):
+        selected_tables.append(
+            {
+                "table": table_name,
+                "confidence": 1.0,
+                "selected_columns": [
+                    {"column": output["column"], "confidence": 1.0, "reason": output["source"]}
+                    for output in deduped_outputs
+                    if output["table"] == table_name
+                ],
+            }
+        )
+    required_join = (
+        f"{edge['from_table']}.{edge['from_column']} = "
+        f"{edge['to_table']}.{edge['to_column']}"
+    )
+    planned = dict(context)
+    planned.update(
+        {
+            "query_shape": "joined_lookup",
+            "route": "deterministic_sql_required",
+            "route_recommendation": "deterministic_sql_required",
+            "route_reason": "joined lookup can be generated from one safe direct Relationship Graph edge",
+            "planner_reason": "joined lookup can be generated from one safe direct Relationship Graph edge",
+            "can_plan": True,
+            "selected_tables": selected_tables,
+            "selected_table_names": [base_table, joined_table],
+            "selected_knowledge_base": {
+                table_name: deepcopy(knowledge_base[table_name])
+                for table_name in (base_table, joined_table)
+            },
+            "selected_columns": list(deduped_outputs),
+            "selected_output_columns": list(deduped_outputs),
+            "selected_join_path": selected_join_path,
+            "selected_relationship_path": selected_join_path,
+            "join_paths": [selected_join_path],
+            "required_joins": [required_join],
+            "limit": resolved_limit,
+            "missing_evidence": [],
+            "ambiguities": [],
+            "clause_plan": {
+                "clause_shape": "joined_lookup",
+                "selected_join_path": selected_join_path,
+                "limit": resolved_limit,
+                "requires": {
+                    "aggregate": False,
+                    "metric": False,
+                    "dimension": False,
+                    "where": bool(structured_filters),
+                    "having": False,
+                    "order_by": False,
+                    "limit": True,
+                    "join": True,
+                    "requested_fields": True,
+                    "selected_output_columns": True,
+                },
+                "decision_path": decision_path,
+            },
+        }
+    )
+    planned["plan"] = {
+        **dict(planned.get("plan") or {}),
+        "limit": resolved_limit,
+        "filters": selected_filters,
+    }
+    planned["complex_sql_plan"] = {
+        "query_shape": "joined_lookup",
+        "selected_tables": selected_tables,
+        "selected_columns": list(deduped_outputs),
+        "selected_join_path": selected_join_path,
+        "required_joins": [required_join],
+        "limit": resolved_limit,
+        "route_recommendation": "deterministic_sql_required",
+    }
+    return planned
 
 
 def _detect_missing_evidence(
@@ -3524,6 +4041,7 @@ def build_query_context(
             normalized_question,
             intent,
             retrieved_context,
+            knowledge_base,
         )
 
     # Legacy direct-planner compatibility path. Active QueryPipeline runtime

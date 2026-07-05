@@ -72,6 +72,8 @@ class DeterministicSqlPlan:
     base_table: Optional[str] = None
     joins: list[dict[str, Any]] = field(default_factory=list)
     required_joins: list[dict[str, Any]] = field(default_factory=list)
+    selected_join_path: Optional[dict[str, Any]] = None
+    selected_output_columns: list[dict[str, Any]] = field(default_factory=list)
     select_items: list[dict[str, Any]] = field(default_factory=list)
     where_clauses: list[str] = field(default_factory=list)
     where_conjunctions: list[str] = field(default_factory=list)
@@ -116,6 +118,64 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
     selected_tables = [entry for entry in (context.get("selected_tables") or []) if isinstance(entry, dict)]
     aggregate_function = _planner_aggregate_function(context, plan)
     contract_shape = str(context.get("query_shape") or "").strip()
+
+    if contract_shape == "joined_lookup":
+        intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
+        selected_path = context.get("selected_join_path")
+        selected_outputs = [
+            entry for entry in (context.get("selected_output_columns") or []) if isinstance(entry, dict)
+        ]
+        if (
+            len(selected_tables) != 2
+            or not isinstance(selected_path, dict)
+            or len(list(selected_path.get("joined_tables") or [])) != 1
+            or len(list(selected_path.get("edges") or [])) != 1
+        ):
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="joined_lookup",
+                supported_now=True,
+                blocked_by=["selected_join_path_missing"],
+                reason="joined lookup requires exactly two tables and one planner-selected graph edge",
+            )
+        if not selected_outputs:
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="joined_lookup",
+                supported_now=True,
+                blocked_by=["selected_output_columns_missing"],
+                reason="planner-selected joined output columns are missing",
+            )
+        if (
+            intent.get("needs_aggregation")
+            or intent.get("needs_grouping")
+            or intent.get("structured_having")
+            or intent.get("requested_sort")
+            or context.get("formula_evidence")
+        ):
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="joined_lookup",
+                supported_now=True,
+                blocked_by=["joined_analytics_not_supported"],
+                reason="joined analytics are not supported in Phase 5",
+            )
+        limit = context.get("limit")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="joined_lookup",
+                supported_now=True,
+                blocked_by=["limit_out_of_safe_range"],
+                reason="joined lookup LIMIT must be between 1 and 1000",
+            )
+        return DeterministicCapabilityResult(
+            status="supported",
+            query_shape="joined_lookup",
+            supported_now=True,
+            required_evidence=["selected_join_path", "selected_output_columns"],
+            reason="two-table lookup is authorized by the selected Relationship Graph edge",
+        )
 
     if contract_shape == "ranking_query":
         intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
@@ -438,6 +498,8 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
 
 
 def _actual_clause_shape(plan: DeterministicSqlPlan) -> str:
+    if plan.query_shape == "joined_lookup" and plan.joins:
+        return "joined_lookup"
     has_where = bool(plan.where_clauses)
     has_grouping = bool(plan.group_by)
     has_having = bool(plan.having_clauses)
@@ -526,11 +588,22 @@ def _apply_clause_plan_contract(
         bool(declared_requires.get("limit")) != (plan.limit is not None)
         or clause_plan.get("limit") != plan.limit
     )
+    declared_join_path = context.get("selected_join_path")
+    join_mismatch = plan.query_shape == "joined_lookup" and (
+        not isinstance(declared_join_path, dict)
+        or declared_join_path != plan.selected_join_path
+        or clause_plan.get("selected_join_path") != plan.selected_join_path
+    )
+    output_mismatch = plan.query_shape == "joined_lookup" and (
+        list(context.get("selected_output_columns") or []) != plan.selected_output_columns
+    )
 
     if plan.status == "ready" and (
         (declared_shape and declared_shape != actual_shape)
         or order_by_mismatch
         or limit_mismatch
+        or join_mismatch
+        or output_mismatch
     ):
         return replace(
             plan,
@@ -586,6 +659,12 @@ def build_deterministic_sql_plan(
         "ranking_query",
     }:
         plan = _build_single_table_clause_plan(
+            query_context=query_context,
+            knowledge_base=knowledge_base,
+            capability=capability,
+        )
+    elif capability.query_shape == "joined_lookup":
+        plan = _build_joined_lookup_plan(
             query_context=query_context,
             knowledge_base=knowledge_base,
             capability=capability,
@@ -1028,6 +1107,185 @@ def _render_single_table_aggregate(plan: DeterministicSqlPlan) -> str:
     return _render_plan_in_canonical_order(plan)
 
 
+def _resolve_join_filter_clauses(
+    query_context: dict[str, Any],
+    knowledge_base: dict[str, Any],
+    allowed_tables: set[str],
+) -> tuple[list[str], list[str], list[str], str]:
+    selected_filters = [
+        entry for entry in (query_context.get("selected_filters") or []) if isinstance(entry, dict)
+    ]
+    intent = query_context.get("intent") if isinstance(query_context.get("intent"), dict) else {}
+    structured_filters = [
+        entry for entry in (intent.get("structured_filters") or []) if isinstance(entry, dict)
+    ]
+    if not structured_filters:
+        return [], [], [], ""
+    if len(selected_filters) != len(structured_filters):
+        return [], [], [], "filter_evidence_incomplete"
+    clauses: list[str] = []
+    conjunctions: list[str] = []
+    filter_columns: list[str] = []
+    active_conjunctions: set[str] = set()
+    for index, selected_filter in enumerate(selected_filters):
+        table_name = str(selected_filter.get("table") or "").strip()
+        column_name = str(selected_filter.get("column") or "").strip()
+        operator = str(selected_filter.get("operator") or "").strip().lower()
+        conjunction = str(selected_filter.get("conjunction") or "").strip().lower()
+        if table_name not in allowed_tables or not _SAFE_IDENTIFIER_RE.fullmatch(column_name):
+            return [], [], [], "filter_column_not_selected"
+        schema_column = next(
+            (
+                column for column in knowledge_base.get(table_name, {}).get("columns", []) or []
+                if str(column.get("name") or "") == column_name
+            ),
+            None,
+        )
+        if schema_column is None:
+            return [], [], [], "filter_column_not_in_schema"
+        if index == 0 and conjunction:
+            return [], [], [], "filter_conjunction_invalid"
+        normalized_conjunction = "" if index == 0 else (conjunction or "and")
+        if normalized_conjunction and normalized_conjunction not in {"and", "or"}:
+            return [], [], [], "filter_conjunction_not_supported"
+        if normalized_conjunction:
+            active_conjunctions.add(normalized_conjunction)
+            if len(active_conjunctions) > 1:
+                return [], [], [], "filter_conjunction_not_supported"
+        predicate, predicate_reason = _filter_predicate(
+            f"{table_name}.{column_name}",
+            schema_column,
+            operator,
+            selected_filter,
+        )
+        if predicate_reason:
+            return [], [], [], predicate_reason
+        clauses.append(predicate)
+        conjunctions.append(normalized_conjunction)
+        filter_columns.append(f"{table_name}.{column_name}")
+    return clauses, conjunctions, filter_columns, ""
+
+
+def _build_joined_lookup_plan(
+    *,
+    query_context: dict[str, Any],
+    knowledge_base: dict[str, Any],
+    capability: DeterministicCapabilityResult,
+) -> DeterministicSqlPlan:
+    selected_path = query_context.get("selected_join_path")
+    if not isinstance(selected_path, dict):
+        return DeterministicSqlPlan(
+            query_shape="joined_lookup",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["selected_join_path_missing"],
+            route_reason="planner-selected join path is missing",
+        )
+    base_table = str(selected_path.get("base_table") or "").strip()
+    joined_tables = [str(value).strip() for value in (selected_path.get("joined_tables") or [])]
+    edges = [dict(edge) for edge in (selected_path.get("edges") or []) if isinstance(edge, dict)]
+    if len(joined_tables) != 1 or len(edges) != 1:
+        return DeterministicSqlPlan(
+            query_shape="joined_lookup",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["selected_join_path_invalid"],
+            route_reason="joined lookup requires one joined table and one direct graph edge",
+        )
+    joined_table = joined_tables[0]
+    edge = edges[0]
+    if (
+        selected_path.get("path_source") != "relationship_graph"
+        or selected_path.get("ambiguity_status") != "resolved"
+        or edge.get("safe_for_planner") is not True
+        or {str(edge.get("from_table") or ""), str(edge.get("to_table") or "")} != {base_table, joined_table}
+    ):
+        return DeterministicSqlPlan(
+            query_shape="joined_lookup",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["selected_join_path_not_authorized"],
+            route_reason="selected join path is not an authorized Relationship Graph edge",
+        )
+    for table_name, column_name in (
+        (str(edge.get("from_table") or ""), str(edge.get("from_column") or "")),
+        (str(edge.get("to_table") or ""), str(edge.get("to_column") or "")),
+    ):
+        if table_name not in knowledge_base or column_name not in {
+            str(column.get("name") or "")
+            for column in knowledge_base[table_name].get("columns", []) or []
+        }:
+            return DeterministicSqlPlan(
+                query_shape="joined_lookup",
+                status="cannot_plan_safely",
+                supported_now=True,
+                missing_evidence=["join_edge_not_in_schema"],
+                route_reason="selected join edge references an unknown schema column",
+            )
+
+    outputs = [
+        dict(entry) for entry in (query_context.get("selected_output_columns") or []) if isinstance(entry, dict)
+    ]
+    select_items: list[dict[str, Any]] = []
+    for output in outputs:
+        table_name = str(output.get("table") or "")
+        column_name = str(output.get("column") or "")
+        expression = str(output.get("expression") or "")
+        alias = str(output.get("alias") or "")
+        if (
+            table_name not in {base_table, joined_table}
+            or expression != f"{table_name}.{column_name}"
+            or alias != f"{table_name}__{column_name}"
+            or column_name not in {
+                str(column.get("name") or "")
+                for column in knowledge_base.get(table_name, {}).get("columns", []) or []
+            }
+        ):
+            return DeterministicSqlPlan(
+                query_shape="joined_lookup",
+                status="cannot_plan_safely",
+                supported_now=True,
+                missing_evidence=["selected_output_columns_invalid"],
+                route_reason="planner-selected joined output columns do not match schema evidence",
+            )
+        select_items.append({"expression": expression, "alias": alias, "kind": "column"})
+
+    where_clauses, where_conjunctions, filter_columns, filter_reason = _resolve_join_filter_clauses(
+        query_context,
+        knowledge_base,
+        {base_table, joined_table},
+    )
+    if filter_reason:
+        return DeterministicSqlPlan(
+            query_shape="joined_lookup",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=[filter_reason],
+            route_reason=filter_reason,
+        )
+    limit = query_context.get("limit")
+    return DeterministicSqlPlan(
+        query_shape="joined_lookup",
+        status="ready",
+        supported_now=True,
+        base_table=base_table,
+        joins=[{"table": joined_table, "edge": edge}],
+        required_joins=[edge],
+        selected_join_path=dict(selected_path),
+        selected_output_columns=outputs,
+        select_items=select_items,
+        where_clauses=where_clauses,
+        where_conjunctions=where_conjunctions,
+        filter_columns=filter_columns,
+        limit=limit,
+        required_evidence=list(capability.required_evidence),
+        evidence_sources=["query_context.selected_join_path", "relationship_graph", "knowledge_base.columns"],
+        sql_skeleton_type="joined_lookup",
+        can_render=True,
+        route_reason="joined lookup SQL generated from planner-selected Relationship Graph evidence",
+    )
+
+
 def _resolve_having_clauses(
     *,
     query_context: dict[str, Any],
@@ -1253,6 +1511,14 @@ def _render_plan_in_canonical_order(plan: DeterministicSqlPlan) -> str:
         alias = str(item.get("alias") or "").strip()
         select_parts.append(f"{expression} AS {alias}" if alias else expression)
     sql = f"SELECT {', '.join(select_parts)} FROM {plan.base_table}"
+    for join in plan.joins:
+        joined_table = str(join.get("table") or "")
+        edge = join.get("edge") if isinstance(join.get("edge"), dict) else {}
+        sql += (
+            f" INNER JOIN {joined_table} ON "
+            f"{edge.get('from_table')}.{edge.get('from_column')} = "
+            f"{edge.get('to_table')}.{edge.get('to_column')}"
+        )
     if plan.where_clauses:
         sql += f" WHERE {_render_predicates(plan.where_clauses, plan.where_conjunctions)}"
     if plan.group_by:
@@ -1279,6 +1545,7 @@ _PLAN_RENDERERS = {
     "filtered_query": _render_filtered_query,
     "grouped_aggregate": _render_grouped_aggregate,
     "ranking_query": _render_plan_in_canonical_order,
+    "joined_lookup": _render_plan_in_canonical_order,
 }
 
 

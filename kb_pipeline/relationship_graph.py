@@ -22,39 +22,71 @@ from kb_pipeline.schema_facts import (
 )
 
 
-def _persisted_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
-    relationships = real_foreign_key_relationships(schema_data)
-    seen = {
+def _canonical_edge_signature(relationship: dict[str, Any]) -> tuple[tuple[str, str], tuple[str, str]]:
+    endpoints = sorted(
         (
-            item.get("from_table"),
-            item.get("from_column"),
-            item.get("to_table"),
-            item.get("to_column"),
+            (str(relationship.get("from_table") or ""), str(relationship.get("from_column") or "")),
+            (str(relationship.get("to_table") or ""), str(relationship.get("to_column") or "")),
         )
-        for item in relationships
+    )
+    return endpoints[0], endpoints[1]
+
+
+def _relationship_priority(relationship: dict[str, Any]) -> tuple[int, int, float]:
+    is_fk = (
+        str(relationship.get("relationship_type") or "").lower() == "foreign_key"
+        and str(relationship.get("source") or "").lower() == "database_metadata"
+    )
+    direction_priority = 0 if relationship.get("direction") == "many-to-one" else 1
+    return (0 if is_fk else 1, direction_priority, -float(relationship.get("confidence") or 0.0))
+
+
+def _safe_persisted_relationship(relationship: dict[str, Any]) -> bool:
+    if relationship.get("safe_for_planner") is not True:
+        return False
+    is_fallback = bool(relationship.get("is_fallback") or relationship.get("is_inferred"))
+    if not is_fallback:
+        return (
+            str(relationship.get("relationship_type") or "").lower() == "foreign_key"
+            and str(relationship.get("source") or "").lower() == "database_metadata"
+        )
+    return bool(
+        float(relationship.get("confidence") or 0.0) >= FALLBACK_RELATIONSHIP_MIN_CONFIDENCE
+        and list(relationship.get("evidence") or [])
+        and list(relationship.get("evidence_reasons") or [])
+        and str(relationship.get("reason") or "").strip()
+    )
+
+
+def _persisted_relationships(schema_data: dict[str, Any]) -> list[dict[str, Any]]:
+    relationships_by_edge = {
+        _canonical_edge_signature(item): dict(item)
+        for item in real_foreign_key_relationships(schema_data)
     }
     for table_name, table_data in (schema_data or {}).items():
         for raw in table_data.get("relationships", []) or []:
-            if raw.get("direction") == "incoming" or raw.get("safe_for_planner") is False:
+            if raw.get("direction") == "incoming":
                 continue
             relationship = dict(raw)
             relationship.setdefault("from_table", table_name)
-            signature = (
-                relationship.get("from_table"),
-                relationship.get("from_column"),
-                relationship.get("to_table"),
-                relationship.get("to_column"),
+            endpoints = (
+                relationship.get("from_table"), relationship.get("from_column"),
+                relationship.get("to_table"), relationship.get("to_column"),
             )
-            if not all(signature) or signature in seen:
+            if not all(endpoints):
                 continue
             is_fallback = bool(relationship.get("is_fallback") or relationship.get("is_inferred"))
-            if is_fallback and float(relationship.get("confidence") or 0.0) < FALLBACK_RELATIONSHIP_MIN_CONFIDENCE:
-                continue
             relationship.setdefault("relationship_type", "inferred" if is_fallback else "foreign_key")
-            relationship.setdefault("safe_for_planner", True)
-            seen.add(signature)
-            relationships.append(relationship)
-    return relationships
+            if not _safe_persisted_relationship(relationship):
+                continue
+            signature = _canonical_edge_signature(relationship)
+            existing = relationships_by_edge.get(signature)
+            if existing is None or _relationship_priority(relationship) < _relationship_priority(existing):
+                relationships_by_edge[signature] = relationship
+    return sorted(
+        relationships_by_edge.values(),
+        key=lambda item: (_canonical_edge_signature(item), _relationship_priority(item)),
+    )
 
 
 def build_relationship_graph(
@@ -98,20 +130,27 @@ def build_relationship_graph(
             continue
         
         # Add forward edge (from_table -> to_table)
+        common_edge = {
+            "authoritative_from_table": from_table,
+            "authoritative_from_column": rel.get("from_column"),
+            "authoritative_to_table": to_table,
+            "authoritative_to_column": rel.get("to_column"),
+            "relationship_type": rel.get("relationship_type", "unknown"),
+            "confidence": rel.get("confidence", 0.5),
+            "source": rel.get("source", "unknown"),
+            "reason": rel.get("reason", ""),
+            "evidence": list(rel.get("evidence", []) or []),
+            "evidence_reasons": list(rel.get("evidence_reasons", []) or []),
+            "safe_for_planner": bool(rel.get("safe_for_planner", False)),
+            "is_inferred": bool(rel.get("is_inferred", False)),
+            "is_fallback": bool(rel.get("is_fallback", False)),
+        }
         graph[from_table]["edges"].append({
             "to_table": to_table,
             "from_column": rel.get("from_column"),
             "to_column": rel.get("to_column"),
             "direction": rel.get("direction"),
-            "confidence": rel.get("confidence", 0.5),
-            "source": rel.get("source", "unknown"),
-            "reason": rel.get("reason", ""),
-            "relationship_type": rel.get("relationship_type", "unknown"),
-            "evidence": list(rel.get("evidence", []) or []),
-            "evidence_reasons": list(rel.get("evidence_reasons", []) or []),
-            "safe_for_planner": bool(rel.get("safe_for_planner", True)),
-            "is_inferred": bool(rel.get("is_inferred", False)),
-            "is_fallback": bool(rel.get("is_fallback", False)),
+            **common_edge,
         })
         
         # Add reverse edge (to_table -> from_table) for bidirectional traversal
@@ -120,18 +159,47 @@ def build_relationship_graph(
             "from_column": rel.get("to_column"),
             "to_column": rel.get("from_column"),
             "direction": "one-to-many" if rel.get("direction") == "many-to-one" else "many-to-one",
-            "confidence": rel.get("confidence", 0.5),
-            "source": rel.get("source", "unknown"),
-            "reason": rel.get("reason", ""),
-            "relationship_type": rel.get("relationship_type", "unknown"),
-            "evidence": list(rel.get("evidence", []) or []),
-            "evidence_reasons": list(rel.get("evidence_reasons", []) or []),
-            "safe_for_planner": bool(rel.get("safe_for_planner", True)),
-            "is_inferred": bool(rel.get("is_inferred", False)),
-            "is_fallback": bool(rel.get("is_fallback", False)),
+            **common_edge,
         })
     
     return graph
+
+
+def find_safe_direct_join_relationships(
+    graph: dict[str, dict[str, Any]],
+    first_table: str,
+    second_table: str,
+) -> list[dict[str, Any]]:
+    """Return unique safe direct edges using persisted graph evidence only."""
+    candidates: dict[tuple[tuple[str, str], tuple[str, str]], dict[str, Any]] = {}
+    for edge in graph.get(first_table, {}).get("edges", []):
+        if str(edge.get("to_table") or "") != second_table:
+            continue
+        relationship = {
+            "from_table": edge.get("authoritative_from_table") or first_table,
+            "from_column": edge.get("authoritative_from_column") or edge.get("from_column"),
+            "to_table": edge.get("authoritative_to_table") or second_table,
+            "to_column": edge.get("authoritative_to_column") or edge.get("to_column"),
+            "relationship_type": edge.get("relationship_type"),
+            "source": edge.get("source"),
+            "confidence": float(edge.get("confidence") or 0.0),
+            "safe_for_planner": edge.get("safe_for_planner") is True,
+            "evidence": list(edge.get("evidence") or []),
+            "evidence_reasons": list(edge.get("evidence_reasons") or []),
+            "reason": str(edge.get("reason") or ""),
+            "is_inferred": bool(edge.get("is_inferred")),
+            "is_fallback": bool(edge.get("is_fallback")),
+        }
+        if not all(
+            relationship.get(key)
+            for key in ("from_table", "from_column", "to_table", "to_column")
+        ) or not _safe_persisted_relationship(relationship):
+            continue
+        signature = _canonical_edge_signature(relationship)
+        existing = candidates.get(signature)
+        if existing is None or _relationship_priority(relationship) < _relationship_priority(existing):
+            candidates[signature] = relationship
+    return sorted(candidates.values(), key=lambda item: (_relationship_priority(item), _canonical_edge_signature(item)))
 
 
 def find_shortest_join_path(

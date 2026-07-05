@@ -1686,14 +1686,22 @@ class QuestionService:
                 _set_route(query_context, "cannot_plan_safely", deterministic_aggregate.reason)
                 return False, _deterministic_aggregate_failure_message(query_context, deterministic_aggregate.reason), None, None
 
-        if query_shape in {"filtered_query", "grouped_aggregate", "ranking_query"}:
+        if query_shape in {"filtered_query", "grouped_aggregate", "ranking_query", "joined_lookup"}:
             deterministic_result = generate_deterministic_sql(
                 query_context=query_context,
                 knowledge_base=knowledge_base,
             )
             if deterministic_result.status == "generated" and deterministic_result.sql:
                 safety_ok, safety_reason = validate_sql(deterministic_result.sql)
-                struct_ok, struct_reason = validate_sql_structure(deterministic_result.sql, knowledge_base)
+                struct_ok, struct_reason = validate_sql_structure(
+                    deterministic_result.sql,
+                    knowledge_base,
+                    selected_join_path=(
+                        query_context.get("selected_join_path")
+                        if query_shape == "joined_lookup"
+                        else None
+                    ),
+                )
                 if safety_ok and struct_ok:
                     clause_shape = str(
                         deterministic_result.plan.clause_shape
@@ -1734,10 +1742,7 @@ class QuestionService:
             )
             return False, _planning_block_message(query_context, "cannot_plan_safely"), None, None
 
-        if query_shape in {
-            "joined_lookup",
-            "formula_query",
-        }:
+        if query_shape == "formula_query":
             _set_route(
                 query_context,
                 "deterministic_sql_required",

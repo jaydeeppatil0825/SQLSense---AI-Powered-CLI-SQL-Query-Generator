@@ -10,6 +10,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from kb_pipeline.relationship_graph import (
+    build_relationship_graph,
+    find_safe_direct_join_relationships,
+)
+
 # Forbidden DML/DDL keywords that must never appear in a safe SELECT query.
 _FORBIDDEN_KEYWORDS = [
     "DROP",
@@ -323,10 +328,9 @@ def _validate_join_conditions(sql: str) -> tuple[bool, str]:
             idx += 1
             continue
 
-        requires_condition = True
         prev_upper = tokens[idx - 1].upper() if idx > 0 else ""
         if prev_upper in {"CROSS", "NATURAL"}:
-            requires_condition = False
+            return False, f"{prev_upper} JOIN is not allowed."
 
         cursor = idx + 1
         while cursor < len(tokens) and tokens[cursor] not in clause_boundaries and tokens[cursor].upper() not in {"JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "NATURAL"}:
@@ -334,14 +338,12 @@ def _validate_join_conditions(sql: str) -> tuple[bool, str]:
                 break
             cursor += 1
 
-        if not requires_condition:
-            idx += 1
-            continue
-
         if cursor >= len(tokens) or tokens[cursor].upper() not in {"ON", "USING"}:
             return False, "SQL has a JOIN without an ON or USING condition."
 
         condition_keyword = tokens[cursor].upper()
+        if condition_keyword == "USING":
+            return False, "JOIN USING is not allowed; an explicit graph-backed ON condition is required."
         cursor += 1
         if cursor >= len(tokens) or tokens[cursor].upper() in clause_boundaries or tokens[cursor] in {",", ";", ")"}:
             return False, f"SQL has an incomplete {condition_keyword} clause in a JOIN."
@@ -468,6 +470,105 @@ def _validate_join_predicates(
         idx = condition_end
 
     return True, "JOIN predicates are valid."
+
+
+def _canonical_join_edge(
+    left_table: str,
+    left_column: str,
+    right_table: str,
+    right_column: str,
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    endpoints = sorted(
+        (
+            (str(left_table), str(left_column)),
+            (str(right_table), str(right_column)),
+        )
+    )
+    return endpoints[0], endpoints[1]
+
+
+def _relationship_signature(edge: dict[str, Any]) -> tuple[tuple[str, str], tuple[str, str]]:
+    return _canonical_join_edge(
+        str(edge.get("from_table") or ""),
+        str(edge.get("from_column") or ""),
+        str(edge.get("to_table") or ""),
+        str(edge.get("to_column") or ""),
+    )
+
+
+def _validate_join_relationship_evidence(
+    sql: str,
+    knowledge_base: dict[str, Any],
+    referenced_tables: list[str],
+    alias_to_table: dict[str, str],
+    selected_join_path: dict[str, Any] | None,
+) -> tuple[bool, str]:
+    join_count = len(re.findall(r"\bJOIN\b", sql, re.IGNORECASE))
+    from_match = re.search(
+        r"\bFROM\b\s+(.*?)(?=\bWHERE\b|\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|;|$)",
+        _strip_string_literals(sql),
+        re.IGNORECASE | re.DOTALL,
+    )
+    if from_match and "," in from_match.group(1):
+        return False, "Comma joins are not allowed."
+    if join_count == 0:
+        if selected_join_path:
+            return False, "Planner selected a join path but SQL contains no JOIN."
+        return True, "No JOIN relationship validation is required."
+    if join_count != 1 or len(set(referenced_tables)) != 2:
+        return False, "Phase 5 permits exactly two tables and one direct INNER JOIN."
+    if re.search(r"\b(?:CROSS|NATURAL|LEFT|RIGHT|FULL|OUTER)\s+(?:OUTER\s+)?JOIN\b", sql, re.IGNORECASE):
+        return False, "Only INNER JOIN is allowed for deterministic joined lookups."
+    if re.search(r"\bJOIN\b.*?\bUSING\b", sql, re.IGNORECASE | re.DOTALL):
+        return False, "JOIN USING is not allowed; an explicit graph-backed ON condition is required."
+
+    on_match = re.search(
+        r"\bON\s+(.+?)(?=\bWHERE\b|\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|;|$)",
+        _strip_string_literals(sql),
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not on_match:
+        return False, "JOIN is missing an ON condition."
+    condition = on_match.group(1).strip()
+    equality = re.fullmatch(
+        r"(`?[A-Za-z_][A-Za-z0-9_]*`?)\s*\.\s*(`?[A-Za-z_][A-Za-z0-9_]*`?)"
+        r"\s*=\s*"
+        r"(`?[A-Za-z_][A-Za-z0-9_]*`?)\s*\.\s*(`?[A-Za-z_][A-Za-z0-9_]*`?)",
+        condition,
+    )
+    if not equality:
+        return False, "JOIN ON must be exactly one qualified column equality from Relationship Graph evidence."
+    left_alias, left_column, right_alias, right_column = (
+        _normalize_identifier(value) for value in equality.groups()
+    )
+    left_table = alias_to_table.get(left_alias.lower())
+    right_table = alias_to_table.get(right_alias.lower())
+    if not left_table or not right_table:
+        return False, "JOIN ON references an unknown table alias."
+    sql_signature = _canonical_join_edge(left_table, left_column, right_table, right_column)
+
+    first_table, second_table = list(dict.fromkeys(referenced_tables))
+    graph = build_relationship_graph(knowledge_base, infer_relationships=False)
+    graph_edges = find_safe_direct_join_relationships(graph, first_table, second_table)
+    if len(graph_edges) != 1:
+        return False, "Relationship Graph does not expose one unambiguous safe direct edge for this JOIN."
+    if sql_signature != _relationship_signature(graph_edges[0]):
+        return False, "JOIN ON condition does not match Relationship Graph evidence."
+
+    if selected_join_path is not None:
+        if (
+            selected_join_path.get("path_source") != "relationship_graph"
+            or selected_join_path.get("ambiguity_status") != "resolved"
+            or set(selected_join_path.get("joined_tables") or []) | {str(selected_join_path.get("base_table") or "")}
+            != set(referenced_tables)
+        ):
+            return False, "Planner-selected join path does not match SQL table scope."
+        selected_edges = [
+            edge for edge in (selected_join_path.get("edges") or []) if isinstance(edge, dict)
+        ]
+        if len(selected_edges) != 1 or sql_signature != _relationship_signature(selected_edges[0]):
+            return False, "JOIN ON condition does not match selected_join_path evidence."
+    return True, "JOIN matches persisted Relationship Graph evidence."
 
 
 def _validate_qualified_columns(sql: str, knowledge_base: dict[str, Any], alias_to_table: dict[str, str]) -> tuple[bool, str]:
@@ -1038,7 +1139,11 @@ def extract_requested_limit(text: str) -> int | None:
     return int(match.group(1) or match.group(2))
 
 
-def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
+def validate_sql_structure(
+    sql: str,
+    knowledge_base: dict,
+    selected_join_path: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
     """
     Validate that an AI-generated SQL string has a correct executable structure.
 
@@ -1126,6 +1231,16 @@ def validate_sql_structure(sql: str, knowledge_base: dict) -> tuple[bool, str]:
         predicate_ok, predicate_reason = _validate_join_predicates(stripped, knowledge_base, alias_to_table)
         if not predicate_ok:
             return False, predicate_reason
+
+        relationship_ok, relationship_reason = _validate_join_relationship_evidence(
+            stripped,
+            knowledge_base,
+            referenced_tables,
+            alias_to_table,
+            selected_join_path,
+        )
+        if not relationship_ok:
+            return False, relationship_reason
 
         if re.search(r"\bSELECT\s+(?:\w+\.)?\*", stripped, re.IGNORECASE):
             for table_name in referenced_tables:

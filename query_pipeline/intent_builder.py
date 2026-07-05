@@ -156,6 +156,7 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
     ambiguous_phrases: list[str] = []
     unsupported_constructs: list[str] = []
     ranking_diagnostics = dict(normalized.get("ranking_diagnostics") or {})
+    join_lookup_request = dict(normalized.get("join_lookup_request") or {})
     if normalized.get("requested_sort") and not ranking_diagnostics.get("requested"):
         ranking_diagnostics = {
             "requested": True,
@@ -189,7 +190,11 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
         confidence_reasons.append("explicit_source_scope")
 
     if not normalized.get("unsafe"):
-        if intent_type in {"list", "count", "sorted_list"} and not normalized.get("target_entity_phrase"):
+        if (
+            intent_type in {"list", "count", "sorted_list"}
+            and not normalized.get("target_entity_phrase")
+            and not join_lookup_request.get("requested")
+        ):
             missing_phrases.append("target_entity_phrase")
         if (
             intent_type in {"aggregate", "ranking", "grouped_summary"}
@@ -244,6 +249,16 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
         "limit_source": ranking_diagnostics.get("limit_source") or "not_requested",
         "issues": _merge_unique(ranking_diagnostics.get("issues") or []),
     }
+    normalized["join_lookup_request"] = {
+        "requested": bool(join_lookup_request.get("requested")),
+        "base_entity_phrase": _clean_scalar(join_lookup_request.get("base_entity_phrase")),
+        "related_request_phrase": _clean_scalar(join_lookup_request.get("related_request_phrase")),
+        "requested_output_fields": _clean_list(join_lookup_request.get("requested_output_fields")),
+        "projection_mode": _clean_scalar(join_lookup_request.get("projection_mode")),
+    }
+    normalized["requested_output_fields"] = list(
+        normalized["join_lookup_request"]["requested_output_fields"]
+    )
     normalized["source"] = "deterministic"
     return normalized
 
@@ -330,6 +345,8 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
             "grouping_phrase": "",
             "ranking_phrase": "",
             "limit_phrase": "",
+            "join_lookup_request": _empty_join_lookup_request(),
+            "requested_output_fields": [],
             "source": "fallback",
         }
 
@@ -363,6 +380,7 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     body_without_sort = re.sub(r"\b(?:sort(?:ed)?|order(?:ed)?)\s+by\s+.+$", "", body_without_latest, flags=re.IGNORECASE).strip()
     body_without_filters = _remove_filter_clauses(body_without_sort)
     body_without_scope = _remove_source_scope(body_without_filters)
+    join_lookup_request = _extract_join_lookup_request(body_without_scope)
 
     if _COUNT_RE.search(body):
         intent_type = "count"
@@ -385,6 +403,17 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         business_operation = "sort"
     elif requested_filters:
         intent_type = "filter"
+
+    if (
+        join_lookup_request.get("projection_mode") == "explicit_fields_only"
+        and intent_type != "list"
+    ):
+        join_lookup_request = _empty_join_lookup_request()
+    elif (
+        join_lookup_request.get("projection_mode") == "explicit_fields_only"
+        and source_scope
+    ):
+        join_lookup_request["base_entity_phrase"] = source_scope[0]
 
     if ranking_request:
         limit = int(ranking_request["limit"])
@@ -491,6 +520,8 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         or (requested_metrics and aggregate_function)
     )
     needs_join = "likely" if needs_grouping and requested_metrics and requested_dimensions else False
+    if join_lookup_request["requested"]:
+        needs_join = True
 
     raw_business_terms = _extract_raw_business_terms(
         normalized_question,
@@ -499,6 +530,12 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         requested_filters=requested_filters,
         requested_sort=requested_sort,
         source_scope=source_scope,
+    )
+    raw_business_terms = _merge_unique(
+        raw_business_terms,
+        join_lookup_request.get("base_entity_phrase"),
+        join_lookup_request.get("related_request_phrase"),
+        join_lookup_request.get("requested_output_fields") or [],
     )
 
     user_goal = _build_user_goal(
@@ -533,6 +570,8 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     )
     if ranking_request:
         target_entity_phrase = str(ranking_request["entity_phrase"])
+    elif join_lookup_request["requested"]:
+        target_entity_phrase = str(join_lookup_request.get("base_entity_phrase") or "")
     metric_phrase = requested_metrics[0] if requested_metrics else ""
     grouping_phrase = requested_dimensions[0] if intent_type in {"grouped_summary", "ranking"} and requested_dimensions else ""
     ranking_phrase = ""
@@ -576,6 +615,8 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         "ranking_phrase": ranking_phrase,
         "limit_phrase": limit_phrase,
         "ranking_diagnostics": ranking_diagnostics,
+        "join_lookup_request": join_lookup_request,
+        "requested_output_fields": list(join_lookup_request.get("requested_output_fields") or []),
         "source": "fallback",
     }, normalized_question)
 
@@ -865,6 +906,59 @@ def _extract_ranking_request(question: str) -> dict[str, Any]:
         "limit": explicit_limit if explicit_limit is not None else 50,
         "limit_source": "explicit" if explicit_limit is not None else "default_top_n",
     }
+
+
+def _empty_join_lookup_request() -> dict[str, Any]:
+    return {
+        "requested": False,
+        "base_entity_phrase": "",
+        "related_request_phrase": "",
+        "requested_output_fields": [],
+        "projection_mode": "",
+    }
+
+
+def _extract_join_lookup_request(body: str) -> dict[str, Any]:
+    """Parse schema-agnostic two-table lookup wording without resolving schema."""
+    cleaned = _cleanup_phrase(body)
+    if not cleaned:
+        return _empty_join_lookup_request()
+
+    with_match = re.search(r"\s+with\s+(.+)$", cleaned, re.IGNORECASE)
+    if with_match:
+        base_phrase = _cleanup_phrase(cleaned[: with_match.start()])
+        related_phrase = _cleanup_phrase(with_match.group(1))
+        if not base_phrase or not related_phrase:
+            return _empty_join_lookup_request()
+        broad_related = bool(
+            re.match(r"^their\s+", related_phrase, re.IGNORECASE)
+            or re.search(r"\b(?:detail|details)$", related_phrase, re.IGNORECASE)
+        )
+        normalized_related = re.sub(r"^their\s+", "", related_phrase, flags=re.IGNORECASE)
+        normalized_related = re.sub(r"\s+(?:detail|details)$", "", normalized_related, flags=re.IGNORECASE)
+        normalized_related = _cleanup_phrase(normalized_related)
+        return {
+            "requested": True,
+            "base_entity_phrase": base_phrase,
+            "related_request_phrase": normalized_related or related_phrase,
+            "requested_output_fields": [] if broad_related else [related_phrase],
+            "projection_mode": "broad_related" if broad_related else "base_plus_related_fields",
+        }
+
+    parts = [
+        _cleanup_phrase(part)
+        for part in re.split(r"\s+and\s+", cleaned, flags=re.IGNORECASE)
+        if _cleanup_phrase(part)
+    ]
+    if len(parts) >= 2:
+        return {
+            "requested": True,
+            "base_entity_phrase": "",
+            "related_request_phrase": "",
+            "requested_output_fields": parts,
+            "projection_mode": "explicit_fields_only",
+        }
+    return _empty_join_lookup_request()
 
 
 def _extract_requested_sort(question: str) -> dict[str, str]:

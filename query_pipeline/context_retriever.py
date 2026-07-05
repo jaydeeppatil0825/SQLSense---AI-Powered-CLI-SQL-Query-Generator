@@ -65,11 +65,18 @@ def retrieve_context(
         for entry in structured_filters
         if str(entry.get("field_phrase") or entry.get("field") or "").strip()
     ] or list(intent.get("requested_filters") or [])
+    join_lookup_request = dict(intent.get("join_lookup_request") or {})
+    requested_output_terms = [
+        str(value).strip()
+        for value in (join_lookup_request.get("requested_output_fields") or intent.get("requested_output_fields") or [])
+        if str(value).strip()
+    ]
+    supplemental_column_queries = _unique([*requested_filter_terms, *requested_output_terms])
     vector_context = _normalized_vector_context(
         normalized_question,
         vector_retriever,
         require_normalized=require_normalized_vector_evidence,
-        supplemental_column_queries=requested_filter_terms if structured_filters else [],
+        supplemental_column_queries=supplemental_column_queries,
     )
     use_vector_only = bool(vector_context.get("normalized_package_used"))
 
@@ -81,6 +88,11 @@ def retrieve_context(
         if structured_filters
         else []
     )
+    schema_output_matches = (
+        _match_filter_field_columns(requested_output_terms, knowledge_base)
+        if requested_output_terms
+        else []
+    )
     for entry in schema_filter_matches:
         entry["evidence_sources"] = _unique(
             [*(entry.get("evidence_sources") or []), "structured_filter_schema_identifier"]
@@ -89,6 +101,7 @@ def retrieve_context(
         _merge_column_candidates(
             vector_context.get("matched_columns", []),
             schema_filter_matches,
+            schema_output_matches,
         )
         if use_vector_only
         else _match_columns(query_terms, knowledge_base)
@@ -425,7 +438,14 @@ def _score_match(term: str, *texts: str) -> tuple[float, list[str]]:
 
 def _query_terms(normalized_question: str, intent: Dict[str, Any]) -> list[str]:
     terms = []
-    for key in ("raw_business_terms", "requested_metrics", "requested_dimensions", "requested_filters", "source_scope"):
+    for key in (
+        "raw_business_terms",
+        "requested_metrics",
+        "requested_dimensions",
+        "requested_filters",
+        "requested_output_fields",
+        "source_scope",
+    ):
         values = intent.get(key) or []
         if isinstance(values, str):
             values = [values]
@@ -433,6 +453,11 @@ def _query_terms(normalized_question: str, intent: Dict[str, Any]) -> list[str]:
             cleaned = _humanize(value)
             if cleaned:
                 terms.append(cleaned)
+    join_lookup_request = dict(intent.get("join_lookup_request") or {})
+    for key in ("base_entity_phrase", "related_request_phrase"):
+        cleaned = _humanize(join_lookup_request.get(key))
+        if cleaned:
+            terms.append(cleaned)
     if not terms:
         terms.append(_humanize(normalized_question))
     return _unique(terms)

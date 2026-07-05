@@ -285,6 +285,7 @@ def _filtered_context(
         },
         "selected_tables": [{"table": "bills", "confidence": 0.9}],
         "selected_table_names": ["bills"],
+        "limit": 50 if aggregate_function is None else None,
         "selected_filters": [selected_filter],
         "selected_knowledge_base": _bills_kb(),
         "join_paths": [],

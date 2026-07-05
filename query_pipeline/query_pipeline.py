@@ -197,6 +197,8 @@ class QueryPipeline:
                 "selected_table_names": [],
                 "selected_columns": [],
                 "selected_tables": [],
+                "selected_join_path": None,
+                "selected_output_columns": [],
                 "metric_candidates": [],
                 "dimension_candidates": [],
                 "filter_candidates": [],
