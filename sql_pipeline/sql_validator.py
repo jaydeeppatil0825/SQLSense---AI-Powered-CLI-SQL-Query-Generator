@@ -225,6 +225,15 @@ def _strip_string_literals(sql: str) -> str:
     return re.sub(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"", "''", sql)
 
 
+def _mask_quoted_identifier_keywords(sql: str) -> str:
+    """Mask backtick contents while preserving offsets for clause parsing."""
+    return re.sub(
+        r"`(?:``|[^`])+`",
+        lambda match: "`" + ("q" * max(len(match.group(0)) - 2, 0)) + "`",
+        str(sql or ""),
+    )
+
+
 def _is_identifier(token: str) -> bool:
     normalized = _normalize_identifier(token)
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized))
@@ -607,11 +616,12 @@ def _validate_single_table_columns(sql: str, knowledge_base: dict[str, Any], ref
     if not known_columns:
         return True, "No column metadata available."
 
-    select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", sql, re.IGNORECASE | re.DOTALL)
+    clause_mask = _mask_quoted_identifier_keywords(sql)
+    select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", clause_mask, re.IGNORECASE | re.DOTALL)
     if not select_match:
         return True, "No SELECT list found."
 
-    select_segment = _strip_string_literals(select_match.group(1))
+    select_segment = _strip_string_literals(sql[select_match.start(1):select_match.end(1)])
     alias_tokens = {
         match.group(1).lower()
         for match in re.finditer(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\b", select_segment, re.IGNORECASE)
@@ -643,7 +653,7 @@ def _validate_single_table_columns(sql: str, knowledge_base: dict[str, Any], ref
 
 
 def _column_owner_matches(identifier: str, knowledge_base: dict[str, Any], referenced_tables: list[str]) -> list[str]:
-    identifier_lower = str(identifier or "").lower()
+    identifier_lower = _normalize_identifier(str(identifier or "")).lower()
     matches = []
     for table_name in referenced_tables:
         known_columns = {
@@ -665,6 +675,7 @@ def _collect_select_aliases(select_segment: str) -> set[str]:
 
 def _extract_clause_segments(sql: str) -> list[tuple[str, str]]:
     segments: list[tuple[str, str]] = []
+    clause_mask = _mask_quoted_identifier_keywords(sql)
     patterns = [
         ("SELECT", r"\bSELECT\s+(.*?)\bFROM\b"),
         ("WHERE", r"\bWHERE\s+(.*?)(?=\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|\bUNION\b|;|$)"),
@@ -673,9 +684,9 @@ def _extract_clause_segments(sql: str) -> list[tuple[str, str]]:
         ("ORDER BY", r"\bORDER\s+BY\s+(.*?)(?=\bLIMIT\b|\bUNION\b|;|$)"),
     ]
     for label, pattern in patterns:
-        match = re.search(pattern, sql, re.IGNORECASE | re.DOTALL)
+        match = re.search(pattern, clause_mask, re.IGNORECASE | re.DOTALL)
         if match:
-            segments.append((label, match.group(1)))
+            segments.append((label, sql[match.start(1):match.end(1)]))
     return segments
 
 
@@ -690,8 +701,10 @@ def _validate_unqualified_columns(
         return True, "No referenced tables to validate."
 
     masked_sql = _strip_string_literals(sql)
-    select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", masked_sql, re.IGNORECASE | re.DOTALL)
-    output_aliases = _collect_select_aliases(select_match.group(1) if select_match else "")
+    clause_mask = _mask_quoted_identifier_keywords(masked_sql)
+    select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", clause_mask, re.IGNORECASE | re.DOTALL)
+    select_segment = masked_sql[select_match.start(1):select_match.end(1)] if select_match else ""
+    output_aliases = _collect_select_aliases(select_segment)
     table_aliases = set(alias_to_table.keys())
     table_names = {table.lower() for table in referenced_tables}
 
@@ -727,10 +740,11 @@ def _validate_unqualified_columns(
 
 
 def _validate_select_list(sql: str) -> tuple[bool, str]:
-    match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", sql, re.IGNORECASE | re.DOTALL)
+    clause_mask = _mask_quoted_identifier_keywords(sql)
+    match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", clause_mask, re.IGNORECASE | re.DOTALL)
     if not match:
         return False, "SQL SELECT list is missing or incomplete."
-    select_segment = match.group(1).strip()
+    select_segment = sql[match.start(1):match.end(1)].strip()
     if not select_segment:
         return False, "SQL SELECT list is empty."
     if select_segment.endswith(","):
@@ -873,7 +887,7 @@ def _validate_aggregate_clause_placement(sql: str) -> tuple[bool, str]:
 
 
 def _validate_clause_order_and_limit(sql: str) -> tuple[bool, str]:
-    masked = _strip_string_literals(sql)
+    masked = _mask_quoted_identifier_keywords(_strip_string_literals(sql))
     clause_patterns = [
         ("SELECT", r"\bSELECT\b"),
         ("FROM", r"\bFROM\b"),

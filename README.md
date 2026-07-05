@@ -513,6 +513,36 @@ Set `DEBUG_MODE=true` in `.env` for verbose debug logging. Passwords and API key
 
 ---
 
+## Complete Runtime Verification
+
+The deterministic runtime can be checked end-to-end against a controlled local
+MySQL database. The verifier rebuilds the KB and Chroma evidence without AI,
+runs all 53 supported and fail-closed questions, validates generated SQL,
+executes safe SQL with executor revalidation, and checks results against direct
+SQL test oracles.
+
+PowerShell:
+
+```powershell
+$env:DB_HOST="localhost"
+$env:DB_PORT="3306"
+$env:DB_USER="root"
+$env:DB_PASSWORD="<local-password>"
+$env:SQLSENSE_TEST_DB="sqlsense_all_types_lab"
+python scripts\verify_all_question_types.py --setup
+```
+
+`DB_PASSWORD` is read only from the environment and is never printed. The
+`--setup` option drops and recreates only `SQLSENSE_TEST_DB`; omit it to verify
+an existing fixture. Generated KB, glossary, Chroma, and vector assets are kept
+in a temporary directory so project metadata is not overwritten.
+
+After the live verifier passes, run the full regression suite:
+
+```powershell
+python -m pytest -v --basetemp=temp_pytest_full
+```
+
 ## Future Improvements
 
 - Deterministic complex SQL generation (joins, aggregations, business reasoning)

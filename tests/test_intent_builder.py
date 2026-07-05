@@ -351,3 +351,18 @@ def test_parse_diagnostics_reports_missing_metric_phrase():
     assert intent["parse_diagnostics"]["missing_phrases"] == intent["missing_phrases"]
     assert intent["parse_diagnostics"]["has_issues"] is True
 
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "show customer name with sum received amount greater than 10000 from service invoices",
+        "show customer name with count greater than 2 from service invoices",
+    ],
+)
+def test_aggregate_condition_with_is_not_treated_as_join_lookup(question):
+    intent = build_intent(question)
+
+    assert intent["join_lookup_request"]["requested"] is False
+    assert intent["intent_type"] == "grouped_summary"
+    assert intent["structured_having"]
+

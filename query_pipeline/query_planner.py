@@ -265,6 +265,12 @@ def _detect_intent(question: str) -> str:
         return "comparison"
     if re.search(r"\b(trend|monthly|by month|per month|by date|over time)\b", normalized):
         return "trend"
+    if (
+        re.search(r"\b(highest|maximum|max|lowest|minimum|min)\b", normalized)
+        and not re.search(r"\b(?:highest|lowest)\s+\d+\b", normalized)
+        and " by " not in normalized
+    ):
+        return "aggregate"
     if re.search(r"\b(highest|largest|lowest|smallest|most|least)\b", normalized):
         return "top_n"
     if re.search(r"\btop\s+\d+\b", normalized):
@@ -1648,17 +1654,23 @@ def _filter_field_match_score(entry: dict[str, Any], clause: dict[str, Any]) -> 
     if not field_phrase:
         return float(entry.get("score") or 0.0)
     normalized_field = _normalize(field_phrase)
-    field_tokens = set(_tokenize(field_phrase))
+    field_tokens = {_singularize_token(token) for token in _tokenize(field_phrase)}
     column_text = str(entry.get("column") or "").replace("_", " ")
     normalized_column = _normalize(column_text)
-    column_tokens = set(_tokenize(column_text))
+    column_tokens = {_singularize_token(token) for token in _tokenize(column_text)}
+    qualified_tokens = {
+        _singularize_token(token)
+        for token in _tokenize(f"{entry.get('table') or ''} {column_text}")
+    }
     lexical_score = 0.0
     if normalized_column == normalized_field:
         lexical_score = 1.0
     elif field_tokens and field_tokens <= column_tokens:
         lexical_score = 0.9
+    elif field_tokens and field_tokens <= qualified_tokens:
+        lexical_score = 0.88
     elif field_tokens:
-        lexical_score = (len(field_tokens & column_tokens) / len(field_tokens)) * 0.7
+        lexical_score = (len(field_tokens & qualified_tokens) / len(field_tokens)) * 0.7
 
     for text in [str(value) for value in (entry.get("matched_terms") or [])]:
         normalized_text = _normalize(text)
@@ -1697,6 +1709,72 @@ def _has_structured_filter_ambiguity(
         if len(ranked) >= 2 and abs(ranked[0][0] - ranked[1][0]) < 0.08:
             return True
     return False
+
+
+def _role_candidate_match_score(phrase: str, entry: dict[str, Any]) -> float:
+    phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
+    column_name = str(entry.get("column") or "")
+    column_tokens = {_singularize_token(token) for token in _tokenize(column_name)}
+    qualified_tokens = {
+        _singularize_token(token)
+        for token in _tokenize(f"{entry.get('table') or ''} {column_name}")
+    }
+    if not phrase_tokens or not column_tokens:
+        return 0.0
+    if phrase_tokens == qualified_tokens:
+        lexical_score = 1.0
+    elif phrase_tokens == column_tokens:
+        lexical_score = 0.98
+    elif phrase_tokens <= column_tokens:
+        lexical_score = 0.9
+    elif phrase_tokens <= qualified_tokens:
+        lexical_score = 0.86
+    else:
+        lexical_score = (len(phrase_tokens & qualified_tokens) / len(phrase_tokens)) * 0.6
+    for term in entry.get("matched_terms") or []:
+        term_tokens = {_singularize_token(token) for token in _tokenize(str(term))}
+        if term_tokens == phrase_tokens:
+            lexical_score = max(lexical_score, 0.94)
+        elif phrase_tokens <= term_tokens:
+            lexical_score = max(lexical_score, 0.82)
+    return round(lexical_score, 4)
+
+
+def _resolve_role_candidate(
+    phrase: str,
+    candidates: list[dict[str, Any]],
+    *,
+    allowed_tables: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in candidates or []:
+        table_name = str(candidate.get("table") or "").strip()
+        column_name = str(candidate.get("column") or "").strip()
+        signature = (table_name, column_name)
+        if not all(signature) or signature in seen:
+            continue
+        if allowed_tables is not None and table_name not in allowed_tables:
+            continue
+        seen.add(signature)
+        score = _role_candidate_match_score(phrase, candidate)
+        if score > 0:
+            ranked.append((score, dict(candidate)))
+    ranked.sort(
+        key=lambda item: (
+            -item[0],
+            -float(item[1].get("score") or 0.0),
+            str(item[1].get("table") or ""),
+            str(item[1].get("column") or ""),
+        )
+    )
+    if not ranked or ranked[0][0] < 0.7:
+        return [], "missing"
+    if len(ranked) > 1:
+        exact_schema_match = ranked[0][0] >= 0.98 and ranked[1][0] < 0.98
+        if not exact_schema_match and abs(ranked[0][0] - ranked[1][0]) < 0.08:
+            return [], "ambiguous"
+    return [ranked[0][1]], "resolved"
 
 
 def _merge_candidate_columns(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2270,11 +2348,9 @@ def _column_phrase_score(
             if _tokenize(text)
         ]
         if any(tokens == phrase_tokens for tokens in candidate_token_sets):
-            score = max(score, 0.96)
-            score = max(score, min(float(candidate.get("score") or 0.0), 0.88))
+            score = max(score, 0.78)
         elif any(phrase_tokens <= tokens for tokens in candidate_token_sets):
-            score = max(score, 0.82)
-            score = max(score, min(float(candidate.get("score") or 0.0), 0.8))
+            score = max(score, 0.72)
     return round(score, 4)
 
 
@@ -2282,9 +2358,12 @@ def _resolve_join_output_field(
     phrase: str,
     knowledge_base: dict[str, Any],
     retrieved_candidates: list[dict[str, Any]],
+    allowed_tables: set[str] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     ranked = []
     for table_name, table_data in knowledge_base.items():
+        if allowed_tables is not None and table_name not in allowed_tables:
+            continue
         for column in table_data.get("columns", []) or []:
             column_name = str(column.get("name") or "")
             if not column_name:
@@ -2389,10 +2468,22 @@ def _apply_join_lookup_contract(
             resolved_nodes=resolved_nodes | {"table_scope", "requested_fields", "join_need"},
         )
 
+    projection_mode = str(lookup.get("projection_mode") or "")
     requested_fields = list(lookup.get("requested_output_fields") or [])
     resolved_fields: list[dict[str, Any]] = []
     for phrase in requested_fields:
-        field, field_status = _resolve_join_output_field(str(phrase), knowledge_base, retrieved_columns)
+        field_table, field_table_status = _resolve_join_table(
+            str(phrase),
+            knowledge_base,
+            [],
+        )
+        allowed_tables = {field_table} if field_table_status == "resolved" and field_table else None
+        field, field_status = _resolve_join_output_field(
+            str(phrase),
+            knowledge_base,
+            retrieved_columns,
+            allowed_tables=allowed_tables,
+        )
         if field_status != "resolved" or field is None:
             return _join_failure_context(
                 context,
@@ -2403,7 +2494,20 @@ def _apply_join_lookup_contract(
         resolved_fields.append(field)
     resolved_nodes.update({"table_scope", "requested_fields", "join_need"})
 
-    projection_mode = str(lookup.get("projection_mode") or "")
+    if projection_mode == "broad_related":
+        related_parts = [
+            part.strip()
+            for part in re.split(r"\band\b", str(lookup.get("related_request_phrase") or ""), flags=re.IGNORECASE)
+            if part.strip()
+        ]
+        if len(related_parts) > 1:
+            return _join_failure_context(
+                context,
+                blocked_node="requested_fields",
+                reason="joined lookup requested multiple related entities",
+                resolved_nodes=resolved_nodes | {"table_scope"},
+            )
+
     candidate_tables: set[str] = set(filter_tables)
     if explicit_base:
         candidate_tables.add(explicit_base)
@@ -3749,6 +3853,151 @@ def _normalize_planner_output(
             if table_name in selected_knowledge_base or table_name in knowledge_base
         }
 
+    structured_intent = intent if isinstance(intent, dict) else {}
+    schema_for_resolution = knowledge_base or selected_knowledge_base
+    ranking_mode = str(
+        (structured_intent.get("ranking_diagnostics") or {}).get("mode_hint") or ""
+    ).strip()
+    base_phrase = str(
+        structured_intent.get("target_entity_phrase")
+        or next(iter(structured_intent.get("source_scope") or []), "")
+        or ""
+    ).strip()
+    explicit_base = None
+    if base_phrase:
+        explicit_base, base_status = _resolve_join_table(
+            base_phrase,
+            schema_for_resolution,
+            [],
+        )
+        if base_status != "resolved":
+            explicit_base = None
+
+    metric_table = str((effective_measure_candidates[0] if effective_measure_candidates else {}).get("table") or "")
+    sole_selected_table = selected_table_names[0] if len(selected_table_names) == 1 else ""
+    grouped_mode_hint = (
+        query_shape == "grouped_aggregate"
+        or (query_shape == "ranking_query" and ranking_mode == "grouped_aggregate")
+    )
+    if grouped_mode_hint:
+        primary_table = metric_table or str(explicit_base or sole_selected_table or "")
+    else:
+        primary_table = str(explicit_base or metric_table or sole_selected_table or "")
+    requested_dimensions = [
+        str(value).strip()
+        for value in (structured_intent.get("requested_dimensions") or [])
+        if str(value).strip()
+    ]
+    dimension_status = "not_required"
+    resolved_dimensions = list(dimension_candidates)
+    if primary_table and requested_dimensions:
+        resolved_dimensions, dimension_status = _resolve_role_candidate(
+            requested_dimensions[0],
+            dimension_candidates,
+            allowed_tables={primary_table},
+        )
+        if dimension_status == "resolved":
+            dimension_candidates = resolved_dimensions
+
+    planned_filters = [
+        dict(entry) for entry in (plan.get("filters") or []) if isinstance(entry, dict)
+    ]
+    structured_filter_clauses = [
+        dict(entry)
+        for entry in (structured_intent.get("structured_filters") or [])
+        if isinstance(entry, dict)
+    ]
+    resolved_filter_candidates: list[dict[str, Any]] = []
+    all_filters_resolved = bool(structured_filter_clauses)
+    for clause in structured_filter_clauses:
+        field_phrase = str(clause.get("field_phrase") or clause.get("field") or "").strip()
+        allowed_filter_tables = None
+        base_has_exact_field = any(
+            str(candidate.get("table") or "").strip() == str(explicit_base or "")
+            and _humanize(str(candidate.get("column") or "")) == _humanize(field_phrase)
+            for candidate in filter_candidates
+        )
+        if base_has_exact_field and explicit_base:
+            allowed_filter_tables = {explicit_base}
+        else:
+            field_table, field_table_status = _resolve_join_table(
+                field_phrase,
+                schema_for_resolution,
+                [],
+            )
+            if field_table_status == "resolved" and field_table:
+                allowed_filter_tables = {field_table}
+        resolved_filter, filter_status = _resolve_role_candidate(
+            field_phrase,
+            filter_candidates,
+            allowed_tables=allowed_filter_tables,
+        )
+        if filter_status != "resolved":
+            all_filters_resolved = False
+            break
+        resolved_filter_candidates.extend(resolved_filter)
+    if all_filters_resolved:
+        filter_candidates = _merge_candidate_columns(resolved_filter_candidates)
+    planned_filter_tables = {
+        str(entry.get("table") or "").strip()
+        for entry in planned_filters
+        if str(entry.get("table") or "").strip()
+    }
+    filters_fit_primary = not planned_filter_tables or planned_filter_tables == {primary_table}
+    grouped_single_table = (
+        query_shape == "grouped_aggregate"
+        or (query_shape == "ranking_query" and ranking_mode == "grouped_aggregate")
+    )
+    row_single_table = query_shape == "filtered_query" or (
+        query_shape == "ranking_query" and ranking_mode != "grouped_aggregate"
+    )
+    dimension_fit = not requested_dimensions or dimension_status == "resolved"
+    lookup_requested = bool((structured_intent.get("join_lookup_request") or {}).get("requested"))
+    if (
+        primary_table
+        and filters_fit_primary
+        and dimension_fit
+        and not lookup_requested
+        and (grouped_single_table or row_single_table)
+    ):
+        selected_tables = [
+            dict(entry)
+            for entry in selected_tables
+            if str(entry.get("table") or "").strip() == primary_table
+        ]
+        if not selected_tables and primary_table in schema_for_resolution:
+            selected_tables = [{"table": primary_table, "confidence": 1.0, "source": "explicit_single_table_scope"}]
+        selected_table_names = [primary_table]
+        selected_columns = [
+            dict(entry)
+            for entry in selected_columns
+            if str(entry.get("table") or "").strip() == primary_table
+        ]
+        effective_measure_candidates = [
+            dict(entry)
+            for entry in effective_measure_candidates
+            if str(entry.get("table") or "").strip() == primary_table
+        ]
+        dimension_candidates = [
+            dict(entry)
+            for entry in dimension_candidates
+            if str(entry.get("table") or "").strip() == primary_table
+        ]
+        filter_candidates = [
+            dict(entry)
+            for entry in filter_candidates
+            if str(entry.get("table") or "").strip() == primary_table
+        ]
+        join_paths = []
+        matched_relationships = []
+        selected_knowledge_base = {
+            primary_table: deepcopy(
+                selected_knowledge_base.get(primary_table)
+                or schema_for_resolution.get(primary_table)
+                or {}
+            )
+        }
+
     join_candidates = _join_candidates_for_contract(join_paths, matched_relationships)
     required_joins = _required_join_predicates(join_paths)
     group_by_candidates = _group_by_candidates_for_contract(plan, dimension_candidates)
@@ -3817,6 +4066,13 @@ def _normalize_planner_output(
     selected_dimensions = [] if "dimension_selection" in blocking_ambiguities else [
         dict(entry) for entry in dimension_candidates
     ]
+    grouped_dimension_required = (
+        query_shape == "grouped_aggregate"
+        or (query_shape == "ranking_query" and ranking_mode == "grouped_aggregate")
+    )
+    if grouped_dimension_required and len(selected_dimensions) != 1:
+        blocking_ambiguities.add("dimension_selection")
+        selected_dimensions = []
     selected_filters = [] if "filter_selection" in blocking_ambiguities else [
         dict(entry) for entry in (plan.get("filters") or [])
     ]

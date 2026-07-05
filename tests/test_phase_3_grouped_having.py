@@ -54,6 +54,7 @@ def _context(
     filter_column=None,
     filter_columns=None,
     extra_metrics=None,
+    extra_dimensions=None,
 ):
     intent = build_intent(question)
     metrics = []
@@ -63,6 +64,7 @@ def _context(
     dimensions = []
     if dimension:
         dimensions.append(_candidate(dimension, role="dimension", term=dimension.replace("_", " ")))
+    dimensions.extend(extra_dimensions or [])
     filters = []
     resolved_filter_columns = list(filter_columns or [])
     resolved_filter_column = filter_column or ("invoice_status" if row_filter else None)
@@ -109,6 +111,22 @@ def _context(
         intent=intent,
         retrieved_context=evidence,
     )
+
+
+def test_planner_selects_explicit_group_dimension_from_retrieval_decoys():
+    context = _context(
+        "show sum gross amount by invoice status from service invoices",
+        metric="gross_amount",
+        dimension="invoice_status",
+        extra_dimensions=[
+            _candidate("customer_name", role="dimension", term="customer name", score=0.97)
+        ],
+    )
+
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert [(entry["table"], entry["column"]) for entry in context["selected_dimensions"]] == [
+        ("service_invoices", "invoice_status")
+    ]
 
 
 def _pipeline_context(question, context):

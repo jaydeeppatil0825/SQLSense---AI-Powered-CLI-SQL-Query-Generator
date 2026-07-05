@@ -930,6 +930,16 @@ def _extract_join_lookup_request(body: str) -> dict[str, Any]:
         related_phrase = _cleanup_phrase(with_match.group(1))
         if not base_phrase or not related_phrase:
             return _empty_join_lookup_request()
+        aggregate_condition = bool(
+            re.match(r"^(?:sum|total|average|avg|mean|count|minimum|min|maximum|max)\b", related_phrase, re.IGNORECASE)
+            and re.search(
+                r"\b(?:greater\s+than|less\s+than|at\s+least|at\s+most|above|below|over|under|equals?|=|>|<)\b",
+                related_phrase,
+                re.IGNORECASE,
+            )
+        )
+        if aggregate_condition:
+            return _empty_join_lookup_request()
         broad_related = bool(
             re.match(r"^their\s+", related_phrase, re.IGNORECASE)
             or re.search(r"\b(?:detail|details)$", related_phrase, re.IGNORECASE)

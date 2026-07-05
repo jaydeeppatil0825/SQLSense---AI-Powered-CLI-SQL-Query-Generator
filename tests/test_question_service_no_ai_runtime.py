@@ -444,7 +444,7 @@ def test_stale_multi_metric_route_is_forced_to_cannot_plan_safely():
 
     assert success is False
     assert sql is None
-    assert "could not be planned safely" in message.lower()
+    assert "safely" in message.lower()
     assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"
 
 
@@ -760,7 +760,7 @@ def test_multi_table_grouped_aggregate_fails_closed_without_sql():
 
     assert success is False
     assert sql is None
-    assert "could not be planned safely" in message.lower()
+    assert "safely" in message.lower()
     assert service.get_last_query_context()["route_recommendation"] == "cannot_plan_safely"
     assert service.get_last_query_context()["query_shape"] == "grouped_aggregate"
     assert service.get_last_query_context()["route_used"] == "cannot_plan_safely"

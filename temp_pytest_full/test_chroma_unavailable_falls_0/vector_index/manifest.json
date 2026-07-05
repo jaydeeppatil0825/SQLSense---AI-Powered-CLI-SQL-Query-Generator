@@ -1,0 +1,26 @@
+{
+  "built_at": "2026-07-05T07:25:48.460439+00:00",
+  "created_at": "2026-07-05T07:25:48.460439+00:00",
+  "database_name": "dynamic_ops_lab",
+  "database_type": "mysql",
+  "db_engine": "mysql",
+  "db_host": "localhost",
+  "db_name": "dynamic_ops_lab",
+  "db_port": "3306",
+  "document_count": 16,
+  "embedding": {
+    "backend": "fallback",
+    "configured_backend": "unsupported",
+    "configured_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "dimension": 384,
+    "model": "deterministic-hash"
+  },
+  "generated_at": "2026-07-05T07:25:48.460439+00:00",
+  "glossary_hash": "0229ed7c71f1cac638d526ff3b7031e3fda04e3afed1614fb56858b1bcdd8bc8",
+  "knowledge_base_hash": "2b79589e4d2f3850c4ad45f66b895238204f3a8c8ff57ea7a1f104bcbbc81070",
+  "schema_fingerprint": "feb0c3eca9c8b74ab8477f01a67dd3555dbd52e82b255c5fed3b8202a8c929d3",
+  "schema_hash": "feb0c3eca9c8b74ab8477f01a67dd3555dbd52e82b255c5fed3b8202a8c929d3",
+  "schema_version": 2,
+  "storage_backend": "json_files",
+  "vector_index_version": 2
+}

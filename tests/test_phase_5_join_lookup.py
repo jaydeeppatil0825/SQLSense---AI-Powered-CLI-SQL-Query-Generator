@@ -383,3 +383,23 @@ def test_executor_rejects_non_graph_join_before_connection_use():
         execute_query(sql, engine, knowledge_base=_orders_kb())
 
     engine.connect.assert_not_called()
+
+
+def test_join_field_qualifier_beats_same_named_base_snapshot():
+    kb = _orders_kb()
+    kb["orders"]["columns"].append(
+        {"name": "customer_name", "type": "VARCHAR(100)", "semantic_type": "name"}
+    )
+
+    context = _context("show orders with customer name", kb=kb)
+
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["selected_output_columns"][-1]["table"] == "customers"
+    assert context["selected_output_columns"][-1]["column"] == "name"
+
+
+def test_multiple_related_entities_fail_closed():
+    context = _context("show orders with customer details and product details")
+
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert context["selected_join_path"] is None

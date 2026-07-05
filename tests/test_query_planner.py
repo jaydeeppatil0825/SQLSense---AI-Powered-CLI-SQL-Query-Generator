@@ -2056,18 +2056,18 @@ def test_qp2_intent_builder_count_accounts():
 
 
 def test_qp2_intent_builder_top_5_accounts_by_deal_value():
-    """Test intent builder for 'top 5 accounts by deal value' question."""
+    """An explicit top-N without aggregate wording is a row ranking."""
     intent = build_intent("top 5 accounts by deal value")
     
     assert intent["intent_type"] == "ranking"
     assert "accounts" in intent["raw_business_terms"]
     assert "deal" in intent["raw_business_terms"] or "value" in intent["raw_business_terms"]
     assert intent["limit"] == 5
-    assert intent["needs_aggregation"] is True
-    assert intent["needs_grouping"] is True
+    assert intent["needs_aggregation"] is False
+    assert intent["needs_grouping"] is False
     assert intent["requested_sort"] == {"direction": "desc", "terms": "deal value"}
-    # Should use phrase positions: "accounts" as dimension, "deal value" as metric
-    assert "accounts" in intent["requested_dimensions"]
+    assert intent["target_entity_phrase"] == "accounts"
+    assert intent["requested_dimensions"] == []
     assert "deal value" in intent["requested_metrics"]
 
 
