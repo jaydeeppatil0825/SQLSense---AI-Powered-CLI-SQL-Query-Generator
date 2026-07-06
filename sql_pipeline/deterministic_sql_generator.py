@@ -1578,6 +1578,12 @@ def _planner_aggregate_function(context: dict[str, Any], plan: dict[str, Any]) -
             selected_function,
         )
         return normalized if normalized in {"sum", "avg", "min", "max", "count"} else None
+    if intent and (
+        "aggregate_function" in intent
+        or "needs_aggregation" in intent
+        or "intent_type" in intent
+    ):
+        return None
     return _detect_aggregate_function(plan)
 
 

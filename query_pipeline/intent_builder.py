@@ -351,7 +351,7 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         }
 
     body = _strip_leading_action(normalized_question)
-    aggregate_function = _detect_aggregate_function(normalized_question)
+    aggregate_function = None
     limit = extract_requested_limit(normalized_question)
     intent_type = "list"
     business_operation = "browse"
@@ -380,6 +380,7 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     body_without_sort = re.sub(r"\b(?:sort(?:ed)?|order(?:ed)?)\s+by\s+.+$", "", body_without_latest, flags=re.IGNORECASE).strip()
     body_without_filters = _remove_filter_clauses(body_without_sort)
     body_without_scope = _remove_source_scope(body_without_filters)
+    aggregate_function = _detect_aggregate_function(body_without_filters)
     join_lookup_request = _extract_join_lookup_request(body_without_scope)
 
     if _COUNT_RE.search(body):
@@ -428,6 +429,7 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
             limit = int(top_match.group(1))
 
     by_parts = _extract_grouping_parts(body_without_scope)
+    count_entity_phrase = ""
     if ranking_request:
         requested_metrics = [str(ranking_request["metric_phrase"])]
         requested_dimensions = (
@@ -443,6 +445,9 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         left, right = by_parts
         left = _cleanup_phrase(left)
         right = _cleanup_phrase(right)
+        if intent_type == "count":
+            count_entity_phrase = _cleanup_phrase(_COUNT_RE.sub("", left).strip())
+            count_entity_phrase = re.sub(r"^of\s+", "", count_entity_phrase, flags=re.IGNORECASE).strip()
         if intent_type == "ranking":
             if left:
                 requested_dimensions = [left]
@@ -568,7 +573,9 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         body_without_scope=body_without_scope,
         question=normalized_question,
     )
-    if ranking_request:
+    if count_entity_phrase:
+        target_entity_phrase = count_entity_phrase
+    elif ranking_request:
         target_entity_phrase = str(ranking_request["entity_phrase"])
     elif join_lookup_request["requested"]:
         target_entity_phrase = str(join_lookup_request.get("base_entity_phrase") or "")
@@ -856,22 +863,43 @@ def _detect_unsafe_operation(question: str) -> str:
 
 def _detect_aggregate_function(question: str) -> str | None:
     normalized = str(question or "")
-    if _AGGREGATE_AVG_RE.search(normalized):
+    matches: list[tuple[int, str]] = []
+    for aggregate_function, pattern in (
+        ("avg", _AGGREGATE_AVG_RE),
+        ("sum", _AGGREGATE_SUM_RE),
+        ("max", _AGGREGATE_MAX_RE),
+        ("min", _AGGREGATE_MIN_RE),
+    ):
+        match = pattern.search(normalized)
+        if match:
+            matches.append((match.start(), aggregate_function))
+    return min(matches, default=(0, None), key=lambda item: item[0])[1]
+
+
+def _detect_ranking_aggregate_function(target_phrase: str) -> str | None:
+    """Require an explicit aggregate verb in a grouped ranking target."""
+    match = re.match(
+        r"^\s*(sum|average|avg|mean|count|maximum|max|minimum|min)\b",
+        str(target_phrase or ""),
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    token = match.group(1).lower()
+    if token in {"average", "avg", "mean"}:
         return "avg"
-    if _AGGREGATE_SUM_RE.search(normalized):
-        return "sum"
-    if _AGGREGATE_MAX_RE.search(normalized):
+    if token in {"maximum", "max"}:
         return "max"
-    if _AGGREGATE_MIN_RE.search(normalized):
+    if token in {"minimum", "min"}:
         return "min"
-    return None
+    return token
 
 
 def _metric_is_generic_phrase(metric_phrase: str) -> bool:
     tokens = [token for token in re.split(r"[^a-z0-9_]+", _clean_scalar(metric_phrase).lower()) if token]
     if not tokens:
         return False
-    return all(token in _GENERIC_METRIC_TERMS for token in tokens)
+    return len(tokens) == 1 and tokens[0] in _GENERIC_METRIC_TERMS
 
 
 def _extract_ranking_request(question: str) -> dict[str, Any]:
@@ -885,7 +913,7 @@ def _extract_ranking_request(question: str) -> dict[str, Any]:
     entity_phrase = _cleanup_phrase(match.group(3))
     target_phrase = _cleanup_phrase(match.group(4))
     direction = "asc" if keyword in {"bottom", "lowest", "smallest", "minimum"} else "desc"
-    aggregate_function = _detect_aggregate_function(target_phrase)
+    aggregate_function = _detect_ranking_aggregate_function(target_phrase)
     if (
         explicit_limit is None
         and keyword in {"highest", "largest", "maximum", "lowest", "smallest", "minimum"}
@@ -1288,7 +1316,7 @@ def _scope_parts(question: str) -> Optional[tuple[re.Match[str], str, Optional[r
         return None
     tail = match.group(1)
     split_match = re.search(
-        r"\s+(?:where|having|filter(?:ed)?(?:\s+by)?|before|after|between|greater\s+than|less\s+than|sort(?:ed)?|order(?:ed)?|by|per|each|group(?:ed)?\s+by)\b",
+        r"\s+(?:where|with|having|filter(?:ed)?(?:\s+by)?|before|after|between|greater\s+than|less\s+than|sort(?:ed)?|order(?:ed)?|by|per|each|group(?:ed)?\s+by)\b",
         tail,
         flags=re.IGNORECASE,
     )

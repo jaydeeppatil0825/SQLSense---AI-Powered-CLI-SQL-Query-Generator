@@ -1746,6 +1746,26 @@ def _resolve_role_candidate(
     *,
     allowed_tables: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
+    exact_matches: list[dict[str, Any]] = []
+    exact_seen: set[tuple[str, str]] = set()
+    normalized_phrase = _humanize(phrase)
+    for candidate in candidates or []:
+        table_name = str(candidate.get("table") or "").strip()
+        column_name = str(candidate.get("column") or "").strip()
+        signature = (table_name, column_name)
+        if not all(signature) or signature in exact_seen:
+            continue
+        if allowed_tables is not None and table_name not in allowed_tables:
+            continue
+        if _humanize(column_name) != normalized_phrase:
+            continue
+        exact_seen.add(signature)
+        exact_matches.append(dict(candidate))
+    if len(exact_matches) == 1:
+        return exact_matches, "resolved"
+    if len(exact_matches) > 1:
+        return [], "ambiguous"
+
     ranked: list[tuple[float, dict[str, Any]]] = []
     seen: set[tuple[str, str]] = set()
     for candidate in candidates or []:
@@ -3803,16 +3823,92 @@ def _normalize_planner_output(
     legacy_route_recommendation: str,
     debug_trace_details: dict[str, Any],
 ) -> dict[str, Any]:
-    effective_measure_candidates = list(measure_candidates or []) or _fallback_metric_candidates_from_selected_columns(
-        selected_columns,
-        question,
+    structured_intent = intent if isinstance(intent, dict) else {}
+    intent_type = str(structured_intent.get("intent_type") or "").strip().lower()
+    ranking_mode_hint = str(
+        (structured_intent.get("ranking_diagnostics") or {}).get("mode_hint") or ""
+    ).strip()
+    metric_fallback_allowed = bool(
+        not structured_intent
+        or structured_intent.get("needs_aggregation")
+        or structured_intent.get("aggregate_function")
+        or intent_type in {"aggregate", "count", "grouped_summary", "comparison"}
+        or (intent_type == "ranking" and ranking_mode_hint == "grouped_aggregate")
     )
+    fallback_measure_candidates = (
+        _fallback_metric_candidates_from_selected_columns(selected_columns, question)
+        if metric_fallback_allowed
+        else []
+    )
+    effective_measure_candidates = list(measure_candidates or []) or fallback_measure_candidates
     metric_is_generic = bool(intent.get("metric_is_generic")) if isinstance(intent, dict) else False
     if metric_is_generic:
         effective_measure_candidates = _merge_candidate_columns(
             effective_measure_candidates,
-            _fallback_metric_candidates_from_selected_columns(selected_columns, question),
+            fallback_measure_candidates,
         )
+
+    schema_for_resolution = knowledge_base or selected_knowledge_base
+    ranking_mode = ranking_mode_hint
+    base_phrase = str(
+        structured_intent.get("target_entity_phrase")
+        or next(iter(structured_intent.get("source_scope") or []), "")
+        or ""
+    ).strip()
+    explicit_base = None
+    if base_phrase:
+        explicit_base, base_status = _resolve_join_table(base_phrase, schema_for_resolution, [])
+        if base_status != "resolved":
+            explicit_base = None
+
+    requested_metric_phrase = str(
+        structured_intent.get("metric_phrase")
+        or next(iter(structured_intent.get("requested_metrics") or []), "")
+        or ""
+    ).strip()
+    if requested_metric_phrase and effective_measure_candidates:
+        resolved_metrics, metric_status = _resolve_role_candidate(
+            requested_metric_phrase,
+            effective_measure_candidates,
+            allowed_tables={explicit_base} if explicit_base else None,
+        )
+        if metric_status == "resolved":
+            effective_measure_candidates = resolved_metrics
+
+    standalone_aggregate_scope = bool(
+        intent_type == "aggregate"
+        and explicit_base
+        and not structured_intent.get("structured_filters")
+        and not structured_intent.get("requested_dimensions")
+        and effective_measure_candidates
+        and all(
+            str(entry.get("table") or "").strip() == explicit_base
+            for entry in effective_measure_candidates
+        )
+        and not (structured_intent.get("join_lookup_request") or {}).get("requested")
+        and not structured_intent.get("requested_output_fields")
+    )
+    if standalone_aggregate_scope:
+        selected_tables = [
+            dict(entry)
+            for entry in selected_tables
+            if str(entry.get("table") or "").strip() == explicit_base
+        ] or [{"table": explicit_base, "confidence": 1.0, "source": "explicit_single_table_scope"}]
+        selected_table_names = [explicit_base]
+        selected_columns = [
+            dict(entry)
+            for entry in selected_columns
+            if str(entry.get("table") or "").strip() == explicit_base
+        ]
+        join_paths = []
+        matched_relationships = []
+        selected_knowledge_base = {
+            explicit_base: deepcopy(
+                selected_knowledge_base.get(explicit_base)
+                or schema_for_resolution.get(explicit_base)
+                or {}
+            )
+        }
 
     query_shape = _normalize_query_shape_label(
         question=question,
@@ -3852,26 +3948,6 @@ def _normalize_planner_output(
             for table_name in selected_table_names
             if table_name in selected_knowledge_base or table_name in knowledge_base
         }
-
-    structured_intent = intent if isinstance(intent, dict) else {}
-    schema_for_resolution = knowledge_base or selected_knowledge_base
-    ranking_mode = str(
-        (structured_intent.get("ranking_diagnostics") or {}).get("mode_hint") or ""
-    ).strip()
-    base_phrase = str(
-        structured_intent.get("target_entity_phrase")
-        or next(iter(structured_intent.get("source_scope") or []), "")
-        or ""
-    ).strip()
-    explicit_base = None
-    if base_phrase:
-        explicit_base, base_status = _resolve_join_table(
-            base_phrase,
-            schema_for_resolution,
-            [],
-        )
-        if base_status != "resolved":
-            explicit_base = None
 
     metric_table = str((effective_measure_candidates[0] if effective_measure_candidates else {}).get("table") or "")
     sole_selected_table = selected_table_names[0] if len(selected_table_names) == 1 else ""
@@ -3952,14 +4028,43 @@ def _normalize_planner_output(
         query_shape == "ranking_query" and ranking_mode != "grouped_aggregate"
     )
     dimension_fit = not requested_dimensions or dimension_status == "resolved"
-    lookup_requested = bool((structured_intent.get("join_lookup_request") or {}).get("requested"))
-    if (
-        primary_table
-        and filters_fit_primary
-        and dimension_fit
-        and not lookup_requested
-        and (grouped_single_table or row_single_table)
-    ):
+    lookup_request = dict(structured_intent.get("join_lookup_request") or {})
+    lookup_requested = bool(lookup_request.get("requested"))
+    resolved_evidence_tables = {
+        str(entry.get("table") or "").strip()
+        for entry in [
+            *effective_measure_candidates,
+            *dimension_candidates,
+            *planned_filters,
+            *resolved_filter_candidates,
+        ]
+        if str(entry.get("table") or "").strip()
+    }
+    related_output_requested = bool(
+        lookup_requested
+        or lookup_request.get("requested_output_fields")
+        or structured_intent.get("requested_output_fields")
+    )
+    joined_analytics_requested = bool(
+        grouped_single_table
+        and (
+            not dimension_fit
+            or any(table_name != primary_table for table_name in resolved_evidence_tables)
+        )
+    )
+    final_single_table_scope = bool(
+        standalone_aggregate_scope
+        or (
+            primary_table
+            and filters_fit_primary
+            and dimension_fit
+            and resolved_evidence_tables <= {primary_table}
+            and not related_output_requested
+            and not joined_analytics_requested
+            and (grouped_single_table or row_single_table)
+        )
+    )
+    if final_single_table_scope:
         selected_tables = [
             dict(entry)
             for entry in selected_tables
@@ -4078,7 +4183,7 @@ def _normalize_planner_output(
     ]
     raw_aggregate_function = structured_intent.get("aggregate_function")
     aggregate_function = str(raw_aggregate_function or "").strip().lower()
-    if not aggregate_function and ranking_mode != "row":
+    if not aggregate_function and ranking_mode != "row" and metric_fallback_allowed:
         aggregate_function = _aggregate_function_hint(question)
     selected_order_by, order_by_reason, order_by_ambiguity_choices = _resolve_order_by_for_contract(
         intent=structured_intent,
@@ -4105,6 +4210,16 @@ def _normalize_planner_output(
     }:
         blocking_ambiguities.add("limit_selection")
     plan["limit"] = resolved_limit
+    selected_order_table = str((selected_order_by or {}).get("table") or "").strip()
+    if (
+        final_single_table_scope
+        and (not selected_order_table or selected_order_table == primary_table)
+        and not related_output_requested
+        and not joined_analytics_requested
+    ):
+        missing_evidence_flags["missing_join_path"] = False
+        missing_evidence_flags["missing_table"] = False
+    missing_evidence = _missing_evidence_list(missing_evidence_flags)
     grouped_table_scope_is_safe = query_shape not in {"grouped_aggregate", "ranking_query"} or (
         len(selected_tables) == 1 and not join_paths
     )
