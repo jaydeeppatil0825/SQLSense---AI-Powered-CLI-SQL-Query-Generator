@@ -1,0 +1,26 @@
+{
+  "built_at": "2026-07-06T06:23:55.399388+00:00",
+  "created_at": "2026-07-06T06:23:55.399388+00:00",
+  "database_name": "sqlsense_phase_smoke_lab",
+  "database_type": "mysql",
+  "db_engine": "mysql",
+  "db_host": "localhost",
+  "db_name": "sqlsense_phase_smoke_lab",
+  "db_port": "3306",
+  "document_count": 8,
+  "embedding": {
+    "backend": "fallback",
+    "configured_backend": "unsupported",
+    "configured_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "dimension": 384,
+    "model": "deterministic-hash"
+  },
+  "generated_at": "2026-07-06T06:23:55.399388+00:00",
+  "glossary_hash": "4eb9f5fb24b11879ba1f47ce7f4ac822e1ef077293bb9e6d1cb8458ba1a7a28e",
+  "knowledge_base_hash": "d6d4cf887d12d268d27930f6b4b1706a3838c6bf6e1f16c8adc538acad9a0e22",
+  "schema_fingerprint": "fa7ccdfe50f2467b1edf1bc21cdd3543f4d062871a399c589f95ed75a301289d",
+  "schema_hash": "fa7ccdfe50f2467b1edf1bc21cdd3543f4d062871a399c589f95ed75a301289d",
+  "schema_version": 2,
+  "storage_backend": "json_files",
+  "vector_index_version": 2
+}

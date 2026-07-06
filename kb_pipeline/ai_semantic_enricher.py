@@ -105,6 +105,7 @@ _enrichment_state = EnrichmentState()
 
 _SYSTEM_PROMPT = """You are a database semantics assistant.
 Return ONLY compact valid JSON.
+Return one complete top-level JSON object.
 Do not include markdown.
 Do not include explanations.
 Do not invent tables or columns.
@@ -236,8 +237,11 @@ def get_last_enrichment_report() -> tuple[list[str], dict[str, str]]:
     return _enrichment_state.get_enriched_tables(), _enrichment_state.get_fallback_tables()
 
 
-def _clean_ai_response(response: str) -> str:
-    """Return the first valid JSON object from fenced or explanatory output."""
+def _clean_ai_response(
+    response: str,
+    required_key_sets: tuple[set[str], ...] | None = None,
+) -> str:
+    """Return the first valid JSON object matching expected top-level keys."""
     text = re.sub(r"```(?:json)?\s*", "", str(response or ""), flags=re.IGNORECASE)
     text = re.sub(r"```\s*", "", text)
     decoder = json.JSONDecoder()
@@ -248,7 +252,10 @@ def _clean_ai_response(response: str) -> str:
             value, _ = decoder.raw_decode(text[index:])
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict):
+        if isinstance(value, dict) and (
+            not required_key_sets
+            or any(required_keys <= set(value) for required_keys in required_key_sets)
+        ):
             return json.dumps(value, ensure_ascii=False)
     return text.strip()
 
@@ -742,7 +749,7 @@ def _column_batch_prompt(table_name: str, table_data: dict, columns: list[dict])
 
 def _parse_table_summary(response: str) -> dict:
     """Parse table-level enrichment JSON."""
-    cleaned = _clean_ai_response(response)
+    cleaned = _clean_ai_response(response, ({"d", "p", "q"},))
     data = _require_response_keys(json.loads(cleaned), {"d", "p", "q"}, "table response")
     if not isinstance(data["d"], str) or not isinstance(data["p"], str) or not isinstance(data["q"], list):
         raise _AIEnrichmentResponseError("Invalid enrichment structure: table response has invalid value types")
@@ -762,7 +769,7 @@ def _parse_table_summary(response: str) -> dict:
 
 def _parse_column_enrichment(response: str) -> dict:
     """Parse column-level enrichment JSON."""
-    cleaned = _clean_ai_response(response)
+    cleaned = _clean_ai_response(response, ({"c"}, {"columns"}))
     data = _require_response_keys(json.loads(cleaned), set(), "column response")
     if "c" in data:
         if not isinstance(data["c"], dict):
@@ -803,6 +810,39 @@ def _parse_column_enrichment(response: str) -> dict:
     if "columns" not in data or not isinstance(data["columns"], dict):
         raise _AIEnrichmentResponseError("Invalid enrichment structure: missing c")
     return data["columns"]
+
+
+def _request_enrichment_json(
+    messages: list[dict],
+    *,
+    backend: str,
+    response_format: dict,
+    parser,
+):
+    """Request and parse enrichment JSON, retrying one invalid response."""
+    active_messages = list(messages)
+    for attempt in range(2):
+        response = _call_ai_backend(
+            active_messages,
+            backend=backend,
+            response_format=response_format,
+        )
+        try:
+            return parser(response)
+        except (json.JSONDecodeError, _AIEnrichmentResponseError):
+            if attempt == 1:
+                raise
+            logger.warning("AI enrichment returned invalid JSON; retrying once.")
+            active_messages = [
+                *messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "The previous response was invalid or incomplete. "
+                        "Return one complete top-level JSON object matching the requested shape, with no extra text."
+                    ),
+                },
+            ]
 
 
 def _apply_table_enrichment(table_name: str, table_data: dict, enrichment: dict) -> None:
@@ -949,7 +989,7 @@ def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
         col.pop("_table_context", None)
 
 
-def _chunk_columns(columns: list[dict], size: int = 3) -> list[list[dict]]:
+def _chunk_columns(columns: list[dict], size: int = 1) -> list[list[dict]]:
     """Split columns into small batches for reliable local AI responses."""
     return [columns[idx : idx + size] for idx in range(0, len(columns), size)]
 
@@ -986,12 +1026,12 @@ def enrich_knowledge_base_with_ai(knowledge_base: dict, backend: str = "local") 
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": _table_summary_prompt(table_name, working_table)},
             ]
-            summary_response = _call_ai_backend(
+            table_enrichment = _request_enrichment_json(
                 summary_messages,
                 backend=backend,
                 response_format=_TABLE_JSON_FORMAT,
+                parser=_parse_table_summary,
             )
-            table_enrichment = _parse_table_summary(summary_response)
             _apply_table_enrichment(table_name, working_table, table_enrichment)
 
             candidate_columns = _candidate_columns(working_table)
@@ -1000,12 +1040,12 @@ def enrich_knowledge_base_with_ai(knowledge_base: dict, backend: str = "local") 
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user", "content": _column_batch_prompt(table_name, working_table, column_batch)},
                 ]
-                column_response = _call_ai_backend(
+                column_enrichment = _request_enrichment_json(
                     column_messages,
                     backend=backend,
                     response_format=_COLUMN_JSON_FORMAT,
+                    parser=_parse_column_enrichment,
                 )
-                column_enrichment = _parse_column_enrichment(column_response)
                 _apply_column_enrichment(working_table, column_enrichment)
 
             enriched_kb[table_name] = working_table

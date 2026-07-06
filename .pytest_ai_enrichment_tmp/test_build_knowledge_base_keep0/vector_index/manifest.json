@@ -1,0 +1,26 @@
+{
+  "built_at": "2026-07-06T10:04:17.264828+00:00",
+  "created_at": "2026-07-06T10:04:17.264828+00:00",
+  "database_name": "dynamic_runtime_db",
+  "database_type": "mysql",
+  "db_engine": "mysql",
+  "db_host": "",
+  "db_name": "dynamic_runtime_db",
+  "db_port": "",
+  "document_count": 7,
+  "embedding": {
+    "backend": "local",
+    "configured_backend": "local",
+    "configured_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "dimension": 384,
+    "model": "sentence-transformers/all-MiniLM-L6-v2"
+  },
+  "generated_at": "2026-07-06T10:04:17.264828+00:00",
+  "glossary_hash": "4eb9f5fb24b11879ba1f47ce7f4ac822e1ef077293bb9e6d1cb8458ba1a7a28e",
+  "knowledge_base_hash": "aaf948f8f7a1e403b6e10ecc8305968c41f402b3872d14155a98d51eed0a83fc",
+  "schema_fingerprint": "d3125e310e98a87d000aabf3f46df7fe09bb531560b3554cd122e981ee36a430",
+  "schema_hash": "d3125e310e98a87d000aabf3f46df7fe09bb531560b3554cd122e981ee36a430",
+  "schema_version": 2,
+  "storage_backend": "json_files",
+  "vector_index_version": 2
+}

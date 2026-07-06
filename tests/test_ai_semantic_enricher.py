@@ -85,6 +85,97 @@ def test_enrichment_parsers_validate_required_keys_and_types():
         )
 
 
+def test_table_parser_accepts_valid_json_inside_extra_text():
+    parsed = _parse_table_summary(
+        'Here is the result: {"d":"Order facts","p":"Tracks orders","q":["Show orders"]} Done.'
+    )
+
+    assert parsed["table_description"] == "Order facts"
+    assert parsed["business_purpose"] == "Tracks orders"
+
+
+def test_valid_json_enrichment_is_accepted(monkeypatch):
+    knowledge_base = {
+        "orders": {
+            "columns": [
+                {"name": "final_amount", "type": "DECIMAL(10,2)", "semantic_type": "numeric_candidate"}
+            ]
+        }
+    }
+    calls = []
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        calls.append(messages)
+        if "q" in response_format.get("required", []):
+            return '{"d":"Order facts","p":"Tracks order value","q":["Show order value"]}'
+        return json.dumps(
+            {
+                "c": {
+                    "final_amount": {
+                        "d": "Final amount",
+                        "b": ["order amount"],
+                        "s": "money",
+                        "cf": 0.94,
+                        "r": "numeric order values indicate money",
+                        "me": True,
+                        "di": False,
+                        "dt": False,
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
+
+    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
+
+    assert len(calls) == 2
+    assert enriched["orders"]["columns"][0]["ai_metadata"]["ai_semantic_type"] == "money"
+
+
+def test_invalid_json_retries_once_then_accepts_valid_response(monkeypatch, caplog):
+    knowledge_base = {
+        "orders": {
+            "columns": [
+                {"name": "final_amount", "type": "DECIMAL(10,2)", "semantic_type": "numeric_candidate"}
+            ]
+        }
+    }
+    calls = []
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        calls.append(messages)
+        if len(calls) == 1:
+            return "{invalid"
+        if "q" in response_format.get("required", []):
+            return '{"d":"Order facts","p":"Tracks order value","q":["Show order value"]}'
+        return json.dumps(
+            {
+                "c": {
+                    "final_amount": {
+                        "d": "Final amount",
+                        "b": ["order amount"],
+                        "s": "money",
+                        "cf": 0.94,
+                        "r": "numeric order values indicate money",
+                        "me": True,
+                        "di": False,
+                        "dt": False,
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
+    caplog.set_level(logging.WARNING, logger="aisqlqurrey")
+
+    enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
+
+    assert len(calls) == 3
+    assert "retrying once" in caplog.text.lower()
+    assert enriched["orders"]["columns"][0]["ai_metadata"]["ai_semantic_type"] == "money"
+
+
 def test_invalid_json_fallback_is_reported_once_without_duplicate_stdout(monkeypatch, caplog, capsys):
     knowledge_base = {
         "bills": {
@@ -116,13 +207,17 @@ def test_enrich_knowledge_base_with_ai_fallback_on_invalid_json(monkeypatch):
         }
     }
 
-    monkeypatch.setattr(
-        "semantic.ai_semantic_enricher._call_ai_backend",
-        lambda messages, backend, response_format=None: "{not valid json",
-    )
+    calls = []
+
+    def invalid_response(messages, backend, response_format=None):
+        calls.append(messages)
+        return "{not valid json"
+
+    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", invalid_response)
 
     enriched = enrich_knowledge_base_with_ai(knowledge_base, backend="local")
     assert enriched == knowledge_base
+    assert len(calls) == 2
 
 
 def test_candidate_prompt_contains_schema_and_profile_evidence(monkeypatch):
