@@ -1745,77 +1745,19 @@ def _resolve_role_candidate(
     candidates: list[dict[str, Any]],
     *,
     allowed_tables: set[str] | None = None,
+    role: str = "generic",
 ) -> tuple[list[dict[str, Any]], str]:
-    exact_matches: list[dict[str, Any]] = []
-    exact_seen: set[tuple[str, str]] = set()
-    normalized_phrase = _humanize(phrase)
-    phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
-    generic_single_token = len(phrase_tokens) == 1 and next(iter(phrase_tokens), "") in _GENERIC_ROLE_TERMS
-    for candidate in candidates or []:
-        table_name = str(candidate.get("table") or "").strip()
-        column_name = str(candidate.get("column") or "").strip()
-        signature = (table_name, column_name)
-        if not all(signature) or signature in exact_seen:
-            continue
-        if allowed_tables is not None and table_name not in allowed_tables:
-            continue
-        column_tokens = {_singularize_token(token) for token in _tokenize(column_name)}
-        table_tokens = {_singularize_token(token) for token in _tokenize(table_name)}
-        exact_term_tokens = [
-            {_singularize_token(token) for token in _tokenize(str(term))}
-            for term in candidate.get("matched_terms") or []
-            if _tokenize(str(term))
-        ]
-        is_exact_match = (
-            _humanize(column_name) == normalized_phrase
-            or (phrase_tokens and phrase_tokens == column_tokens)
-            or (phrase_tokens and phrase_tokens == table_tokens | column_tokens)
-            or (
-                not generic_single_token
-                and (
-                    any(phrase_tokens == tokens for tokens in exact_term_tokens)
-                    or any(phrase_tokens == table_tokens | tokens for tokens in exact_term_tokens)
-                )
-            )
-        )
-        if not is_exact_match:
-            continue
-        exact_seen.add(signature)
-        exact_matches.append(dict(candidate))
-    if len(exact_matches) == 1:
-        return exact_matches, "resolved"
-    if len(exact_matches) > 1:
-        return [], "ambiguous"
-
-    ranked: list[tuple[float, dict[str, Any]]] = []
-    seen: set[tuple[str, str]] = set()
-    for candidate in candidates or []:
-        table_name = str(candidate.get("table") or "").strip()
-        column_name = str(candidate.get("column") or "").strip()
-        signature = (table_name, column_name)
-        if not all(signature) or signature in seen:
-            continue
-        if allowed_tables is not None and table_name not in allowed_tables:
-            continue
-        seen.add(signature)
-        score = _role_candidate_match_score(phrase, candidate)
-        if score > 0:
-            ranked.append((score, dict(candidate)))
-    ranked.sort(
-        key=lambda item: (
-            -item[0],
-            -float(item[1].get("score") or 0.0),
-            str(item[1].get("table") or ""),
-            str(item[1].get("column") or ""),
-        )
+    result = _rank_role_candidates(
+        phrase,
+        candidates,
+        role=role,
+        allowed_tables=allowed_tables,
     )
-    if not ranked or ranked[0][0] < 0.7:
-        return [], "missing"
-    if len(ranked) > 1:
-        exact_schema_match = ranked[0][0] >= 0.98 and ranked[1][0] < 0.98
-        if not exact_schema_match and abs(ranked[0][0] - ranked[1][0]) < 0.08:
-            return [], "ambiguous"
-    return [ranked[0][1]], "resolved"
+    if result.get("status") != "resolved":
+        return [], str(result.get("status") or "missing")
+    selected = result.get("selected") or {}
+    candidate = dict(selected.get("candidate") or {})
+    return [candidate], "resolved"
 
 
 def _merge_candidate_columns(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2481,6 +2423,341 @@ _GENERIC_ROLE_TERMS = {
     "total",
 }
 
+_WEAK_CONTEXT_WARNING = "Retrieved context is weak; planner confidence is low."
+
+_SCORING_TIERS = {
+    "exact_normalized_column": 1.0,
+    "owner_qualified_exact": 0.99,
+    "kb_glossary_semantic": 0.92,
+    "numeric_metric_eligible": 0.74,
+    "dimension_type_eligible": 0.7,
+    "sample_value_filter_match": 0.88,
+    "direct_graph_compatible": 0.96,
+    "selected_join_path_agreement": 1.0,
+    "aggregate_ranking_keyword_agreement": 0.93,
+    "source_phrase_agreement": 0.9,
+}
+
+_NUMERIC_METRIC_SEMANTIC_TYPES = {
+    "money",
+    "quantity",
+    "percentage",
+    "numeric_candidate",
+    "number",
+    "decimal",
+    "integer",
+    "float",
+}
+
+_NON_METRIC_SEMANTIC_TYPES = {
+    "status",
+    "text",
+    "text_candidate",
+    "category",
+    "category_candidate",
+    "date",
+    "name",
+    "code",
+    "id",
+    "reference",
+}
+
+_DIMENSION_SEMANTIC_TYPES = {
+    "status",
+    "text",
+    "text_candidate",
+    "category",
+    "category_candidate",
+    "date",
+    "name",
+    "code",
+    "reference",
+}
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _candidate_semantic_type(entry: dict[str, Any]) -> str:
+    return str(
+        entry.get("semantic_type")
+        or entry.get("core_semantic_type")
+        or ""
+    ).strip().lower()
+
+
+def _is_numeric_sql_type(data_type: str) -> bool:
+    normalized = str(data_type or "").strip().lower()
+    return any(
+        token in normalized
+        for token in (
+            "decimal",
+            "numeric",
+            "number",
+            "int",
+            "float",
+            "double",
+            "real",
+            "money",
+        )
+    )
+
+
+def _is_textual_sql_type(data_type: str) -> bool:
+    normalized = str(data_type or "").strip().lower()
+    return any(
+        token in normalized
+        for token in (
+            "char",
+            "text",
+            "date",
+            "time",
+            "bool",
+            "json",
+        )
+    )
+
+
+def _candidate_is_numeric_metric(entry: dict[str, Any]) -> bool:
+    semantic_type = _candidate_semantic_type(entry)
+    data_type = str(entry.get("data_type") or entry.get("type") or "").strip().lower()
+    if semantic_type in _NON_METRIC_SEMANTIC_TYPES:
+        return False
+    if _is_textual_sql_type(data_type) and not _is_numeric_sql_type(data_type):
+        return False
+    return bool(
+        entry.get("is_measure")
+        or semantic_type in _NUMERIC_METRIC_SEMANTIC_TYPES
+        or _is_numeric_sql_type(data_type)
+    )
+
+
+def _candidate_is_dimension(entry: dict[str, Any], phrase: str) -> bool:
+    semantic_type = _candidate_semantic_type(entry)
+    data_type = str(entry.get("data_type") or entry.get("type") or "").strip().lower()
+    column_tokens = {_singularize_token(token) for token in _tokenize(str(entry.get("column") or ""))}
+    phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
+    exact_column_request = bool(phrase_tokens and phrase_tokens == column_tokens)
+    if bool(entry.get("is_measure")) and _candidate_is_numeric_metric(entry) and not exact_column_request:
+        return False
+    return bool(
+        entry.get("is_dimension")
+        or entry.get("is_date")
+        or semantic_type in _DIMENSION_SEMANTIC_TYPES
+        or _is_textual_sql_type(data_type)
+        or exact_column_request
+    )
+
+
+def _role_candidate_scoring_entry(
+    phrase: str,
+    entry: dict[str, Any],
+    *,
+    role: str = "generic",
+) -> dict[str, Any] | None:
+    phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
+    table_name = str(entry.get("table") or "").strip()
+    column_name = str(entry.get("column") or "").strip()
+    column_tokens = {_singularize_token(token) for token in _tokenize(column_name)}
+    table_tokens = {_singularize_token(token) for token in _tokenize(table_name)}
+    qualified_tokens = table_tokens | column_tokens
+    if not phrase_tokens or not column_tokens:
+        return None
+
+    if role == "metric" and not _candidate_is_numeric_metric(entry):
+        return None
+    if role == "dimension" and not _candidate_is_dimension(entry, phrase):
+        return None
+
+    normalized_phrase = _humanize(phrase)
+    normalized_column = _humanize(column_name)
+    generic_single_token = len(phrase_tokens) == 1 and next(iter(phrase_tokens), "") in _GENERIC_ROLE_TERMS
+    matched_terms = [
+        str(term).strip()
+        for term in (entry.get("matched_terms") or [])
+        if str(term).strip()
+    ]
+    matched_term_tokens = [
+        {_singularize_token(token) for token in _tokenize(term)}
+        for term in matched_terms
+        if _tokenize(term)
+    ]
+
+    tier = ""
+    score = 0.0
+    reasons: list[str] = []
+
+    if normalized_column == normalized_phrase or phrase_tokens == column_tokens:
+        tier = "exact_normalized_column"
+        score = _SCORING_TIERS[tier]
+        reasons.append("exact normalized column phrase match")
+    elif phrase_tokens == qualified_tokens:
+        tier = "owner_qualified_exact"
+        score = _SCORING_TIERS[tier]
+        reasons.append("owner-qualified exact column phrase match")
+    elif not generic_single_token and any(phrase_tokens == tokens for tokens in matched_term_tokens):
+        tier = "kb_glossary_semantic"
+        score = _SCORING_TIERS[tier]
+        reasons.append("KB glossary or semantic term matched exactly")
+    elif not generic_single_token and any(phrase_tokens == table_tokens | tokens for tokens in matched_term_tokens):
+        tier = "owner_qualified_exact"
+        score = _SCORING_TIERS[tier]
+        reasons.append("owner-qualified semantic term matched exactly")
+    else:
+        lexical_score = _role_candidate_match_score(phrase, entry)
+        if lexical_score <= 0:
+            return None
+        if role == "metric":
+            tier = "numeric_metric_eligible"
+        elif role == "dimension":
+            tier = "dimension_type_eligible"
+        elif role == "filter":
+            tier = "sample_value_filter_match"
+        else:
+            tier = "kb_glossary_semantic"
+        score = round(max(lexical_score, _SCORING_TIERS[tier]), 4)
+        reasons.append(f"{tier.replace('_', ' ')} supported by candidate evidence")
+
+    evidence_score = _safe_float(entry.get("score") or entry.get("confidence"), 0.0)
+    return {
+        "candidate": dict(entry),
+        "tier": tier,
+        "score": round(min(score, 1.0), 4),
+        "candidate_score": round(evidence_score, 4),
+        "reasons": reasons,
+    }
+
+
+def _rank_role_candidates(
+    phrase: str,
+    candidates: list[dict[str, Any]],
+    *,
+    role: str = "generic",
+    allowed_tables: set[str] | None = None,
+) -> dict[str, Any]:
+    ranked: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in candidates or []:
+        table_name = str(candidate.get("table") or "").strip()
+        column_name = str(candidate.get("column") or "").strip()
+        signature = (table_name, column_name)
+        if not all(signature) or signature in seen:
+            continue
+        if allowed_tables is not None and table_name not in allowed_tables:
+            continue
+        seen.add(signature)
+        scored = _role_candidate_scoring_entry(phrase, candidate, role=role)
+        if scored:
+            ranked.append(scored)
+
+    ranked.sort(
+        key=lambda item: (
+            -_safe_float(item.get("score")),
+            -_safe_float(item.get("candidate_score")),
+            str(item.get("candidate", {}).get("table") or ""),
+            str(item.get("candidate", {}).get("column") or ""),
+        )
+    )
+    if not ranked:
+        return {"status": "missing", "selected": None, "ranked": [], "tie_reason": ""}
+
+    phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
+    generic_single_token = len(phrase_tokens) == 1 and next(iter(phrase_tokens), "") in _GENERIC_ROLE_TERMS
+    if generic_single_token and len(ranked) > 1:
+        return {
+            "status": "ambiguous",
+            "selected": None,
+            "ranked": ranked,
+            "tie_reason": "generic single-token phrase matched multiple safe candidates",
+        }
+
+    top = ranked[0]
+    ties = [
+        item for item in ranked
+        if item.get("tier") == top.get("tier")
+        and abs(_safe_float(item.get("score")) - _safe_float(top.get("score"))) < 0.0001
+    ]
+    if len(ties) > 1:
+        return {
+            "status": "ambiguous",
+            "selected": None,
+            "ranked": ranked,
+            "tie_reason": f"multiple candidates tied at tier {top.get('tier')}",
+        }
+    return {"status": "resolved", "selected": top, "ranked": ranked, "tie_reason": ""}
+
+
+def _selected_evidence_entry(result: dict[str, Any], *, selected: dict[str, Any] | None = None) -> dict[str, Any]:
+    selected_item = selected or result.get("selected") or {}
+    ranked = list(result.get("ranked") or [])
+    candidate = dict(selected_item.get("candidate") or selected_item or {})
+    losers = [
+        {
+            "table": item.get("candidate", {}).get("table"),
+            "column": item.get("candidate", {}).get("column"),
+            "tier": item.get("tier"),
+            "score": item.get("score"),
+            "reasons": item.get("reasons", []),
+        }
+        for item in ranked
+        if item is not selected_item
+    ][:5]
+    return {
+        "status": result.get("status", "resolved" if candidate else "missing"),
+        "selected": candidate or None,
+        "tier": selected_item.get("tier"),
+        "score": selected_item.get("score"),
+        "reasons": list(selected_item.get("reasons") or []),
+        "losing_candidates": losers,
+        "tie_reason": result.get("tie_reason", ""),
+    }
+
+
+def _graph_selected_evidence_entry(edge: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "resolved",
+        "selected": dict(edge),
+        "tier": "selected_join_path_agreement",
+        "score": _SCORING_TIERS["selected_join_path_agreement"],
+        "reasons": ["selected_join_path agrees with one direct Relationship Graph edge"],
+        "losing_candidates": [],
+        "tie_reason": "",
+    }
+
+
+def _source_selected_evidence_entry(table_name: str, phrase: str, status: str) -> dict[str, Any]:
+    tier = "source_phrase_agreement" if status == "resolved" and phrase else None
+    return {
+        "status": status,
+        "selected": {"table": table_name} if table_name else None,
+        "tier": tier,
+        "score": _SCORING_TIERS[tier] if tier else None,
+        "reasons": [f"source phrase '{phrase}' resolved to base table"] if tier else [],
+        "losing_candidates": [],
+        "tie_reason": "",
+    }
+
+
+def _has_strong_joined_evidence(selected_evidence: dict[str, Any], *, aggregate_function: str | None = None) -> bool:
+    graph = selected_evidence.get("relationship_graph") or {}
+    if graph.get("tier") != "selected_join_path_agreement":
+        return False
+    dimension_tier = (selected_evidence.get("dimension") or {}).get("tier")
+    if dimension_tier not in {"exact_normalized_column", "owner_qualified_exact", "kb_glossary_semantic"}:
+        return False
+    if aggregate_function == "count":
+        return True
+    metric_tier = (selected_evidence.get("metric") or {}).get("tier")
+    return metric_tier in {"exact_normalized_column", "owner_qualified_exact", "kb_glossary_semantic"}
+
+
+def _remove_weak_context_warning(warnings: list[Any]) -> list[Any]:
+    return [warning for warning in warnings if warning != _WEAK_CONTEXT_WARNING]
+
 
 def _joined_aggregate_failure_context(
     context: dict[str, Any],
@@ -2518,6 +2795,17 @@ def _joined_aggregate_failure_context(
             "selected_join_path": None,
             "selected_relationship_path": None,
             "selected_output_columns": [],
+            "selected_evidence": {
+                blocked_node: {
+                    "status": "blocked",
+                    "selected": None,
+                    "tier": None,
+                    "score": None,
+                    "reasons": [reason],
+                    "losing_candidates": [],
+                    "tie_reason": reason if "ambiguous" in reason or "multiple" in reason else "",
+                }
+            },
             "clause_plan": {
                 "clause_shape": "unsupported",
                 "selected_join_path": None,
@@ -2566,6 +2854,7 @@ def _joined_aggregate_filter_contract(
             field_phrase,
             filter_candidates,
             allowed_tables=allowed_tables,
+            role="filter",
         )
         if status != "resolved" or len(resolved) != 1:
             return [], f"joined WHERE field evidence is {status}"
@@ -2833,6 +3122,9 @@ def _resolve_entity_display_dimension(
     table_name, table_status = _resolve_join_table(entity_phrase, knowledge_base, [])
     if table_status != "resolved" or not table_name:
         return [], table_status
+    phrase_tokens = {_singularize_token(token) for token in _tokenize(entity_phrase)}
+    table_tokens = {_singularize_token(token) for token in _tokenize(table_name)}
+    residual_tokens = phrase_tokens - table_tokens
     display_candidates: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for candidate in dimension_candidates:
@@ -2844,6 +3136,8 @@ def _resolve_entity_display_dimension(
         semantic_type = str(candidate.get("semantic_type") or "").strip().lower()
         column_tokens = {_singularize_token(token) for token in _tokenize(column_name)}
         is_display = semantic_type == "name" or "name" in column_tokens
+        if residual_tokens and not residual_tokens <= column_tokens:
+            continue
         if not is_display:
             continue
         signature = (table_name, column_name)
@@ -2988,40 +3282,93 @@ def _apply_joined_aggregate_contract(
         if isinstance(entry, dict)
     ]
     metric: dict[str, Any] | None = None
+    metric_evidence_result: dict[str, Any] = {"status": "not_required", "selected": None, "ranked": []}
     modifier_filter_phrase: str | None = None
     if aggregate_function != "count":
-        resolved_metrics, metric_status = _resolve_role_candidate(metric_phrase, metric_candidates)
-        if metric_status != "resolved" or len(resolved_metrics) != 1:
-            modifier_metric, modifier_phrase, modifier_status = _resolve_metric_with_modifier(
-                metric_phrase,
-                metric_candidates,
-            )
-            if modifier_status == "resolved" and modifier_metric is not None:
-                metric = modifier_metric
-                aggregate_words = {"total", "sum", "average", "avg", "mean", "maximum", "max", "minimum", "min"}
-                if _normalize(modifier_phrase or "") not in aggregate_words:
-                    modifier_filter_phrase = modifier_phrase
-            else:
-                schema_metric, schema_metric_status = _resolve_owned_monetary_metric_from_schema(
-                    metric_phrase,
-                    knowledge_base,
-                )
-                if schema_metric_status == "resolved" and schema_metric is not None:
-                    metric = schema_metric
-                else:
-                    return _joined_aggregate_failure_context(
-                        context,
-                        blocked_node="metric",
-                        reason=f"joined aggregate metric evidence is {schema_metric_status if metric_status == 'missing' else metric_status}",
-                        resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate"},
-                    )
+        metric_evidence_result = _rank_role_candidates(metric_phrase, metric_candidates, role="metric")
+        modifier_metric = None
+        modifier_phrase = None
+        modifier_status = "missing"
+        modifier_evidence_result: dict[str, Any] = {"status": "missing", "selected": None, "ranked": []}
+        original_tier = str((metric_evidence_result.get("selected") or {}).get("tier") or "")
+        should_try_modifier = (
+            metric_evidence_result.get("status") != "resolved"
+            or original_tier not in {"exact_normalized_column", "owner_qualified_exact", "kb_glossary_semantic"}
+        )
+        if should_try_modifier:
+            tokens = _tokenize(metric_phrase)
+            for split_at in range(1, len(tokens)):
+                candidate_modifier_phrase = " ".join(tokens[:split_at]).strip()
+                residual_phrase = " ".join(tokens[split_at:]).strip()
+                candidate_result = _rank_role_candidates(residual_phrase, metric_candidates, role="metric")
+                candidate_status = str(candidate_result.get("status") or "missing")
+                if candidate_status == "resolved":
+                    modifier_metric = dict(candidate_result.get("selected", {}).get("candidate") or {})
+                    modifier_phrase = candidate_modifier_phrase
+                    modifier_status = "resolved"
+                    modifier_evidence_result = candidate_result
+                    break
+                if candidate_status == "ambiguous":
+                    modifier_status = "ambiguous"
+                    modifier_evidence_result = candidate_result
+                    break
+        if modifier_status == "resolved" and modifier_metric is not None:
+            metric = modifier_metric
+            metric_evidence_result = modifier_evidence_result
+            aggregate_words = {"total", "sum", "average", "avg", "mean", "maximum", "max", "minimum", "min"}
+            if _normalize(modifier_phrase or "") not in aggregate_words:
+                modifier_filter_phrase = modifier_phrase
+        elif metric_evidence_result.get("status") == "resolved":
+            metric = dict(metric_evidence_result.get("selected", {}).get("candidate") or {})
         else:
-            metric = dict(resolved_metrics[0])
+            if modifier_status == "ambiguous":
+                metric_evidence_result = modifier_evidence_result
+            else:
+                metric_evidence_result = metric_evidence_result
+            if modifier_status == "ambiguous":
+                return _joined_aggregate_failure_context(
+                    context,
+                    blocked_node="metric",
+                    reason="joined aggregate metric evidence is ambiguous",
+                    resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate"},
+                )
+            schema_metric, schema_metric_status = _resolve_owned_monetary_metric_from_schema(
+                metric_phrase,
+                knowledge_base,
+            )
+            if schema_metric_status == "resolved" and schema_metric is not None:
+                metric = schema_metric
+                metric_evidence_result = {
+                    "status": "resolved",
+                    "selected": {
+                        "candidate": dict(schema_metric),
+                        "tier": "numeric_metric_eligible",
+                        "score": _SCORING_TIERS["numeric_metric_eligible"],
+                        "candidate_score": _safe_float(schema_metric.get("score")),
+                        "reasons": ["fallback-only schema/profile metric evidence"],
+                    },
+                    "ranked": [],
+                    "tie_reason": "",
+                }
+            else:
+                return _joined_aggregate_failure_context(
+                    context,
+                    blocked_node="metric",
+                    reason=f"joined aggregate metric evidence is {schema_metric_status if metric_evidence_result.get('status') == 'missing' else metric_evidence_result.get('status')}",
+                    resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate"},
+                )
 
-    resolved_dimensions, dimension_status = _resolve_role_candidate(
+    dimension_evidence_result = _rank_role_candidates(
         dimension_phrase,
         dimension_candidates,
+        role="dimension",
     )
+    if dimension_evidence_result.get("status") == "resolved":
+        resolved_dimensions = [dict(dimension_evidence_result.get("selected", {}).get("candidate") or {})]
+        dimension_status = "resolved"
+    else:
+        resolved_dimensions = []
+        dimension_status = str(dimension_evidence_result.get("status") or "missing")
     if dimension_status != "resolved" or len(resolved_dimensions) != 1:
         display_dimensions, display_status = _resolve_entity_display_dimension(
             dimension_phrase,
@@ -3030,6 +3377,20 @@ def _apply_joined_aggregate_contract(
         )
         if display_status == "resolved" and len(display_dimensions) == 1:
             resolved_dimensions = display_dimensions
+            display_tier = "owner_qualified_exact"
+            display_reason = "unique owner entity display column resolved from deterministic evidence"
+            dimension_evidence_result = {
+                "status": "resolved",
+                "selected": {
+                    "candidate": dict(display_dimensions[0]),
+                    "tier": display_tier,
+                    "score": _SCORING_TIERS[display_tier],
+                    "candidate_score": _safe_float(display_dimensions[0].get("score")),
+                    "reasons": [display_reason],
+                },
+                "ranked": [],
+                "tie_reason": "",
+            }
         else:
             if dimension_status == "missing" and display_status == "missing":
                 return context
@@ -3047,6 +3408,7 @@ def _apply_joined_aggregate_contract(
     if aggregate_function == "count" and not source_phrase:
         source_phrase = str(intent.get("target_entity_phrase") or "").strip()
     base_table = str((metric or {}).get("table") or "").strip()
+    source_evidence_status = "not_required"
     deferred_source_filter_phrase: str | None = None
     if source_phrase:
         if aggregate_function == "count":
@@ -3068,6 +3430,7 @@ def _apply_joined_aggregate_contract(
             deferred_source_filter_phrase = source_phrase
         else:
             base_table = explicit_base
+        source_evidence_status = base_status
     if not base_table:
         return context if ranking_candidate else _joined_aggregate_failure_context(
             context,
@@ -3231,6 +3594,62 @@ def _apply_joined_aggregate_contract(
         "path_source": "relationship_graph",
         "ambiguity_status": "resolved",
     }
+    selected_evidence = {
+        "metric": (
+            {
+                "status": "not_required",
+                "selected": None,
+                "tier": None,
+                "score": None,
+                "reasons": ["COUNT(*) does not require a metric column"],
+                "losing_candidates": [],
+                "tie_reason": "",
+            }
+            if aggregate_function == "count"
+            else _selected_evidence_entry(metric_evidence_result)
+        ),
+        "dimension": _selected_evidence_entry(dimension_evidence_result),
+        "filters": [
+            {
+                "status": "resolved",
+                "selected": dict(entry),
+                "tier": "sample_value_filter_match" if entry.get("source") in {"metric_modifier_value_filter", "source_scope_value_filter"} else "kb_glossary_semantic",
+                "score": _SCORING_TIERS["sample_value_filter_match"] if entry.get("source") in {"metric_modifier_value_filter", "source_scope_value_filter"} else _safe_float(entry.get("score") or entry.get("evidence_score"), 0.0),
+                "reasons": ["row-level filter resolved from deterministic candidate evidence"],
+                "losing_candidates": [],
+                "tie_reason": "",
+            }
+            for entry in selected_filters
+        ],
+        "source_table": _source_selected_evidence_entry(base_table, source_phrase, source_evidence_status),
+        "order_by": (
+            {
+                "status": "resolved",
+                "selected": dict(selected_order_by),
+                "tier": "aggregate_ranking_keyword_agreement",
+                "score": _SCORING_TIERS["aggregate_ranking_keyword_agreement"],
+                "reasons": ["ranking ORDER BY uses selected aggregate alias"],
+                "losing_candidates": [],
+                "tie_reason": "",
+            }
+            if selected_order_by
+            else {
+                "status": "not_required",
+                "selected": None,
+                "tier": None,
+                "score": None,
+                "reasons": ["no aggregate ordering was requested"],
+                "losing_candidates": [],
+                "tie_reason": "",
+            }
+        ),
+        "relationship_graph": _graph_selected_evidence_entry(edge),
+    }
+    planned_confidence = _safe_float(context.get("confidence"), 0.0)
+    planned_warnings = list(context.get("warnings") or [])
+    if _has_strong_joined_evidence(selected_evidence, aggregate_function=aggregate_function):
+        planned_confidence = max(planned_confidence, 0.86)
+        planned_warnings = _remove_weak_context_warning(planned_warnings)
     metric_column = "" if aggregate_function == "count" else str(metric.get("column") or "")
     aggregate_expression = (
         "COUNT(*)"
@@ -3338,9 +3757,12 @@ def _apply_joined_aggregate_contract(
             "selected_order_by": selected_order_by,
             "selected_join_path": selected_join_path,
             "selected_relationship_path": selected_join_path,
+            "selected_evidence": selected_evidence,
             "join_paths": [],
             "required_joins": [required_join],
             "limit": limit,
+            "confidence": round(planned_confidence, 2),
+            "warnings": planned_warnings,
             "missing_evidence": [],
             "ambiguities": [],
             "ambiguity_details": [],
@@ -3379,6 +3801,7 @@ def _apply_joined_aggregate_contract(
         "having": selected_having,
         "selected_order_by": dict(selected_order_by or {}),
         "selected_join_path": selected_join_path,
+        "selected_evidence": selected_evidence,
         "required_joins": [required_join],
         "limit": limit,
         "clause_plan": dict(planned["clause_plan"]),
@@ -3625,6 +4048,27 @@ def _apply_join_lookup_contract(
         "path_source": "relationship_graph",
         "ambiguity_status": "resolved",
     }
+    selected_evidence = {
+        "metric": {"status": "not_required", "selected": None, "tier": None, "score": None, "reasons": [], "losing_candidates": [], "tie_reason": ""},
+        "dimension": {"status": "not_required", "selected": None, "tier": None, "score": None, "reasons": [], "losing_candidates": [], "tie_reason": ""},
+        "filters": [
+            {
+                "status": "resolved",
+                "selected": dict(entry),
+                "tier": "sample_value_filter_match",
+                "score": _safe_float(entry.get("score") or entry.get("evidence_score"), 0.0),
+                "reasons": ["row-level filter resolved from deterministic candidate evidence"],
+                "losing_candidates": [],
+                "tie_reason": "",
+            }
+            for entry in selected_filters
+        ],
+        "source_table": _source_selected_evidence_entry(base_table, base_phrase, "resolved" if base_table else "missing"),
+        "order_by": {"status": "not_required", "selected": None, "tier": None, "score": None, "reasons": [], "losing_candidates": [], "tie_reason": ""},
+        "relationship_graph": _graph_selected_evidence_entry(edge),
+    }
+    planned_confidence = max(_safe_float(context.get("confidence"), 0.0), 0.86)
+    planned_warnings = _remove_weak_context_warning(list(context.get("warnings") or []))
     decision_path = [
         {
             "node": node_name,
@@ -3673,9 +4117,12 @@ def _apply_join_lookup_contract(
             "selected_output_columns": list(deduped_outputs),
             "selected_join_path": selected_join_path,
             "selected_relationship_path": selected_join_path,
+            "selected_evidence": selected_evidence,
             "join_paths": [selected_join_path],
             "required_joins": [required_join],
             "limit": resolved_limit,
+            "confidence": round(planned_confidence, 2),
+            "warnings": planned_warnings,
             "missing_evidence": [],
             "ambiguities": [],
             "clause_plan": {
@@ -3708,6 +4155,7 @@ def _apply_join_lookup_contract(
         "selected_tables": selected_tables,
         "selected_columns": list(deduped_outputs),
         "selected_join_path": selected_join_path,
+        "selected_evidence": selected_evidence,
         "required_joins": [required_join],
         "limit": resolved_limit,
         "route_recommendation": "deterministic_sql_required",

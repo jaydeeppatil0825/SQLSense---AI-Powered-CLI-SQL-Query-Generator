@@ -408,6 +408,79 @@ def test_product_joined_aggregate_and_entity_ranking_questions():
     assert "ORDER BY sum__order_items__line_total DESC" in top_products_sql
     assert "LIMIT 4" in top_products_sql
 
+    brand_count = _context("count order items by product brand", kb=kb)
+    brand_count_sql = generate_deterministic_sql(query_context=brand_count, knowledge_base=kb).sql
+    assert brand_count["route_recommendation"] == "deterministic_sql_required"
+    assert brand_count["selected_dimensions"][0]["table"] == "products"
+    assert brand_count["selected_dimensions"][0]["column"] == "brand"
+    assert "COUNT(*) AS count__order_items__rows" in brand_count_sql
+    assert "GROUP BY products.brand" in brand_count_sql
+
+
+def test_joined_aggregate_selected_evidence_lifts_exact_graph_confidence():
+    question = "show total order amount by customer city"
+    kb = _knowledge_base()
+    intent = build_intent(question)
+    evidence = _evidence(question)
+    evidence["confidence"] = 0.2
+
+    context = build_query_context(question, kb, intent=intent, retrieved_context=evidence)
+
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["confidence"] >= 0.86
+    assert "Retrieved context is weak; planner confidence is low." not in context["warnings"]
+    assert context["selected_evidence"]["metric"]["tier"] in {"exact_normalized_column", "owner_qualified_exact", "kb_glossary_semantic"}
+    assert context["selected_evidence"]["dimension"]["tier"] == "owner_qualified_exact"
+    assert context["selected_evidence"]["relationship_graph"]["tier"] == "selected_join_path_agreement"
+
+
+def test_joined_aggregate_fallback_metric_keeps_weak_context_warning():
+    question = "show total item sales by product category"
+    kb = _knowledge_base()
+    intent = build_intent(question)
+    product_category = _candidate("products", "category", role="dimension", terms=["product category"])
+    evidence = _evidence(question)
+    evidence["confidence"] = 0.2
+    evidence["measure_candidates"] = []
+    evidence["matched_columns"] = [product_category]
+    evidence["dimension_candidates"] = [product_category]
+
+    context = build_query_context(question, kb, intent=intent, retrieved_context=evidence)
+
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["selected_evidence"]["metric"]["tier"] == "numeric_metric_eligible"
+    assert "fallback-only" in " ".join(context["selected_evidence"]["metric"]["reasons"])
+    assert "Retrieved context is weak; planner confidence is low." in context["warnings"]
+
+
+def test_status_column_marked_measure_cannot_pollute_metric_candidates():
+    question = "show sum payment status by customer city from service orders"
+    kb = _knowledge_base()
+    intent = build_intent(question)
+    bad_status_metric = {
+        "table": "service_orders",
+        "column": "payment_status",
+        "semantic_type": "status",
+        "core_semantic_type": "status",
+        "data_type": "VARCHAR(30)",
+        "is_measure": True,
+        "is_dimension": True,
+        "score": 0.99,
+        "matched_terms": ["payment status"],
+        "source": "test_bad_metric",
+    }
+    customer_city = _candidate("customers", "city", role="dimension", terms=["customer city"])
+    evidence = _evidence(question)
+    evidence["measure_candidates"] = [bad_status_metric]
+    evidence["matched_columns"] = [bad_status_metric, customer_city]
+    evidence["dimension_candidates"] = [customer_city]
+
+    context = build_query_context(question, kb, intent=intent, retrieved_context=evidence)
+
+    assert context["route_recommendation"] == "cannot_plan_safely"
+    assert context["query_shape"] == "joined_aggregate"
+    assert context["selected_join_path"] is None
+
 
 def test_joined_aggregate_resolves_unique_owner_table_monetary_metric_without_retrieval_mapping():
     question = "show total item sales by product category"

@@ -107,7 +107,7 @@ def connect_engine(
     db_type: str,
     host: str = "",
     port: int | None = None,
-    username: str = "",
+    username : str = "",
     password: str = "",
     database: str = "",
     sqlite_path: str = "",
