@@ -84,6 +84,12 @@ def retrieve_context(
         for value in (intent.get("requested_dimensions") or [])
         if str(value).strip()
     ]
+    if (
+        str(intent.get("intent_type") or "").strip().lower() == "ranking"
+        and not requested_dimension_terms_for_lookup
+        and str(intent.get("target_entity_phrase") or "").strip()
+    ):
+        requested_dimension_terms_for_lookup.append(str(intent.get("target_entity_phrase") or "").strip())
     requested_sort_terms_for_lookup = [
         str((intent.get("requested_sort") or {}).get("terms") or "").strip()
     ]
@@ -197,8 +203,19 @@ def retrieve_context(
         require_measure=True,
         allow_role_only=bool(intent.get("metric_is_generic")),
     )
+    requested_dimension_terms = [
+        str(value).strip()
+        for value in (intent.get("requested_dimensions") or [])
+        if str(value).strip()
+    ]
+    if (
+        str(intent.get("intent_type") or "").strip().lower() == "ranking"
+        and not requested_dimension_terms
+        and str(intent.get("target_entity_phrase") or "").strip()
+    ):
+        requested_dimension_terms.append(str(intent.get("target_entity_phrase") or "").strip())
     dimension_candidates = _candidate_columns(
-        intent.get("requested_dimensions") or [],
+        requested_dimension_terms,
         _merge_column_candidates(
             vector_context.get("candidate_dimensions", []),
             vector_context.get("candidate_dates", []),
@@ -547,6 +564,8 @@ def _match_columns(query_terms: list[str], knowledge_base: Dict[str, Any]) -> li
                 _humanize(column_name),
                 table_name,
                 _humanize(table_name),
+                f"{table_name} {column_name}",
+                _humanize(f"{table_name} {column_name}"),
                 column_business_description(column),
                 *column_business_terms(column),
                 *column_sample_values(column),
@@ -599,6 +618,8 @@ def _match_filter_field_columns(
             search_texts = [
                 column_name,
                 _humanize(column_name),
+                f"{table_name} {column_name}",
+                _humanize(f"{table_name} {column_name}"),
                 *column_business_terms(column),
             ]
             best_score = 0.0
@@ -1403,6 +1424,8 @@ def _role_candidate_score(
         _humanize(column_name),
         table_name,
         _humanize(table_name),
+        f"{table_name} {column_name}",
+        _humanize(f"{table_name} {column_name}"),
         semantic_type,
         core_semantic_type,
         *matched_terms,

@@ -138,6 +138,7 @@ def test_intent_contract_is_versioned_and_preserves_legacy_fields():
     intent = build_intent("show all bills", ai_backend="local")
 
     assert intent["intent_contract_version"] == "1.0"
+    assert "keyword_markers" in intent
     assert intent["structured_filters"] == []
     assert intent["parse_diagnostics"]["has_issues"] is False
     assert "deterministic_pattern_match" in intent["confidence_reasons"]
@@ -153,6 +154,45 @@ def test_intent_contract_is_versioned_and_preserves_legacy_fields():
         "target_entity_phrase",
         "metric_phrase",
     } <= set(intent)
+
+
+def test_keyword_markers_are_generic_and_additive():
+    intent = build_intent(
+        "top 3 customers by total amount where status is not null",
+        ai_backend="local",
+    )
+
+    markers = intent["keyword_markers"]
+    assert {entry["normalized"] for entry in markers["ranking"]} == {"desc"}
+    assert any(entry["normalized"] == "sum" for entry in markers["aggregate"])
+    assert any(entry["normalized"] == "by" for entry in markers["grouping"])
+    assert any(entry["normalized"] == "where" for entry in markers["filter"])
+    assert {"negation", "null_check"} <= {entry["normalized"] for entry in markers["operator"]}
+
+
+def test_with_status_filter_uses_generic_status_phrase_only():
+    intent = build_intent("show bills with status paid", ai_backend="local")
+
+    assert intent["requested_filters"] == ["status paid"]
+    assert intent["structured_filters"] == [
+        {
+            "raw_phrase": "status paid",
+            "field": "status",
+            "field_phrase": "status",
+            "operator": "eq",
+            "value": "paid",
+            "value_phrase": "paid",
+            "values": ["paid"],
+            "conjunction": None,
+        }
+    ]
+
+
+def test_with_details_remains_join_detail_not_filter():
+    intent = build_intent("show orders with customer details", ai_backend="local")
+
+    assert intent["structured_filters"] == []
+    assert intent["join_lookup_request"]["requested"] is True
 
 
 def test_show_count_of_bills_uses_count_contract():

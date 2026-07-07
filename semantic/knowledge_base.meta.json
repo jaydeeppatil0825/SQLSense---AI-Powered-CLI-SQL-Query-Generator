@@ -2,9 +2,9 @@
     "db_engine": "mysql",
     "db_host": "localhost",
     "db_port": "3306",
-    "db_name": "sqlsense_phase6_joined_agg_lab",
+    "db_name": "sqlsense_join_phase_simple_lab",
     "database_type": "mysql",
-    "database_name": "sqlsense_phase6_joined_agg_lab",
-    "schema_hash": "6bf0f158722f7a272761a29f157fa47b25e6cc9ba87fbbe64412e6c83c70a08d",
-    "schema_fingerprint": "6bf0f158722f7a272761a29f157fa47b25e6cc9ba87fbbe64412e6c83c70a08d"
+    "database_name": "sqlsense_join_phase_simple_lab",
+    "schema_hash": "9e28d3a88d9f5c409f3a1f66bc889bf8710377320334cba9f4e627b5fc4372fb",
+    "schema_fingerprint": "9e28d3a88d9f5c409f3a1f66bc889bf8710377320334cba9f4e627b5fc4372fb"
 }

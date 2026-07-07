@@ -59,7 +59,7 @@ _SORTED_BY_RE = re.compile(
 _RANKING_BY_RE = re.compile(
     r"^\s*(top|highest|largest|maximum|bottom|lowest|smallest|minimum)"
     r"(?:\s+(\d+))?\s+(.+?)\s+by\s+(.+?)"
-    r"(?=\s+(?:where|having|group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit|from)\b|$)",
+    r"(?=\s+(?:where|having|group(?:ed)?\s+by|sort(?:ed)?\s+by|order(?:ed)?\s+by|limit|from)\b|$)",
     re.IGNORECASE,
 )
 _BY_RE = re.compile(r"\s+by\s+", re.IGNORECASE)
@@ -113,6 +113,46 @@ _GENERIC_METRIC_TERMS = {
     "qty",
     "count",
 }
+_AGGREGATE_KEYWORD_MAP = {
+    "total": "sum",
+    "sum": "sum",
+    "average": "avg",
+    "minimum": "min",
+    "maximum": "max",
+    "count": "count",
+}
+_RANKING_KEYWORD_MAP = {
+    "top": "desc",
+    "highest": "desc",
+    "bottom": "asc",
+    "lowest": "asc",
+    "first": "asc",
+}
+_OPERATOR_KEYWORD_MAP = {
+    "greater than": "gt",
+    "less than": "lt",
+    "between": "between",
+    "contains": "contains",
+    "equal": "eq",
+    "equals": "eq",
+    "not": "negation",
+    "null": "null_check",
+}
+_GROUPING_MARKER_MAP = {
+    "group by": "group_by",
+    "by": "by",
+    "per": "per",
+}
+_FILTER_MARKER_MAP = {
+    "where": "where",
+    "for": "for",
+    "with status": "with_status",
+    "is": "is",
+}
+_JOIN_DETAIL_MARKER_MAP = {
+    "with": "with",
+    "details": "details",
+}
 
 
 def build_intent(question: str, ai_backend: str = "local") -> Dict[str, Any]:
@@ -150,6 +190,7 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
     normalized = dict(intent or {})
     structured_filters = _extract_structured_filters(question)
     structured_having = _extract_structured_having(question)
+    keyword_markers = _extract_keyword_markers(question)
     intent_type = str(normalized.get("intent_type") or "unknown").strip().lower()
     confidence_reasons = ["deterministic_pattern_match"]
     missing_phrases: list[str] = []
@@ -225,6 +266,7 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
         unsupported_constructs.append("multiple_statements")
 
     normalized["intent_contract_version"] = INTENT_CONTRACT_VERSION
+    normalized["keyword_markers"] = keyword_markers
     normalized["structured_filters"] = structured_filters
     normalized["structured_having"] = structured_having
     normalized["requested_having"] = [
@@ -1030,6 +1072,43 @@ def _extract_limit_phrase(question: str) -> str:
     return ""
 
 
+def _keyword_entries(question: str, mapping: dict[str, str]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for keyword, normalized in mapping.items():
+        pattern = r"\b" + re.escape(keyword).replace(r"\ ", r"\s+") + r"\b"
+        for match in re.finditer(pattern, question, re.IGNORECASE):
+            entries.append(
+                {
+                    "keyword": _clean_scalar(match.group(0)).lower(),
+                    "normalized": normalized,
+                    "start": match.start(),
+                    "end": match.end(),
+                }
+            )
+    entries.sort(key=lambda entry: (int(entry["start"]), -int(entry["end"])))
+    deduped: list[dict[str, Any]] = []
+    occupied: set[tuple[int, int, str]] = set()
+    for entry in entries:
+        key = (int(entry["start"]), int(entry["end"]), str(entry["normalized"]))
+        if key in occupied:
+            continue
+        occupied.add(key)
+        deduped.append(entry)
+    return deduped
+
+
+def _extract_keyword_markers(question: str) -> dict[str, list[dict[str, Any]]]:
+    """Extract generic NLP grammar markers without assigning schema meaning."""
+    return {
+        "aggregate": _keyword_entries(question, _AGGREGATE_KEYWORD_MAP),
+        "ranking": _keyword_entries(question, _RANKING_KEYWORD_MAP),
+        "operator": _keyword_entries(question, _OPERATOR_KEYWORD_MAP),
+        "grouping": _keyword_entries(question, _GROUPING_MARKER_MAP),
+        "filter": _keyword_entries(question, _FILTER_MARKER_MAP),
+        "join_detail": _keyword_entries(question, _JOIN_DETAIL_MARKER_MAP),
+    }
+
+
 def _target_entity_phrase(
     *,
     intent_type: str,
@@ -1091,7 +1170,24 @@ def _extract_filter_text(question: str) -> str:
             if _parse_having_condition(candidate).get("aggregate_function"):
                 continue
             return candidate
+    with_match = _WITH_RE.search(question)
+    if with_match:
+        candidate = _cleanup_phrase(with_match.group(1))
+        if _with_phrase_is_row_filter(candidate):
+            return candidate
     return ""
+
+
+def _with_phrase_is_row_filter(phrase: str) -> bool:
+    if not phrase or _parse_having_condition(phrase).get("aggregate_function"):
+        return False
+    if re.search(
+        r"\b(?:between|contains|equals?|is|not\s+equal|greater\s+than|less\s+than|null|=|!=|<>|>=|<=|>|<)\b",
+        phrase,
+        re.IGNORECASE,
+    ):
+        return True
+    return bool(re.match(r"^\s*status\s+\S+", phrase, re.IGNORECASE))
 
 
 def _split_filter_phrases(filter_text: str) -> list[tuple[str, str | None]]:
@@ -1143,6 +1239,7 @@ def _extract_structured_filters(question: str) -> list[dict[str, Any]]:
         (r"^(.+?)\s+(?:is\s+on|on)\s+(.+)$", "eq"),
         (r"^(.+?)\s+(?:equals?|is|=)\s+(.+)$", "eq"),
         (r"^(.+?)\s+contains\s+(.+)$", "contains"),
+        (r"^(status)\s+(.+)$", "eq"),
     )
     for phrase, conjunction in phrases:
         entry = {

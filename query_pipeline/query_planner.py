@@ -2858,7 +2858,9 @@ def _apply_joined_aggregate_contract(
             )
             if modifier_status == "resolved" and modifier_metric is not None:
                 metric = modifier_metric
-                modifier_filter_phrase = modifier_phrase
+                aggregate_words = {"total", "sum", "average", "avg", "mean", "maximum", "max", "minimum", "min"}
+                if _normalize(modifier_phrase or "") not in aggregate_words:
+                    modifier_filter_phrase = modifier_phrase
             else:
                 return _joined_aggregate_failure_context(
                     context,
@@ -3192,6 +3194,7 @@ def _apply_joined_aggregate_contract(
             "limit": limit,
             "missing_evidence": [],
             "ambiguities": [],
+            "ambiguity_details": [],
             "clause_plan": {
                 "clause_shape": clause_shape,
                 "selected_join_path": selected_join_path,
@@ -4770,6 +4773,29 @@ def _normalize_planner_output(
         primary_table = metric_table or str(explicit_base or sole_selected_table or "")
     else:
         primary_table = str(explicit_base or metric_table or sole_selected_table or "")
+    implicit_filter_phrase = str(structured_intent.get("target_entity_phrase") or "").strip()
+    has_explicit_filter_request = bool(
+        structured_intent.get("structured_filters")
+        or structured_intent.get("requested_filters")
+        or plan.get("filters")
+    )
+    if (
+        query_shape == "single_table_list"
+        and primary_table
+        and implicit_filter_phrase
+        and not has_explicit_filter_request
+        and str(structured_intent.get("intent_type") or "").strip().lower() in {"list", "filter"}
+    ):
+        implicit_filter, implicit_filter_status = _source_scope_as_filter(
+            implicit_filter_phrase,
+            schema_for_resolution,
+            {primary_table},
+        )
+        if implicit_filter_status == "resolved" and implicit_filter is not None:
+            filter_candidates = _merge_candidate_columns([implicit_filter], filter_candidates)
+            selected_columns = _merge_candidate_columns(selected_columns, [implicit_filter])
+            plan["filters"] = [implicit_filter]
+            query_shape = "filtered_query"
     requested_dimensions = [
         str(value).strip()
         for value in (structured_intent.get("requested_dimensions") or [])
@@ -4913,6 +4939,24 @@ def _normalize_planner_output(
                 or {}
             )
         }
+
+    if (
+        query_shape == "single_table_list"
+        and len(selected_table_names) == 1
+        and implicit_filter_phrase
+        and not has_explicit_filter_request
+        and str(structured_intent.get("intent_type") or "").strip().lower() in {"list", "filter"}
+    ):
+        implicit_filter, implicit_filter_status = _source_scope_as_filter(
+            implicit_filter_phrase,
+            schema_for_resolution,
+            {selected_table_names[0]},
+        )
+        if implicit_filter_status == "resolved" and implicit_filter is not None:
+            filter_candidates = _merge_candidate_columns([implicit_filter], filter_candidates)
+            selected_columns = _merge_candidate_columns(selected_columns, [implicit_filter])
+            plan["filters"] = [implicit_filter]
+            query_shape = "filtered_query"
 
     join_candidates = _join_candidates_for_contract(join_paths, matched_relationships)
     required_joins = _required_join_predicates(join_paths)
