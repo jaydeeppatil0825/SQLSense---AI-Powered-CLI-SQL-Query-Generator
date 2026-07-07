@@ -1749,6 +1749,8 @@ def _resolve_role_candidate(
     exact_matches: list[dict[str, Any]] = []
     exact_seen: set[tuple[str, str]] = set()
     normalized_phrase = _humanize(phrase)
+    phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
+    generic_single_token = len(phrase_tokens) == 1 and next(iter(phrase_tokens), "") in _GENERIC_ROLE_TERMS
     for candidate in candidates or []:
         table_name = str(candidate.get("table") or "").strip()
         column_name = str(candidate.get("column") or "").strip()
@@ -1757,7 +1759,26 @@ def _resolve_role_candidate(
             continue
         if allowed_tables is not None and table_name not in allowed_tables:
             continue
-        if _humanize(column_name) != normalized_phrase:
+        column_tokens = {_singularize_token(token) for token in _tokenize(column_name)}
+        table_tokens = {_singularize_token(token) for token in _tokenize(table_name)}
+        exact_term_tokens = [
+            {_singularize_token(token) for token in _tokenize(str(term))}
+            for term in candidate.get("matched_terms") or []
+            if _tokenize(str(term))
+        ]
+        is_exact_match = (
+            _humanize(column_name) == normalized_phrase
+            or (phrase_tokens and phrase_tokens == column_tokens)
+            or (phrase_tokens and phrase_tokens == table_tokens | column_tokens)
+            or (
+                not generic_single_token
+                and (
+                    any(phrase_tokens == tokens for tokens in exact_term_tokens)
+                    or any(phrase_tokens == table_tokens | tokens for tokens in exact_term_tokens)
+                )
+            )
+        )
+        if not is_exact_match:
             continue
         exact_seen.add(signature)
         exact_matches.append(dict(candidate))
@@ -2450,6 +2471,15 @@ _EXPLICIT_UNSUPPORTED_JOIN_RE = re.compile(
     re.IGNORECASE,
 )
 
+_GENERIC_ROLE_TERMS = {
+    "amount",
+    "value",
+    "status",
+    "type",
+    "category",
+    "total",
+}
+
 
 def _joined_aggregate_failure_context(
     context: dict[str, Any],
@@ -2554,6 +2584,177 @@ def _joined_aggregate_filter_contract(
     return selected, ""
 
 
+def _sample_value_matches(value: str, sample: Any) -> bool:
+    return _humanize(str(value or "")) == _humanize(str(sample or ""))
+
+
+def _build_sample_value_filter(
+    *,
+    value_phrase: str,
+    knowledge_base: dict[str, Any],
+    allowed_tables: set[str],
+    owner_table: str | None = None,
+    source: str,
+) -> tuple[dict[str, Any] | None, str]:
+    value_phrase = str(value_phrase or "").strip()
+    if not value_phrase:
+        return None, "missing"
+    matches: list[dict[str, Any]] = []
+    tables = {owner_table} if owner_table else set(allowed_tables)
+    for table_name in tables:
+        if table_name not in allowed_tables:
+            continue
+        for column in knowledge_base.get(table_name, {}).get("columns", []) or []:
+            column_name = str(column.get("name") or "").strip()
+            if not column_name:
+                continue
+            matched_sample = None
+            for sample in column_sample_values(column):
+                if _sample_value_matches(value_phrase, sample):
+                    matched_sample = sample
+                    break
+            if matched_sample is None:
+                continue
+            matches.append(
+                {
+                    "table": table_name,
+                    "column": column_name,
+                    "field_phrase": column_name,
+                    "raw_phrase": value_phrase,
+                    "operator": "eq",
+                    "value": matched_sample,
+                    "value_phrase": value_phrase,
+                    "values": [matched_sample],
+                    "conjunction": "",
+                    "source": source,
+                }
+            )
+    if len(matches) == 1:
+        return matches[0], "resolved"
+    if len(matches) > 1:
+        return None, "ambiguous"
+    return None, "missing"
+
+
+def _source_scope_as_filter(
+    source_phrase: str,
+    knowledge_base: dict[str, Any],
+    allowed_tables: set[str],
+) -> tuple[dict[str, Any] | None, str]:
+    phrase_tokens = {_singularize_token(token) for token in _tokenize(source_phrase)}
+    owner_matches: list[tuple[float, str, set[str]]] = []
+    for table_name in allowed_tables:
+        table_tokens = {_singularize_token(token) for token in _tokenize(table_name)}
+        if not table_tokens or not table_tokens <= phrase_tokens:
+            continue
+        score = _table_phrase_score(source_phrase, table_name)
+        if score > 0:
+            owner_matches.append((score, table_name, table_tokens))
+    owner_matches.sort(key=lambda item: (-item[0], item[1]))
+    if not owner_matches:
+        return None, "missing"
+    if len(owner_matches) > 1 and abs(owner_matches[0][0] - owner_matches[1][0]) < 0.08:
+        return None, "ambiguous"
+    _, owner_table, owner_tokens = owner_matches[0]
+    value_tokens = [token for token in _tokenize(source_phrase) if _singularize_token(token) not in owner_tokens]
+    value_phrase = " ".join(value_tokens).strip()
+    return _build_sample_value_filter(
+        value_phrase=value_phrase,
+        knowledge_base=knowledge_base,
+        allowed_tables=allowed_tables,
+        owner_table=owner_table,
+        source="source_scope_value_filter",
+    )
+
+
+def _resolve_metric_with_modifier(
+    metric_phrase: str,
+    metric_candidates: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, str | None, str]:
+    tokens = _tokenize(metric_phrase)
+    if len(tokens) < 2:
+        return None, None, "missing"
+    for split_at in range(1, len(tokens)):
+        modifier_phrase = " ".join(tokens[:split_at]).strip()
+        residual_phrase = " ".join(tokens[split_at:]).strip()
+        resolved, status = _resolve_role_candidate(residual_phrase, metric_candidates)
+        if status == "resolved" and len(resolved) == 1:
+            return dict(resolved[0]), modifier_phrase, "resolved"
+        if status == "ambiguous":
+            return None, None, "ambiguous"
+    return None, None, "missing"
+
+
+def _resolve_entity_display_dimension(
+    entity_phrase: str,
+    dimension_candidates: list[dict[str, Any]],
+    knowledge_base: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str]:
+    table_name, table_status = _resolve_join_table(entity_phrase, knowledge_base, [])
+    if table_status != "resolved" or not table_name:
+        return [], table_status
+    display_candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in dimension_candidates:
+        if str(candidate.get("table") or "") != table_name:
+            continue
+        column_name = str(candidate.get("column") or "").strip()
+        if not column_name:
+            continue
+        semantic_type = str(candidate.get("semantic_type") or "").strip().lower()
+        column_tokens = {_singularize_token(token) for token in _tokenize(column_name)}
+        is_display = semantic_type == "name" or "name" in column_tokens
+        if not is_display:
+            continue
+        signature = (table_name, column_name)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        display_candidates.append(dict(candidate))
+    if len(display_candidates) == 1:
+        return display_candidates, "resolved"
+    if len(display_candidates) > 1:
+        return [], "ambiguous"
+    return [], "missing"
+
+
+def _resolve_count_base_table(
+    source_phrase: str,
+    dimension_table: str,
+    knowledge_base: dict[str, Any],
+) -> tuple[str | None, str]:
+    explicit_base, base_status = _resolve_join_table(source_phrase, knowledge_base, [])
+    if base_status == "resolved" and explicit_base:
+        return explicit_base, "resolved"
+    if base_status != "ambiguous":
+        return explicit_base, base_status
+
+    ranked = sorted(
+        (
+            (_table_phrase_score(source_phrase, table_name), table_name)
+            for table_name in knowledge_base
+            if table_name != dimension_table
+        ),
+        key=lambda item: (-item[0], item[1]),
+    )
+    ranked = [item for item in ranked if item[0] > 0]
+    if not ranked:
+        return None, "missing"
+    top_score = ranked[0][0]
+    tied_candidates = [table_name for score, table_name in ranked if abs(score - top_score) < 0.08]
+    graph = build_relationship_graph(knowledge_base, infer_relationships=False)
+    graph_backed = [
+        table_name
+        for table_name in tied_candidates
+        if len(find_safe_direct_join_relationships(graph, table_name, dimension_table)) == 1
+    ]
+    if len(graph_backed) == 1:
+        return graph_backed[0], "resolved"
+    if len(graph_backed) > 1:
+        return None, "ambiguous"
+    return None, "ambiguous"
+
+
 def _apply_joined_aggregate_contract(
     context: dict[str, Any],
     knowledge_base: dict[str, Any],
@@ -2647,30 +2848,48 @@ def _apply_joined_aggregate_contract(
         if isinstance(entry, dict)
     ]
     metric: dict[str, Any] | None = None
+    modifier_filter_phrase: str | None = None
     if aggregate_function != "count":
         resolved_metrics, metric_status = _resolve_role_candidate(metric_phrase, metric_candidates)
         if metric_status != "resolved" or len(resolved_metrics) != 1:
-            return _joined_aggregate_failure_context(
-                context,
-                blocked_node="metric",
-                reason=f"joined aggregate metric evidence is {metric_status}",
-                resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate"},
+            modifier_metric, modifier_phrase, modifier_status = _resolve_metric_with_modifier(
+                metric_phrase,
+                metric_candidates,
             )
-        metric = dict(resolved_metrics[0])
+            if modifier_status == "resolved" and modifier_metric is not None:
+                metric = modifier_metric
+                modifier_filter_phrase = modifier_phrase
+            else:
+                return _joined_aggregate_failure_context(
+                    context,
+                    blocked_node="metric",
+                    reason=f"joined aggregate metric evidence is {metric_status}",
+                    resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate"},
+                )
+        else:
+            metric = dict(resolved_metrics[0])
 
     resolved_dimensions, dimension_status = _resolve_role_candidate(
         dimension_phrase,
         dimension_candidates,
     )
     if dimension_status != "resolved" or len(resolved_dimensions) != 1:
-        if dimension_status == "missing":
-            return context
-        return _joined_aggregate_failure_context(
-            context,
-            blocked_node="dimension",
-            reason=f"joined aggregate dimension evidence is {dimension_status}",
-            resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate", "metric"},
+        display_dimensions, display_status = _resolve_entity_display_dimension(
+            dimension_phrase,
+            dimension_candidates,
+            knowledge_base,
         )
+        if display_status == "resolved" and len(display_dimensions) == 1:
+            resolved_dimensions = display_dimensions
+        else:
+            if dimension_status == "missing" and display_status == "missing":
+                return context
+            return _joined_aggregate_failure_context(
+                context,
+                blocked_node="dimension",
+                reason=f"joined aggregate dimension evidence is {display_status if dimension_status == 'missing' else dimension_status}",
+                resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate", "metric"},
+            )
     dimension = dict(resolved_dimensions[0])
     dimension_table = str(dimension.get("table") or "").strip()
     dimension_column = str(dimension.get("column") or "").strip()
@@ -2679,8 +2898,16 @@ def _apply_joined_aggregate_contract(
     if aggregate_function == "count" and not source_phrase:
         source_phrase = str(intent.get("target_entity_phrase") or "").strip()
     base_table = str((metric or {}).get("table") or "").strip()
+    deferred_source_filter_phrase: str | None = None
     if source_phrase:
-        explicit_base, base_status = _resolve_join_table(source_phrase, knowledge_base, [])
+        if aggregate_function == "count":
+            explicit_base, base_status = _resolve_count_base_table(
+                source_phrase,
+                dimension_table,
+                knowledge_base,
+            )
+        else:
+            explicit_base, base_status = _resolve_join_table(source_phrase, knowledge_base, [])
         if base_status != "resolved" or explicit_base is None:
             return _joined_aggregate_failure_context(
                 context,
@@ -2689,13 +2916,9 @@ def _apply_joined_aggregate_contract(
                 resolved_nodes={"unsafe_check"},
             )
         if base_table and base_table != explicit_base:
-            return _joined_aggregate_failure_context(
-                context,
-                blocked_node="table_scope",
-                reason="aggregate metric does not belong to the explicit source table",
-                resolved_nodes={"unsafe_check"},
-            )
-        base_table = explicit_base
+            deferred_source_filter_phrase = source_phrase
+        else:
+            base_table = explicit_base
     if not base_table:
         return context if ranking_candidate else _joined_aggregate_failure_context(
             context,
@@ -2730,6 +2953,37 @@ def _apply_joined_aggregate_contract(
             reason="joined aggregate filters require a third table",
             resolved_nodes={"unsafe_check"},
         )
+    for implicit_filter_phrase, implicit_source in (
+        (modifier_filter_phrase, "metric_modifier_value_filter"),
+        (deferred_source_filter_phrase, "source_scope_value_filter"),
+    ):
+        if not implicit_filter_phrase:
+            continue
+        if implicit_source == "source_scope_value_filter":
+            implicit_filter, implicit_status = _source_scope_as_filter(
+                implicit_filter_phrase,
+                knowledge_base,
+                allowed_tables,
+            )
+        else:
+            implicit_filter, implicit_status = _build_sample_value_filter(
+                value_phrase=implicit_filter_phrase,
+                knowledge_base=knowledge_base,
+                allowed_tables=allowed_tables,
+                owner_table=base_table,
+                source=implicit_source,
+            )
+        if implicit_status != "resolved" or implicit_filter is None:
+            return _joined_aggregate_failure_context(
+                context,
+                blocked_node="where",
+                reason=f"joined WHERE modifier evidence is {implicit_status}",
+                resolved_nodes={
+                    "unsafe_check", "table_scope", "query_shape", "aggregate", "metric", "dimension",
+                    "join_need", "relationship_graph_lookup", "safe_join_path", "ambiguity_check",
+                },
+            )
+        selected_filters.append(implicit_filter)
 
     graph = build_relationship_graph(knowledge_base, infer_relationships=False)
     graph_edges = find_safe_direct_join_relationships(graph, base_table, dimension_table)
@@ -2901,8 +3155,16 @@ def _apply_joined_aggregate_contract(
         f"{edge['to_table']}.{edge['to_column']}"
     )
     planned = dict(context)
+    planned_intent = dict(intent)
+    planned_intent["structured_filters"] = [dict(entry) for entry in selected_filters]
+    planned_intent["requested_filters"] = [
+        str(entry.get("raw_phrase") or entry.get("value_phrase") or entry.get("field_phrase") or "")
+        for entry in selected_filters
+        if str(entry.get("raw_phrase") or entry.get("value_phrase") or entry.get("field_phrase") or "")
+    ]
     planned.update(
         {
+            "intent": planned_intent,
             "query_shape": "joined_aggregate",
             "route": "deterministic_sql_required",
             "route_recommendation": "deterministic_sql_required",

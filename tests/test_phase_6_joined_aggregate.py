@@ -16,7 +16,13 @@ def _knowledge_base(*, second_fk=False, fallback=False, no_customer_edge=False):
         {"name": "order_id", "type": "INTEGER", "semantic_type": "id"},
         {"name": "customer_id", "type": "INTEGER", "semantic_type": "id"},
         {"name": "payment_status", "type": "VARCHAR(30)", "semantic_type": "status", "is_dimension": True},
-        {"name": "order_status", "type": "VARCHAR(30)", "semantic_type": "status", "is_dimension": True},
+        {
+            "name": "order_status",
+            "type": "VARCHAR(30)",
+            "semantic_type": "status",
+            "is_dimension": True,
+            "sample_values": ["Delivered", "Pending"],
+        },
         {"name": "total_amount", "type": "DECIMAL(12,2)", "semantic_type": "money", "is_measure": True},
         {"name": "paid_amount", "type": "DECIMAL(12,2)", "semantic_type": "money", "is_measure": True},
     ]
@@ -60,6 +66,7 @@ def _knowledge_base(*, second_fk=False, fallback=False, no_customer_edge=False):
                 {"name": "customer_name", "type": "VARCHAR(100)", "semantic_type": "name", "is_dimension": True},
                 {"name": "city", "type": "VARCHAR(100)", "semantic_type": "text", "is_dimension": True},
                 {"name": "customer_type", "type": "VARCHAR(30)", "semantic_type": "text", "is_dimension": True},
+                {"name": "customer_segment", "type": "VARCHAR(30)", "semantic_type": "text", "is_dimension": True},
                 {"name": "customer_status", "type": "VARCHAR(30)", "semantic_type": "status", "is_dimension": True},
                 {"name": "region_id", "type": "INTEGER", "semantic_type": "id"},
             ],
@@ -87,8 +94,33 @@ def _knowledge_base(*, second_fk=False, fallback=False, no_customer_edge=False):
             "foreign_keys": [],
             "relationships": [],
         },
+        "order_items": {
+            "columns": [
+                {"name": "item_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "product_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "quantity", "type": "INTEGER", "semantic_type": "quantity", "is_measure": True},
+                {"name": "line_total", "type": "DECIMAL(12,2)", "semantic_type": "money", "is_measure": True},
+            ],
+            "primary_keys": ["item_id"],
+            "foreign_keys": [
+                {"column": "product_id", "referenced_table": "products", "referenced_column": "product_id"}
+            ],
+            "relationships": [],
+        },
         "products": {
-            "columns": [{"name": "product_id", "type": "INTEGER", "semantic_type": "id"}],
+            "columns": [
+                {"name": "product_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "product_name", "type": "VARCHAR(100)", "semantic_type": "name", "is_dimension": True},
+                {"name": "category", "type": "VARCHAR(100)", "semantic_type": "text", "is_dimension": True},
+                {"name": "brand", "type": "VARCHAR(100)", "semantic_type": "text", "is_dimension": True},
+                {
+                    "name": "product_status",
+                    "type": "VARCHAR(30)",
+                    "semantic_type": "status",
+                    "is_dimension": True,
+                    "sample_values": ["Active", "Inactive"],
+                },
+            ],
             "primary_keys": ["product_id"],
             "foreign_keys": [],
             "relationships": [],
@@ -114,9 +146,15 @@ def _evidence(question, *, formula=False):
     text = question.lower()
     metrics = []
     if "profit" not in text and (intent.get("requested_metrics") or intent.get("metric_phrase")):
-        total = _candidate("service_orders", "total_amount", role="metric", terms=["total amount", "amount"])
+        total = _candidate("service_orders", "total_amount", role="metric", terms=["total amount", "order amount", "amount"])
         paid = _candidate("service_orders", "paid_amount", role="metric", terms=["paid amount", "amount"], score=0.98)
-        if "paid amount" in text and "total amount" not in text:
+        quantity = _candidate("order_items", "quantity", role="metric", terms=["quantity", "units ordered"])
+        line_total = _candidate("order_items", "line_total", role="metric", terms=["line total", "item sales", "total line total"])
+        if "line total" in text or "item sales" in text:
+            metrics = [line_total]
+        elif "quantity" in text:
+            metrics = [quantity]
+        elif "paid amount" in text and "total amount" not in text:
             metrics = [paid]
         elif " amount" in text and "total amount" not in text and "paid amount" not in text:
             metrics = [total, paid]
@@ -135,8 +173,16 @@ def _evidence(question, *, formula=False):
         dimensions = [_candidate("customers", "city", role="dimension", terms=["customer city"])]
     elif "customer type" in text:
         dimensions = [_candidate("customers", "customer_type", role="dimension", terms=["customer type"])]
+    elif "customer segment" in text:
+        dimensions = [_candidate("customers", "customer_segment", role="dimension", terms=["customer segment"])]
     elif "top customers" in text:
         dimensions = [_candidate("customers", "customer_name", role="dimension", terms=["customers"])]
+    elif "product category" in text:
+        dimensions = [_candidate("products", "category", role="dimension", terms=["product category"])]
+    elif "product brand" in text:
+        dimensions = [_candidate("products", "brand", role="dimension", terms=["product brand"])]
+    elif "top 4 products" in text:
+        dimensions = [_candidate("products", "product_name", role="dimension", terms=["products"])]
     elif " by status" in text:
         dimensions = [
             _candidate("service_orders", "order_status", role="dimension", terms=["status"]),
@@ -297,6 +343,70 @@ def test_count_contract_does_not_require_metric():
     assert context["clause_plan"]["requires"]["metric"] is False
     metric_node = next(entry for entry in context["clause_plan"]["decision_path"] if entry["node"] == "metric")
     assert metric_node["status"] == "not_required"
+
+
+def test_count_orders_uses_graph_to_disambiguate_base_table():
+    kb = _knowledge_base()
+    context = _context("count orders by customer segment", kb=kb)
+    result = generate_deterministic_sql(query_context=context, knowledge_base=kb)
+
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["selected_join_path"]["base_table"] == "service_orders"
+    assert context["selected_dimensions"][0]["table"] == "customers"
+    assert context["selected_dimensions"][0]["column"] == "customer_segment"
+    assert "COUNT(*) AS count__service_orders__rows" in result.sql
+    assert "GROUP BY customers.customer_segment" in result.sql
+
+
+def test_metric_modifier_becomes_sample_backed_base_filter():
+    kb = _knowledge_base()
+    context = _context("show total delivered order amount by customer city", kb=kb)
+    result = generate_deterministic_sql(query_context=context, knowledge_base=kb)
+
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["selected_metric"]["table"] == "service_orders"
+    assert context["selected_metric"]["column"] == "total_amount"
+    assert context["selected_filters"][0]["table"] == "service_orders"
+    assert context["selected_filters"][0]["column"] == "order_status"
+    assert "WHERE service_orders.order_status = 'Delivered'" in result.sql
+
+
+def test_source_scope_value_owner_becomes_related_filter():
+    kb = _knowledge_base()
+    context = _context("total quantity by product category for active products", kb=kb)
+    result = generate_deterministic_sql(query_context=context, knowledge_base=kb)
+
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["selected_metric"]["table"] == "order_items"
+    assert context["selected_metric"]["column"] == "quantity"
+    assert context["selected_dimensions"][0]["table"] == "products"
+    assert context["selected_dimensions"][0]["column"] == "category"
+    assert context["selected_filters"][0]["table"] == "products"
+    assert context["selected_filters"][0]["column"] == "product_status"
+    assert "SUM(order_items.quantity)" in result.sql
+    assert "WHERE products.product_status = 'Active'" in result.sql
+
+
+def test_product_joined_aggregate_and_entity_ranking_questions():
+    kb = _knowledge_base()
+
+    item_sales = _context("show total item sales by product category", kb=kb)
+    item_sales_sql = generate_deterministic_sql(query_context=item_sales, knowledge_base=kb).sql
+    assert item_sales["route_recommendation"] == "deterministic_sql_required"
+    assert item_sales["selected_metric"]["table"] == "order_items"
+    assert item_sales["selected_metric"]["column"] == "line_total"
+    assert item_sales["selected_dimensions"][0]["table"] == "products"
+    assert item_sales["selected_dimensions"][0]["column"] == "category"
+    assert "SUM(order_items.line_total)" in item_sales_sql
+
+    top_products = _context("top 4 products by total line total", kb=kb)
+    top_products_sql = generate_deterministic_sql(query_context=top_products, knowledge_base=kb).sql
+    assert top_products["route_recommendation"] == "deterministic_sql_required"
+    assert top_products["selected_dimensions"][0]["table"] == "products"
+    assert top_products["selected_dimensions"][0]["column"] == "product_name"
+    assert top_products["selected_order_by"]["aggregate_function"] == "sum"
+    assert "ORDER BY sum__order_items__line_total DESC" in top_products_sql
+    assert "LIMIT 4" in top_products_sql
 
 
 def test_question_service_dispatches_joined_aggregate():

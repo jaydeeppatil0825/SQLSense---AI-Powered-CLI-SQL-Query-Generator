@@ -71,7 +71,31 @@ def retrieve_context(
         for value in (join_lookup_request.get("requested_output_fields") or intent.get("requested_output_fields") or [])
         if str(value).strip()
     ]
-    supplemental_column_queries = _unique([*requested_filter_terms, *requested_output_terms])
+    requested_metric_terms_for_lookup = [] if intent.get("metric_is_generic") else [
+        str(value).strip()
+        for value in (
+            list(intent.get("requested_metrics") or [])
+            + [intent.get("metric_phrase")]
+        )
+        if str(value or "").strip()
+    ]
+    requested_dimension_terms_for_lookup = [
+        str(value).strip()
+        for value in (intent.get("requested_dimensions") or [])
+        if str(value).strip()
+    ]
+    requested_sort_terms_for_lookup = [
+        str((intent.get("requested_sort") or {}).get("terms") or "").strip()
+    ]
+    supplemental_column_queries = _unique(
+        [
+            *requested_filter_terms,
+            *requested_output_terms,
+            *requested_metric_terms_for_lookup,
+            *requested_dimension_terms_for_lookup,
+            *requested_sort_terms_for_lookup,
+        ]
+    )
     vector_context = _normalized_vector_context(
         normalized_question,
         vector_retriever,
@@ -547,6 +571,7 @@ def _match_columns(query_terms: list[str], knowledge_base: Dict[str, Any]) -> li
                     "column": column_name,
                     "semantic_type": resolved_semantic_type(column),
                     "core_semantic_type": str(column.get("semantic_type", "")).strip().lower(),
+                    "data_type": str(column.get("type", "") or "").strip(),
                     "is_measure": column_is_measure(column),
                     "is_dimension": column_is_dimension(column),
                     "is_date": column_is_date(column),
@@ -594,6 +619,7 @@ def _match_filter_field_columns(
                     "column": column_name,
                     "semantic_type": resolved_semantic_type(column),
                     "core_semantic_type": str(column.get("semantic_type", "")).strip().lower(),
+                    "data_type": str(column.get("type", "") or "").strip(),
                     "is_measure": column_is_measure(column),
                     "is_dimension": column_is_dimension(column),
                     "is_date": column_is_date(column),
@@ -711,6 +737,7 @@ def _vector_context(normalized_question: str, vector_retriever: Optional[Any]) -
                 "column": entry.get("column_name"),
                 "semantic_type": entry.get("semantic_type"),
                 "core_semantic_type": entry.get("core_semantic_type"),
+                "data_type": entry.get("data_type") or entry.get("type"),
                 "is_measure": bool(entry.get("is_measure")),
                 "is_dimension": bool(entry.get("is_dimension")),
                 "is_date": bool(entry.get("is_date")),
@@ -793,6 +820,7 @@ def _normalized_column_entries(entries: list[Dict[str, Any]], *, role: str = "")
                 "column": column_name,
                 "semantic_type": entry.get("semantic_type"),
                 "core_semantic_type": entry.get("core_semantic_type"),
+                "data_type": entry.get("data_type") or entry.get("type"),
                 "is_measure": bool(entry.get("is_measure")) or role == "measure",
                 "is_dimension": bool(entry.get("is_dimension")) or role == "dimension",
                 "is_date": bool(entry.get("is_date")) or role == "date",
@@ -1309,6 +1337,47 @@ def _candidate_columns(
     return deduped[:10]
 
 
+def _is_numeric_sql_type(data_type: str) -> bool:
+    normalized = str(data_type or "").strip().lower()
+    if not normalized:
+        return False
+    return any(
+        token in normalized
+        for token in (
+            "decimal",
+            "numeric",
+            "float",
+            "double",
+            "real",
+            "int",
+            "integer",
+            "bigint",
+            "smallint",
+            "tinyint",
+        )
+    )
+
+
+def _is_known_nonnumeric_sql_type(data_type: str) -> bool:
+    normalized = str(data_type or "").strip().lower()
+    if not normalized:
+        return False
+    return any(
+        token in normalized
+        for token in (
+            "char",
+            "text",
+            "string",
+            "date",
+            "time",
+            "bool",
+            "json",
+            "enum",
+            "set",
+        )
+    )
+
+
 def _role_candidate_score(
     entry: Dict[str, Any],
     requested_terms: list[str],
@@ -1318,6 +1387,7 @@ def _role_candidate_score(
 ) -> tuple[float, list[str]]:
     semantic_type = str(entry.get("semantic_type") or "").strip().lower()
     core_semantic_type = str(entry.get("core_semantic_type") or "").strip().lower()
+    data_type = str(entry.get("data_type") or entry.get("type") or "").strip().lower()
     table_name = str(entry.get("table") or "").strip()
     column_name = str(entry.get("column") or "").strip()
     if not table_name or not column_name:
@@ -1352,6 +1422,9 @@ def _role_candidate_score(
     if role == "measure":
         if semantic_type in {"id", "date", "boolean"} or core_semantic_type in {"id", "date", "boolean"}:
             return 0.0, []
+        if data_type and not _is_numeric_sql_type(data_type):
+            if _is_known_nonnumeric_sql_type(data_type):
+                return 0.0, []
         if not (
             is_measure
             or semantic_type in {"money", "quantity", "percentage", "numeric_candidate"}
