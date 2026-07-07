@@ -2232,6 +2232,7 @@ def _build_query_context_from_retrieved_context(
         legacy_route_recommendation=legacy_route_recommendation,
         debug_trace_details=debug_trace_details,
     )
+    normalized_result = _apply_implicit_sample_filter_contract(normalized_result, knowledge_base)
     joined_aggregate_result = _apply_joined_aggregate_contract(normalized_result, knowledge_base)
     if joined_aggregate_result is not normalized_result:
         return joined_aggregate_result
@@ -2667,6 +2668,79 @@ def _source_scope_as_filter(
     )
 
 
+def _apply_implicit_sample_filter_contract(
+    context: dict[str, Any],
+    knowledge_base: dict[str, Any],
+) -> dict[str, Any]:
+    intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
+    if str(context.get("query_shape") or "") != "single_table_list":
+        return context
+    if intent.get("structured_filters") or intent.get("requested_filters") or context.get("selected_filters"):
+        return context
+    if str(intent.get("intent_type") or "").strip().lower() not in {"list", "filter"}:
+        return context
+    selected_table_names = [
+        str(value).strip()
+        for value in (context.get("selected_table_names") or [])
+        if str(value).strip()
+    ]
+    if len(selected_table_names) != 1:
+        return context
+    phrase = str(intent.get("target_entity_phrase") or "").strip()
+    if not phrase:
+        return context
+    implicit_filter, status = _source_scope_as_filter(
+        phrase,
+        knowledge_base,
+        {selected_table_names[0]},
+    )
+    if status != "resolved" or implicit_filter is None:
+        return context
+
+    planned = dict(context)
+    planned_intent = dict(intent)
+    planned_intent["structured_filters"] = []
+    planned_intent["requested_filters"] = [
+        str(implicit_filter.get("raw_phrase") or implicit_filter.get("value_phrase") or "").strip()
+    ]
+    planned.update(
+        {
+            "intent": planned_intent,
+            "query_shape": "filtered_query",
+            "selected_filters": [implicit_filter],
+            "filter_candidates": _merge_candidate_columns(
+                [implicit_filter],
+                [entry for entry in (context.get("filter_candidates") or []) if isinstance(entry, dict)],
+            ),
+            "selected_columns": _merge_candidate_columns(
+                [entry for entry in (context.get("selected_columns") or []) if isinstance(entry, dict)],
+                [implicit_filter],
+            ),
+            "required_evidence": ["selected_table", "filter_candidate"],
+        }
+    )
+    planned["plan"] = {**dict(planned.get("plan") or {}), "filters": [implicit_filter]}
+    clause_plan = dict(planned.get("clause_plan") or {})
+    clause_plan["clause_shape"] = "where_only"
+    requires = dict(clause_plan.get("requires") or {})
+    requires["where"] = True
+    clause_plan["requires"] = requires
+    decision_path = []
+    for entry in clause_plan.get("decision_path") or []:
+        node = dict(entry)
+        if node.get("node") == "query_shape":
+            node["reason"] = "resolved clause shape 'where_only'"
+        elif node.get("node") == "where":
+            node["status"] = "resolved"
+            node["reason"] = "row-level sample value filter resolved from KB profile evidence"
+        elif node.get("node") == "clause_shape":
+            node["reason"] = "final clause shape 'where_only' is complete"
+        decision_path.append(node)
+    clause_plan["decision_path"] = decision_path
+    planned["clause_plan"] = clause_plan
+    return planned
+
+
 def _resolve_metric_with_modifier(
     metric_phrase: str,
     metric_candidates: list[dict[str, Any]],
@@ -2683,6 +2757,72 @@ def _resolve_metric_with_modifier(
         if status == "ambiguous":
             return None, None, "ambiguous"
     return None, None, "missing"
+
+
+def _resolve_owned_monetary_metric_from_schema(
+    metric_phrase: str,
+    knowledge_base: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    phrase_tokens = {_singularize_token(token) for token in _tokenize(metric_phrase)}
+    if len(phrase_tokens) < 2:
+        return None, "missing"
+    owner_matches: list[tuple[float, str]] = []
+    for table_name in knowledge_base:
+        table_tokens = {_singularize_token(token) for token in _tokenize(table_name)}
+        if not table_tokens:
+            continue
+        overlap = phrase_tokens & table_tokens
+        if not overlap:
+            continue
+        score = len(overlap) / max(len(table_tokens), 1)
+        if score > 0:
+            owner_matches.append((score, table_name))
+    owner_matches.sort(key=lambda item: (-item[0], item[1]))
+    if not owner_matches:
+        return None, "missing"
+    if len(owner_matches) > 1 and abs(owner_matches[0][0] - owner_matches[1][0]) < 0.08:
+        return None, "ambiguous"
+    owner_table = owner_matches[0][1]
+    monetary_candidates: list[dict[str, Any]] = []
+    for column in knowledge_base.get(owner_table, {}).get("columns", []) or []:
+        column_name = str(column.get("name") or "").strip()
+        if not column_name:
+            continue
+        semantic_type = str(column.get("semantic_type") or "").strip().lower()
+        data_type = str(column.get("type") or "").strip().lower()
+        planner_roles = column.get("planner_roles") if isinstance(column.get("planner_roles"), dict) else {}
+        is_measure = bool(
+            column.get("is_measure")
+            or planner_roles.get("measure_candidate")
+            or semantic_type in {"money", "numeric_candidate", "quantity", "percentage"}
+        )
+        is_monetary = semantic_type == "money" or any(
+            token in data_type for token in ("decimal", "numeric", "money")
+        )
+        if not is_measure or not is_monetary:
+            continue
+        monetary_candidates.append(
+            {
+                "table": owner_table,
+                "column": column_name,
+                "semantic_type": semantic_type,
+                "core_semantic_type": semantic_type,
+                "data_type": data_type,
+                "is_measure": True,
+                "is_dimension": False,
+                "is_date": False,
+                "score": 0.74,
+                "matched_terms": [metric_phrase],
+                "evidence_sources": ["schema_owner_phrase", "kb_numeric_profile"],
+                "source": "kb_schema_profile",
+                "reason": "unique owner-table monetary measure resolved from schema/profile evidence",
+            }
+        )
+    if len(monetary_candidates) == 1:
+        return monetary_candidates[0], "resolved"
+    if len(monetary_candidates) > 1:
+        return None, "ambiguous"
+    return None, "missing"
 
 
 def _resolve_entity_display_dimension(
@@ -2862,12 +3002,19 @@ def _apply_joined_aggregate_contract(
                 if _normalize(modifier_phrase or "") not in aggregate_words:
                     modifier_filter_phrase = modifier_phrase
             else:
-                return _joined_aggregate_failure_context(
-                    context,
-                    blocked_node="metric",
-                    reason=f"joined aggregate metric evidence is {metric_status}",
-                    resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate"},
+                schema_metric, schema_metric_status = _resolve_owned_monetary_metric_from_schema(
+                    metric_phrase,
+                    knowledge_base,
                 )
+                if schema_metric_status == "resolved" and schema_metric is not None:
+                    metric = schema_metric
+                else:
+                    return _joined_aggregate_failure_context(
+                        context,
+                        blocked_node="metric",
+                        reason=f"joined aggregate metric evidence is {schema_metric_status if metric_status == 'missing' else metric_status}",
+                        resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate"},
+                    )
         else:
             metric = dict(resolved_metrics[0])
 
@@ -3183,6 +3330,8 @@ def _apply_joined_aggregate_contract(
             "selected_columns": selected_columns,
             "selected_output_columns": selected_output_columns,
             "selected_metric": metric,
+            "metric_candidates": [metric] if metric is not None else [],
+            "measure_candidates": [metric] if metric is not None else [],
             "selected_dimensions": [dimension],
             "selected_filters": selected_filters,
             "selected_having": selected_having,
@@ -3218,6 +3367,7 @@ def _apply_joined_aggregate_contract(
         **dict(planned.get("plan") or {}),
         "filters": selected_filters,
         "limit": limit,
+        "unresolved_metrics": [],
     }
     planned["complex_sql_plan"] = {
         "query_shape": "joined_aggregate",

@@ -409,6 +409,31 @@ def test_product_joined_aggregate_and_entity_ranking_questions():
     assert "LIMIT 4" in top_products_sql
 
 
+def test_joined_aggregate_resolves_unique_owner_table_monetary_metric_without_retrieval_mapping():
+    question = "show total item sales by product category"
+    kb = _knowledge_base()
+    intent = build_intent(question)
+    product_category = _candidate("products", "category", role="dimension", terms=["product category"])
+    evidence = _evidence(question)
+    evidence["measure_candidates"] = []
+    evidence["matched_columns"] = [product_category]
+    evidence["dimension_candidates"] = [product_category]
+
+    context = build_query_context(
+        question,
+        kb,
+        intent=intent,
+        retrieved_context=evidence,
+    )
+
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["query_shape"] == "joined_aggregate"
+    assert context["selected_metric"]["table"] == "order_items"
+    assert context["selected_metric"]["column"] == "line_total"
+    assert context["selected_metric"]["source"] == "kb_schema_profile"
+    assert context["plan"]["unresolved_metrics"] == []
+
+
 def test_question_service_dispatches_joined_aggregate():
     question = "show sum total amount by customer city from service orders"
     kb = _knowledge_base()

@@ -146,6 +146,50 @@ def test_active_planner_classifies_list_from_normalized_table_evidence():
     assert context["can_plan"] is True
 
 
+def test_active_planner_resolves_entity_phrase_sample_value_filter_from_full_kb():
+    intent = build_intent("show delivered orders")
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "orders", "score": 0.96, "matched_terms": ["orders"], "source": "vector"}],
+    )
+    knowledge_base = {
+        "orders": {
+            "columns": [
+                {"name": "order_id", "type": "INTEGER", "semantic_type": "id"},
+                {
+                    "name": "order_status",
+                    "type": "VARCHAR(30)",
+                    "semantic_type": "status",
+                    "sample_values": ["Delivered", "Pending"],
+                },
+            ]
+        }
+    }
+
+    context = build_query_context(
+        "show delivered orders",
+        knowledge_base,
+        intent=intent,
+        retrieved_context=evidence,
+    )
+
+    assert context["route"] == "deterministic_sql_required"
+    assert context["query_shape"] == "filtered_query"
+    assert context["selected_filters"] == [
+        {
+            "table": "orders",
+            "column": "order_status",
+            "field_phrase": "order_status",
+            "raw_phrase": "delivered",
+            "operator": "eq",
+            "value": "Delivered",
+            "value_phrase": "delivered",
+            "values": ["Delivered"],
+            "conjunction": "",
+            "source": "source_scope_value_filter",
+        }
+    ]
+
+
 def test_active_planner_merges_structured_filter_with_field_evidence():
     intent = build_intent("show bills where status is pending")
     status = {
