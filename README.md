@@ -1,5 +1,5 @@
 # SQLSense - AI-Powered CLI SQL Query Generator
-
+ CURRENTLY UNSTABLE
 A Python CLI tool that connects to a MySQL database, builds a semantic knowledge base, and converts plain-English questions into safe, read-only SQL `SELECT` queries using deterministic SQL generation with optional AI semantic enrichment during knowledge base build.
 
 **This project is CLI-only.** Run it with `python main.py`.
