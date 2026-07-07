@@ -57,8 +57,11 @@ def _evidence(question):
     order = _candidate("service_orders", "order_status", role="dimension", score=0.99, matched_terms=["status", "order status"])
     customer_status = _candidate("customers", "customer_status", role="dimension", score=0.97, matched_terms=["status", "customer status"])
     city = _candidate("customers", "city", role="filter", score=0.96, matched_terms=["customer city"])
+    customer_name = _candidate("customers", "customer_name", role="dimension", score=0.99, matched_terms=["customers"])
     metrics = [paid, total] if intent.get("requested_metrics") else []
-    dimensions = [order, payment, customer_status] if intent.get("requested_dimensions") else []
+    dimensions = [order, payment, customer_status, city] if intent.get("requested_dimensions") else []
+    if question.lower().startswith("top customers by"):
+        dimensions = [customer_name]
     filters = []
     for clause in intent.get("structured_filters") or []:
         field = str(clause.get("field_phrase") or "")
@@ -247,8 +250,8 @@ def test_generic_metric_or_dimension_remains_ambiguous(question):
         ("show service orders with customer details", "deterministic_sql_required", "joined_lookup"),
         ("show service orders where customer city is Pune", "deterministic_sql_required", "joined_lookup"),
         ("show customers with their service orders", "deterministic_sql_required", "joined_lookup"),
-        ("show sum total amount by customer city from service orders", "cannot_plan_safely", "grouped_aggregate"),
-        ("top customers by total amount", "cannot_plan_safely", "ranking_query"),
+        ("show sum total amount by customer city from service orders", "deterministic_sql_required", "joined_aggregate"),
+        ("top customers by total amount", "deterministic_sql_required", "joined_aggregate"),
     ],
 )
 def test_single_table_cleanup_does_not_weaken_join_boundaries(question, expected_route, expected_shape):

@@ -524,10 +524,17 @@ def _validate_join_relationship_evidence(
         if selected_join_path:
             return False, "Planner selected a join path but SQL contains no JOIN."
         return True, "No JOIN relationship validation is required."
+    select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", sql, re.IGNORECASE | re.DOTALL)
+    if select_match and re.search(
+        r"(?:^|,)\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?\*\s*(?:,|$)",
+        select_match.group(1),
+        re.IGNORECASE,
+    ):
+        return False, "SELECT * is not allowed for deterministic joined SQL."
     if join_count != 1 or len(set(referenced_tables)) != 2:
-        return False, "Phase 5 permits exactly two tables and one direct INNER JOIN."
+        return False, "Deterministic joined SQL permits exactly two tables and one direct INNER JOIN."
     if re.search(r"\b(?:CROSS|NATURAL|LEFT|RIGHT|FULL|OUTER)\s+(?:OUTER\s+)?JOIN\b", sql, re.IGNORECASE):
-        return False, "Only INNER JOIN is allowed for deterministic joined lookups."
+        return False, "Only INNER JOIN is allowed for deterministic joined SQL."
     if re.search(r"\bJOIN\b.*?\bUSING\b", sql, re.IGNORECASE | re.DOTALL):
         return False, "JOIN USING is not allowed; an explicit graph-backed ON condition is required."
 
@@ -868,6 +875,24 @@ def _validate_aggregate_clause_placement(sql: str) -> tuple[bool, str]:
 
     having_segment = _strip_string_literals(having_match.group(1))
     has_aggregate_expression = bool(re.search(aggregate_pattern, having_segment, re.IGNORECASE))
+    selected_aggregate_expressions = {
+        _normalize_expression(match.group(0))
+        for match in re.finditer(
+            r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\([^()]*\)",
+            select_match.group(1) if select_match else "",
+            re.IGNORECASE,
+        )
+    }
+    having_aggregate_expressions = {
+        _normalize_expression(match.group(0))
+        for match in re.finditer(
+            r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\([^()]*\)",
+            having_segment,
+            re.IGNORECASE,
+        )
+    }
+    if having_aggregate_expressions - selected_aggregate_expressions:
+        return False, "HAVING aggregate must match an aggregate expression selected in SELECT."
     remaining = re.sub(
         r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\([^()]*\)",
         " ",
@@ -939,6 +964,23 @@ def _validate_order_by_expression(sql: str) -> tuple[bool, str]:
 
     function_match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", expression)
     if not function_match:
+        if re.search(r"\bJOIN\b", sql, re.IGNORECASE):
+            select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", sql, re.IGNORECASE | re.DOTALL)
+            aggregate_aliases = {
+                alias.lower()
+                for select_expression in _split_select_expressions(
+                    select_match.group(1) if select_match else ""
+                )
+                if re.search(
+                    r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\(",
+                    select_expression,
+                    re.IGNORECASE,
+                )
+                for alias in [_expression_alias(select_expression)]
+                if alias
+            }
+            if aggregate_aliases and _normalize_identifier(expression).lower() not in aggregate_aliases:
+                return False, "Joined aggregate ORDER BY must use the selected aggregate alias or expression."
         return True, "ORDER BY uses a column or selected alias."
     function_name = function_match.group(1).upper()
     if function_name not in {"COUNT", "SUM", "AVG", "MIN", "MAX"}:

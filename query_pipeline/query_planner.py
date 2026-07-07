@@ -2211,6 +2211,9 @@ def _build_query_context_from_retrieved_context(
         legacy_route_recommendation=legacy_route_recommendation,
         debug_trace_details=debug_trace_details,
     )
+    joined_aggregate_result = _apply_joined_aggregate_contract(normalized_result, knowledge_base)
+    if joined_aggregate_result is not normalized_result:
+        return joined_aggregate_result
     return _apply_join_lookup_contract(normalized_result, knowledge_base)
 
 
@@ -2421,6 +2424,552 @@ def _all_table_outputs(table_name: str, knowledge_base: dict[str, Any], source: 
         for column in knowledge_base.get(table_name, {}).get("columns", []) or []
         if str(column.get("name") or "")
     ]
+
+
+_JOINED_AGGREGATE_DECISION_NODES = (
+    "unsafe_check",
+    "table_scope",
+    "query_shape",
+    "aggregate",
+    "metric",
+    "dimension",
+    "join_need",
+    "relationship_graph_lookup",
+    "safe_join_path",
+    "ambiguity_check",
+    "where",
+    "having",
+    "order_by",
+    "limit",
+    "clause_shape",
+    "route",
+)
+
+_EXPLICIT_UNSUPPORTED_JOIN_RE = re.compile(
+    r"\b(?:left|right|full|cross|natural)(?:\s+outer)?\s+join\b|\bjoin\s+using\b|\bvia\b",
+    re.IGNORECASE,
+)
+
+
+def _joined_aggregate_failure_context(
+    context: dict[str, Any],
+    *,
+    blocked_node: str,
+    reason: str,
+    resolved_nodes: set[str] | None = None,
+) -> dict[str, Any]:
+    resolved = set(resolved_nodes or set())
+    decision_path = []
+    for node_name in _JOINED_AGGREGATE_DECISION_NODES:
+        if node_name in resolved:
+            status = "resolved"
+            node_reason = f"{node_name.replace('_', ' ')} resolved"
+        elif node_name == blocked_node:
+            status = "blocked"
+            node_reason = reason
+        elif node_name in {"where", "having", "order_by", "limit"}:
+            status = "not_required"
+            node_reason = "clause was not evaluated because an earlier decision was blocked"
+        else:
+            status = "blocked"
+            node_reason = "not evaluated because an earlier joined aggregate decision was blocked"
+        decision_path.append({"node": node_name, "status": status, "reason": node_reason})
+
+    failed = dict(context)
+    failed.update(
+        {
+            "query_shape": "joined_aggregate",
+            "route": "cannot_plan_safely",
+            "route_recommendation": "cannot_plan_safely",
+            "route_reason": reason,
+            "planner_reason": reason,
+            "can_plan": False,
+            "selected_join_path": None,
+            "selected_relationship_path": None,
+            "selected_output_columns": [],
+            "clause_plan": {
+                "clause_shape": "unsupported",
+                "selected_join_path": None,
+                "selected_order_by": {},
+                "limit": failed.get("limit"),
+                "requires": {
+                    "aggregate": True,
+                    "metric": True,
+                    "dimension": True,
+                    "where": bool((failed.get("intent") or {}).get("structured_filters")),
+                    "having": bool((failed.get("intent") or {}).get("structured_having")),
+                    "order_by": bool((failed.get("intent") or {}).get("requested_sort")),
+                    "limit": (failed.get("intent") or {}).get("limit") is not None,
+                    "join": True,
+                },
+                "decision_path": decision_path,
+            },
+        }
+    )
+    failed["missing_evidence"] = list(
+        dict.fromkeys([*(failed.get("missing_evidence") or []), blocked_node])
+    )
+    failed["ambiguities"] = list(
+        dict.fromkeys([*(failed.get("ambiguities") or []), blocked_node])
+    )
+    return failed
+
+
+def _joined_aggregate_filter_contract(
+    intent: dict[str, Any],
+    filter_candidates: list[dict[str, Any]],
+    allowed_tables: set[str],
+) -> tuple[list[dict[str, Any]], str]:
+    structured_filters = [
+        dict(entry)
+        for entry in (intent.get("structured_filters") or [])
+        if isinstance(entry, dict)
+    ]
+    if not structured_filters:
+        return [], ""
+
+    selected: list[dict[str, Any]] = []
+    for clause in structured_filters:
+        field_phrase = str(clause.get("field_phrase") or clause.get("field") or "").strip()
+        resolved, status = _resolve_role_candidate(
+            field_phrase,
+            filter_candidates,
+            allowed_tables=allowed_tables,
+        )
+        if status != "resolved" or len(resolved) != 1:
+            return [], f"joined WHERE field evidence is {status}"
+        candidate = dict(resolved[0])
+        candidate.update(
+            {
+                "field_phrase": field_phrase,
+                "raw_phrase": str(clause.get("raw_phrase") or ""),
+                "operator": str(clause.get("operator") or ""),
+                "value": clause.get("value"),
+                "value_phrase": clause.get("value_phrase"),
+                "values": list(clause.get("values") or []),
+                "conjunction": clause.get("conjunction"),
+            }
+        )
+        selected.append(candidate)
+    return selected, ""
+
+
+def _apply_joined_aggregate_contract(
+    context: dict[str, Any],
+    knowledge_base: dict[str, Any],
+) -> dict[str, Any]:
+    intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
+    if intent.get("unsafe"):
+        return context
+
+    intent_type = str(intent.get("intent_type") or "").strip().lower()
+    requested_dimensions = [
+        str(value).strip() for value in (intent.get("requested_dimensions") or []) if str(value).strip()
+    ]
+    requested_metrics = [
+        str(value).strip() for value in (intent.get("requested_metrics") or []) if str(value).strip()
+    ]
+    ranking_candidate = intent_type == "ranking" and bool(intent.get("metric_phrase"))
+    grouped_candidate = bool(
+        intent.get("needs_grouping")
+        and (intent.get("needs_aggregation") or intent.get("aggregate_function"))
+        and requested_dimensions
+    )
+    if not grouped_candidate and not ranking_candidate:
+        return context
+    if str(context.get("query_shape") or "") == "multi_metric_aggregate":
+        return context
+
+    question = str(context.get("normalized_question") or context.get("plan", {}).get("question") or "")
+    if _EXPLICIT_UNSUPPORTED_JOIN_RE.search(question):
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="query_shape",
+            reason="explicit non-INNER or multi-hop join wording is not supported",
+            resolved_nodes={"unsafe_check", "table_scope"},
+        )
+    if context.get("formula_evidence"):
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="query_shape",
+            reason="formulas are not supported for deterministic joined aggregates",
+            resolved_nodes={"unsafe_check", "table_scope"},
+        )
+    if intent.get("having_metric_conflict") or intent.get("having_aggregate_conflict"):
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="having",
+            reason="HAVING must use the selected output aggregate and metric",
+            resolved_nodes=set(_JOINED_AGGREGATE_DECISION_NODES[:11]),
+        )
+
+    metric_phrase = str(intent.get("metric_phrase") or next(iter(requested_metrics), "")).strip()
+    dimension_phrase = str(
+        next(iter(requested_dimensions), "")
+        or (intent.get("target_entity_phrase") if ranking_candidate else "")
+        or ""
+    ).strip()
+    if re.search(r"\b(?:and|,)\b", metric_phrase, re.IGNORECASE):
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="metric",
+            reason="joined aggregates support exactly one metric",
+            resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate"},
+        )
+    if re.search(r"\b(?:and|,)\b", dimension_phrase, re.IGNORECASE):
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="dimension",
+            reason="joined aggregates support exactly one grouping dimension",
+            resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate", "metric"},
+        )
+
+    aggregate_function = str(intent.get("aggregate_function") or "").strip().lower()
+    if not aggregate_function and ranking_candidate and _normalize(metric_phrase).startswith("total "):
+        aggregate_function = "sum"
+    if aggregate_function not in {"count", "sum", "avg", "min", "max"}:
+        return context
+
+    retrieved = context.get("retrieved_context") if isinstance(context.get("retrieved_context"), dict) else {}
+    metric_candidates = [
+        dict(entry)
+        for entry in (retrieved.get("measure_candidates") or context.get("metric_candidates") or [])
+        if isinstance(entry, dict)
+    ]
+    dimension_candidates = [
+        dict(entry)
+        for entry in (retrieved.get("dimension_candidates") or context.get("dimension_candidates") or [])
+        if isinstance(entry, dict)
+    ]
+    filter_candidates = [
+        dict(entry)
+        for entry in (retrieved.get("filter_candidates") or context.get("filter_candidates") or [])
+        if isinstance(entry, dict)
+    ]
+    metric: dict[str, Any] | None = None
+    if aggregate_function != "count":
+        resolved_metrics, metric_status = _resolve_role_candidate(metric_phrase, metric_candidates)
+        if metric_status != "resolved" or len(resolved_metrics) != 1:
+            return _joined_aggregate_failure_context(
+                context,
+                blocked_node="metric",
+                reason=f"joined aggregate metric evidence is {metric_status}",
+                resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate"},
+            )
+        metric = dict(resolved_metrics[0])
+
+    resolved_dimensions, dimension_status = _resolve_role_candidate(
+        dimension_phrase,
+        dimension_candidates,
+    )
+    if dimension_status != "resolved" or len(resolved_dimensions) != 1:
+        if dimension_status == "missing":
+            return context
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="dimension",
+            reason=f"joined aggregate dimension evidence is {dimension_status}",
+            resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate", "metric"},
+        )
+    dimension = dict(resolved_dimensions[0])
+    dimension_table = str(dimension.get("table") or "").strip()
+    dimension_column = str(dimension.get("column") or "").strip()
+
+    source_phrase = str(next(iter(intent.get("source_scope") or []), "")).strip()
+    if aggregate_function == "count" and not source_phrase:
+        source_phrase = str(intent.get("target_entity_phrase") or "").strip()
+    base_table = str((metric or {}).get("table") or "").strip()
+    if source_phrase:
+        explicit_base, base_status = _resolve_join_table(source_phrase, knowledge_base, [])
+        if base_status != "resolved" or explicit_base is None:
+            return _joined_aggregate_failure_context(
+                context,
+                blocked_node="table_scope",
+                reason=f"joined aggregate base table evidence is {base_status}",
+                resolved_nodes={"unsafe_check"},
+            )
+        if base_table and base_table != explicit_base:
+            return _joined_aggregate_failure_context(
+                context,
+                blocked_node="table_scope",
+                reason="aggregate metric does not belong to the explicit source table",
+                resolved_nodes={"unsafe_check"},
+            )
+        base_table = explicit_base
+    if not base_table:
+        return context if ranking_candidate else _joined_aggregate_failure_context(
+            context,
+            blocked_node="table_scope",
+            reason="joined aggregate base table evidence is missing",
+            resolved_nodes={"unsafe_check"},
+        )
+    if base_table == dimension_table:
+        return context
+
+    allowed_tables = {base_table, dimension_table}
+    selected_filters, filter_reason = _joined_aggregate_filter_contract(
+        intent,
+        filter_candidates,
+        allowed_tables,
+    )
+    if filter_reason:
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="where",
+            reason=filter_reason,
+            resolved_nodes={
+                "unsafe_check", "table_scope", "query_shape", "aggregate", "metric", "dimension",
+                "join_need", "relationship_graph_lookup", "safe_join_path", "ambiguity_check",
+            },
+        )
+    filter_tables = {str(entry.get("table") or "") for entry in selected_filters}
+    if not filter_tables <= allowed_tables:
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="table_scope",
+            reason="joined aggregate filters require a third table",
+            resolved_nodes={"unsafe_check"},
+        )
+
+    graph = build_relationship_graph(knowledge_base, infer_relationships=False)
+    graph_edges = find_safe_direct_join_relationships(graph, base_table, dimension_table)
+    if not graph_edges:
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="safe_join_path",
+            reason="no safe direct Relationship Graph edge exists between metric and dimension tables",
+            resolved_nodes={
+                "unsafe_check", "table_scope", "query_shape", "aggregate", "metric", "dimension",
+                "join_need", "relationship_graph_lookup",
+            },
+        )
+    if len(graph_edges) != 1:
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="ambiguity_check",
+            reason="multiple distinct safe Relationship Graph edges exist between metric and dimension tables",
+            resolved_nodes={
+                "unsafe_check", "table_scope", "query_shape", "aggregate", "metric", "dimension",
+                "join_need", "relationship_graph_lookup", "safe_join_path",
+            },
+        )
+    edge = dict(graph_edges[0])
+
+    structured_having = [
+        dict(entry) for entry in (intent.get("structured_having") or []) if isinstance(entry, dict)
+    ]
+    selected_having: list[dict[str, Any]] = []
+    if structured_having:
+        if len(structured_having) != 1:
+            return _joined_aggregate_failure_context(
+                context,
+                blocked_node="having",
+                reason="joined aggregates support exactly one HAVING predicate",
+                resolved_nodes=set(_JOINED_AGGREGATE_DECISION_NODES[:11]),
+            )
+        condition = dict(structured_having[0])
+        having_function = str(condition.get("aggregate_function") or "").strip().lower()
+        having_metric = str(condition.get("metric_phrase") or "").strip()
+        if having_function != aggregate_function:
+            return _joined_aggregate_failure_context(
+                context,
+                blocked_node="having",
+                reason="HAVING aggregate does not match the selected output aggregate",
+                resolved_nodes=set(_JOINED_AGGREGATE_DECISION_NODES[:11]),
+            )
+        if aggregate_function != "count" and _humanize(having_metric) != _humanize(metric_phrase):
+            return _joined_aggregate_failure_context(
+                context,
+                blocked_node="having",
+                reason="HAVING metric does not match the selected output metric",
+                resolved_nodes=set(_JOINED_AGGREGATE_DECISION_NODES[:11]),
+            )
+        condition["table"] = base_table
+        condition["column"] = "" if aggregate_function == "count" else str(metric.get("column") or "")
+        selected_having = [condition]
+
+    selected_order_by = None
+    requested_sort = dict(intent.get("requested_sort") or {})
+    if requested_sort:
+        direction = str(requested_sort.get("direction") or "").strip().lower()
+        if direction not in {"asc", "desc"}:
+            return _joined_aggregate_failure_context(
+                context,
+                blocked_node="order_by",
+                reason="joined aggregate ORDER BY direction is invalid",
+                resolved_nodes=set(_JOINED_AGGREGATE_DECISION_NODES[:12]),
+            )
+        selected_order_by = {
+            "target_type": "aggregate_expression",
+            "table": base_table,
+            "column": "" if aggregate_function == "count" else str(metric.get("column") or ""),
+            "aggregate_function": aggregate_function,
+            "direction": direction,
+            "source": "selected_joined_aggregate",
+        }
+
+    limit = intent.get("limit")
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000
+    ):
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="limit",
+            reason="joined aggregate LIMIT must be between 1 and 1000",
+            resolved_nodes=set(_JOINED_AGGREGATE_DECISION_NODES[:13]),
+        )
+    if not requested_sort:
+        limit = None
+
+    selected_join_path = {
+        "base_table": base_table,
+        "joined_tables": [dimension_table],
+        "edges": [edge],
+        "path_source": "relationship_graph",
+        "ambiguity_status": "resolved",
+    }
+    metric_column = "" if aggregate_function == "count" else str(metric.get("column") or "")
+    aggregate_expression = (
+        "COUNT(*)"
+        if aggregate_function == "count"
+        else f"{aggregate_function.upper()}({base_table}.{metric_column})"
+    )
+    aggregate_alias = (
+        f"count__{base_table}__rows"
+        if aggregate_function == "count"
+        else f"{aggregate_function}__{base_table}__{metric_column}"
+    )
+    selected_output_columns = [
+        {
+            "kind": "dimension",
+            "table": dimension_table,
+            "column": dimension_column,
+            "expression": f"{dimension_table}.{dimension_column}",
+            "alias": f"{dimension_table}__{dimension_column}",
+            "source": "selected_joined_aggregate_dimension",
+        },
+        {
+            "kind": "aggregate",
+            "table": base_table,
+            "column": metric_column,
+            "aggregate_function": aggregate_function,
+            "expression": aggregate_expression,
+            "alias": aggregate_alias,
+            "source": "selected_joined_aggregate_metric",
+        },
+    ]
+    has_where = bool(selected_filters)
+    has_having = bool(selected_having)
+    clause_shape = (
+        "where_group_by_having" if has_where and has_having
+        else "where_group_by" if has_where
+        else "group_by_having" if has_having
+        else "group_by"
+    )
+    resolved_nodes = {
+        "unsafe_check", "table_scope", "query_shape", "aggregate", "dimension", "join_need",
+        "relationship_graph_lookup", "safe_join_path", "ambiguity_check", "clause_shape", "route",
+    }
+    if aggregate_function != "count":
+        resolved_nodes.add("metric")
+    decision_path = []
+    for node_name in _JOINED_AGGREGATE_DECISION_NODES:
+        if node_name == "metric" and aggregate_function == "count":
+            status, reason = "not_required", "COUNT(*) does not require a metric column"
+        elif node_name == "where" and not has_where:
+            status, reason = "not_required", "no row-level filter was requested"
+        elif node_name == "having" and not has_having:
+            status, reason = "not_required", "no aggregate filter was requested"
+        elif node_name == "order_by" and not selected_order_by:
+            status, reason = "not_required", "no aggregate ordering was requested"
+        elif node_name == "limit" and limit is None:
+            status, reason = "not_required", "no ranking limit was requested"
+        else:
+            status, reason = "resolved", f"{node_name.replace('_', ' ')} resolved from deterministic evidence"
+        decision_path.append({"node": node_name, "status": status, "reason": reason})
+
+    selected_tables = [
+        {"table": base_table, "confidence": 1.0, "source": "joined_aggregate_contract"},
+        {"table": dimension_table, "confidence": 1.0, "source": "joined_aggregate_contract"},
+    ]
+    selected_columns = [dimension]
+    if metric is not None:
+        selected_columns.insert(0, metric)
+    selected_columns.extend(selected_filters)
+    required_join = (
+        f"{edge['from_table']}.{edge['from_column']} = "
+        f"{edge['to_table']}.{edge['to_column']}"
+    )
+    planned = dict(context)
+    planned.update(
+        {
+            "query_shape": "joined_aggregate",
+            "route": "deterministic_sql_required",
+            "route_recommendation": "deterministic_sql_required",
+            "route_reason": "joined aggregate can be generated from one safe direct Relationship Graph edge",
+            "planner_reason": "joined aggregate can be generated from one safe direct Relationship Graph edge",
+            "can_plan": True,
+            "aggregate_function": aggregate_function,
+            "selected_tables": selected_tables,
+            "selected_table_names": [base_table, dimension_table],
+            "selected_knowledge_base": {
+                table_name: deepcopy(knowledge_base[table_name])
+                for table_name in (base_table, dimension_table)
+            },
+            "selected_columns": selected_columns,
+            "selected_output_columns": selected_output_columns,
+            "selected_metric": metric,
+            "selected_dimensions": [dimension],
+            "selected_filters": selected_filters,
+            "selected_having": selected_having,
+            "selected_order_by": selected_order_by,
+            "selected_join_path": selected_join_path,
+            "selected_relationship_path": selected_join_path,
+            "join_paths": [],
+            "required_joins": [required_join],
+            "limit": limit,
+            "missing_evidence": [],
+            "ambiguities": [],
+            "clause_plan": {
+                "clause_shape": clause_shape,
+                "selected_join_path": selected_join_path,
+                "selected_order_by": dict(selected_order_by or {}),
+                "limit": limit,
+                "requires": {
+                    "aggregate": True,
+                    "metric": aggregate_function != "count",
+                    "dimension": True,
+                    "where": has_where,
+                    "having": has_having,
+                    "order_by": bool(selected_order_by),
+                    "limit": limit is not None,
+                    "join": True,
+                },
+                "decision_path": decision_path,
+            },
+        }
+    )
+    planned["plan"] = {
+        **dict(planned.get("plan") or {}),
+        "filters": selected_filters,
+        "limit": limit,
+    }
+    planned["complex_sql_plan"] = {
+        "query_shape": "joined_aggregate",
+        "selected_tables": selected_tables,
+        "selected_metric": metric,
+        "selected_dimensions": [dimension],
+        "selected_output_columns": selected_output_columns,
+        "filters": selected_filters,
+        "having": selected_having,
+        "selected_order_by": dict(selected_order_by or {}),
+        "selected_join_path": selected_join_path,
+        "required_joins": [required_join],
+        "limit": limit,
+        "clause_plan": dict(planned["clause_plan"]),
+        "route_recommendation": "deterministic_sql_required",
+    }
+    return planned
 
 
 def _apply_join_lookup_contract(

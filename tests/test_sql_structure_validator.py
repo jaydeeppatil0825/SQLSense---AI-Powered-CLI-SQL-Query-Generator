@@ -21,7 +21,9 @@ RUNTIME_SCHEMA = {
             {"name": "event_total", "type": "DECIMAL(12,2)", "nullable": True},
         ],
         "primary_keys": ["event_id"],
-        "foreign_keys": [],
+        "foreign_keys": [
+            {"column": "owner_id", "referenced_table": "alpha_records", "referenced_column": "owner_id"}
+        ],
     },
 }
 

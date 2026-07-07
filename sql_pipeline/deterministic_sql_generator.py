@@ -119,6 +119,64 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
     aggregate_function = _planner_aggregate_function(context, plan)
     contract_shape = str(context.get("query_shape") or "").strip()
 
+    if contract_shape == "joined_aggregate":
+        selected_path = context.get("selected_join_path")
+        selected_dimensions = [
+            entry for entry in (context.get("selected_dimensions") or []) if isinstance(entry, dict)
+        ]
+        if (
+            len(selected_tables) != 2
+            or not isinstance(selected_path, dict)
+            or len(list(selected_path.get("joined_tables") or [])) != 1
+            or len(list(selected_path.get("edges") or [])) != 1
+        ):
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="joined_aggregate",
+                supported_now=True,
+                blocked_by=["selected_join_path_missing"],
+                reason="joined aggregate requires exactly two tables and one planner-selected graph edge",
+            )
+        if aggregate_function not in {"count", "sum", "avg", "min", "max"}:
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="joined_aggregate",
+                supported_now=True,
+                blocked_by=["aggregate_function_missing"],
+                reason="joined aggregate function is missing or unsupported",
+            )
+        if len(selected_dimensions) != 1:
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="joined_aggregate",
+                supported_now=True,
+                blocked_by=["selected_dimension_missing"],
+                reason="joined aggregate requires one planner-selected grouping dimension",
+            )
+        if aggregate_function != "count" and not isinstance(context.get("selected_metric"), dict):
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="joined_aggregate",
+                supported_now=True,
+                blocked_by=["selected_metric_missing"],
+                reason="joined aggregate metric is missing",
+            )
+        required_evidence = [
+            "selected_join_path",
+            "selected_dimension",
+            "aggregate_function",
+            "selected_output_columns",
+        ]
+        if aggregate_function != "count":
+            required_evidence.append("selected_metric")
+        return DeterministicCapabilityResult(
+            status="supported",
+            query_shape="joined_aggregate",
+            supported_now=True,
+            required_evidence=required_evidence,
+            reason="two-table aggregate is authorized by one selected Relationship Graph edge",
+        )
+
     if contract_shape == "joined_lookup":
         intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
         selected_path = context.get("selected_join_path")
@@ -589,12 +647,12 @@ def _apply_clause_plan_contract(
         or clause_plan.get("limit") != plan.limit
     )
     declared_join_path = context.get("selected_join_path")
-    join_mismatch = plan.query_shape == "joined_lookup" and (
+    join_mismatch = plan.query_shape in {"joined_lookup", "joined_aggregate"} and (
         not isinstance(declared_join_path, dict)
         or declared_join_path != plan.selected_join_path
         or clause_plan.get("selected_join_path") != plan.selected_join_path
     )
-    output_mismatch = plan.query_shape == "joined_lookup" and (
+    output_mismatch = plan.query_shape in {"joined_lookup", "joined_aggregate"} and (
         list(context.get("selected_output_columns") or []) != plan.selected_output_columns
     )
 
@@ -665,6 +723,12 @@ def build_deterministic_sql_plan(
         )
     elif capability.query_shape == "joined_lookup":
         plan = _build_joined_lookup_plan(
+            query_context=query_context,
+            knowledge_base=knowledge_base,
+            capability=capability,
+        )
+    elif capability.query_shape == "joined_aggregate":
+        plan = _build_joined_aggregate_plan(
             query_context=query_context,
             knowledge_base=knowledge_base,
             capability=capability,
@@ -1286,6 +1350,290 @@ def _build_joined_lookup_plan(
     )
 
 
+def _build_joined_aggregate_plan(
+    *,
+    query_context: dict[str, Any],
+    knowledge_base: dict[str, Any],
+    capability: DeterministicCapabilityResult,
+) -> DeterministicSqlPlan:
+    selected_path = query_context.get("selected_join_path")
+    if not isinstance(selected_path, dict):
+        return DeterministicSqlPlan(
+            query_shape="joined_aggregate",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["selected_join_path_missing"],
+            route_reason="planner-selected joined aggregate path is missing",
+        )
+    base_table = str(selected_path.get("base_table") or "").strip()
+    joined_tables = [str(value).strip() for value in (selected_path.get("joined_tables") or [])]
+    edges = [dict(edge) for edge in (selected_path.get("edges") or []) if isinstance(edge, dict)]
+    if len(joined_tables) != 1 or len(edges) != 1:
+        return DeterministicSqlPlan(
+            query_shape="joined_aggregate",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["selected_join_path_invalid"],
+            route_reason="joined aggregate requires one joined table and one direct graph edge",
+        )
+    joined_table = joined_tables[0]
+    edge = edges[0]
+    if (
+        selected_path.get("path_source") != "relationship_graph"
+        or selected_path.get("ambiguity_status") != "resolved"
+        or edge.get("safe_for_planner") is not True
+        or {str(edge.get("from_table") or ""), str(edge.get("to_table") or "")}
+        != {base_table, joined_table}
+    ):
+        return DeterministicSqlPlan(
+            query_shape="joined_aggregate",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["selected_join_path_not_authorized"],
+            route_reason="selected joined aggregate path is not authorized by Relationship Graph",
+        )
+
+    schema_columns = {
+        table_name: {
+            str(column.get("name") or "")
+            for column in knowledge_base.get(table_name, {}).get("columns", []) or []
+            if str(column.get("name") or "")
+        }
+        for table_name in (base_table, joined_table)
+    }
+    for table_name, column_name in (
+        (str(edge.get("from_table") or ""), str(edge.get("from_column") or "")),
+        (str(edge.get("to_table") or ""), str(edge.get("to_column") or "")),
+    ):
+        if column_name not in schema_columns.get(table_name, set()):
+            return DeterministicSqlPlan(
+                query_shape="joined_aggregate",
+                status="cannot_plan_safely",
+                supported_now=True,
+                missing_evidence=["join_edge_not_in_schema"],
+                route_reason="selected joined aggregate edge references an unknown schema column",
+            )
+
+    aggregate_function = _planner_aggregate_function(
+        query_context,
+        query_context.get("plan") if isinstance(query_context.get("plan"), dict) else {},
+    )
+    if aggregate_function not in {"count", "sum", "avg", "min", "max"}:
+        return DeterministicSqlPlan(
+            query_shape="joined_aggregate",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["aggregate_function_missing"],
+            route_reason="joined aggregate function is missing or unsupported",
+        )
+
+    metric_column = ""
+    if aggregate_function == "count":
+        aggregate_expression = "COUNT(*)"
+        aggregate_alias = f"count__{base_table}__rows"
+    else:
+        selected_metric = query_context.get("selected_metric")
+        if not isinstance(selected_metric, dict):
+            return DeterministicSqlPlan(
+                query_shape="joined_aggregate",
+                status="cannot_plan_safely",
+                supported_now=True,
+                missing_evidence=["selected_metric_missing"],
+                route_reason="planner-selected joined aggregate metric is missing",
+            )
+        metric_table = str(selected_metric.get("table") or "").strip()
+        metric_column = str(selected_metric.get("column") or "").strip()
+        if metric_table != base_table or metric_column not in schema_columns.get(base_table, set()):
+            return DeterministicSqlPlan(
+                query_shape="joined_aggregate",
+                status="cannot_plan_safely",
+                supported_now=True,
+                missing_evidence=["selected_metric_invalid"],
+                route_reason="planner-selected joined aggregate metric does not match the base schema",
+            )
+        aggregate_expression = f"{aggregate_function.upper()}({base_table}.{metric_column})"
+        aggregate_alias = f"{aggregate_function}__{base_table}__{metric_column}"
+
+    selected_dimensions = [
+        dict(entry) for entry in (query_context.get("selected_dimensions") or []) if isinstance(entry, dict)
+    ]
+    if len(selected_dimensions) != 1:
+        return DeterministicSqlPlan(
+            query_shape="joined_aggregate",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["selected_dimension_missing"],
+            route_reason="planner-selected joined aggregate dimension is missing or ambiguous",
+        )
+    dimension_table = str(selected_dimensions[0].get("table") or "").strip()
+    dimension_column = str(selected_dimensions[0].get("column") or "").strip()
+    if dimension_table != joined_table or dimension_column not in schema_columns.get(joined_table, set()):
+        return DeterministicSqlPlan(
+            query_shape="joined_aggregate",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["selected_dimension_invalid"],
+            route_reason="planner-selected joined aggregate dimension does not match the joined schema",
+        )
+    dimension_expression = f"{dimension_table}.{dimension_column}"
+    dimension_alias = f"{dimension_table}__{dimension_column}"
+    outputs = [
+        dict(entry)
+        for entry in (query_context.get("selected_output_columns") or [])
+        if isinstance(entry, dict)
+    ]
+    if len(outputs) != 2:
+        return DeterministicSqlPlan(
+            query_shape="joined_aggregate",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["selected_output_columns_missing"],
+            route_reason="planner-selected joined aggregate outputs are missing",
+        )
+    dimension_output, aggregate_output = outputs
+    if (
+        dimension_output.get("kind") != "dimension"
+        or str(dimension_output.get("table") or "") != dimension_table
+        or str(dimension_output.get("column") or "") != dimension_column
+        or str(dimension_output.get("expression") or "") != dimension_expression
+        or str(dimension_output.get("alias") or "") != dimension_alias
+        or aggregate_output.get("kind") != "aggregate"
+        or str(aggregate_output.get("table") or "") != base_table
+        or str(aggregate_output.get("column") or "") != metric_column
+        or str(aggregate_output.get("aggregate_function") or "") != aggregate_function
+        or str(aggregate_output.get("expression") or "") != aggregate_expression
+        or str(aggregate_output.get("alias") or "") != aggregate_alias
+    ):
+        return DeterministicSqlPlan(
+            query_shape="joined_aggregate",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["selected_output_columns_invalid"],
+            route_reason="planner-selected joined aggregate outputs do not match resolved evidence",
+        )
+
+    where_clauses, where_conjunctions, filter_columns, filter_reason = _resolve_join_filter_clauses(
+        query_context,
+        knowledge_base,
+        {base_table, joined_table},
+    )
+    if filter_reason:
+        return DeterministicSqlPlan(
+            query_shape="joined_aggregate",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=[filter_reason],
+            route_reason=filter_reason,
+        )
+
+    having_clauses: list[str] = []
+    having_columns: list[str] = []
+    if query_context.get("selected_having") or (
+        isinstance(query_context.get("intent"), dict)
+        and query_context["intent"].get("structured_having")
+    ):
+        having_clauses, having_columns, having_reason = _resolve_having_clauses(
+            query_context=query_context,
+            table_name=base_table,
+            aggregate_function=aggregate_function,
+            aggregate_expression=aggregate_expression,
+            metric_column=metric_column,
+        )
+        if having_reason:
+            return DeterministicSqlPlan(
+                query_shape="joined_aggregate",
+                status="cannot_plan_safely",
+                supported_now=True,
+                missing_evidence=[having_reason],
+                route_reason=having_reason,
+            )
+
+    order_by: list[str] = []
+    selected_order_by = query_context.get("selected_order_by")
+    if selected_order_by is not None:
+        if not isinstance(selected_order_by, dict):
+            return DeterministicSqlPlan(
+                query_shape="joined_aggregate",
+                status="cannot_plan_safely",
+                supported_now=True,
+                missing_evidence=["selected_order_by_invalid"],
+                route_reason="planner-selected joined aggregate ORDER BY is invalid",
+            )
+        direction = str(selected_order_by.get("direction") or "").strip().lower()
+        if (
+            direction not in {"asc", "desc"}
+            or selected_order_by.get("target_type") != "aggregate_expression"
+            or str(selected_order_by.get("table") or "") != base_table
+            or str(selected_order_by.get("column") or "") != metric_column
+            or str(selected_order_by.get("aggregate_function") or "") != aggregate_function
+        ):
+            return DeterministicSqlPlan(
+                query_shape="joined_aggregate",
+                status="cannot_plan_safely",
+                supported_now=True,
+                missing_evidence=["selected_order_by_mismatch"],
+                route_reason="planner-selected ORDER BY does not match the joined aggregate output",
+            )
+        order_by = [f"{aggregate_alias} {direction.upper()}"]
+
+    limit = query_context.get("limit")
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000
+    ):
+        return DeterministicSqlPlan(
+            query_shape="joined_aggregate",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["limit_out_of_safe_range"],
+            route_reason="joined aggregate LIMIT must be between 1 and 1000",
+        )
+
+    return DeterministicSqlPlan(
+        query_shape="joined_aggregate",
+        status="ready",
+        supported_now=True,
+        base_table=base_table,
+        joins=[{"table": joined_table, "edge": edge}],
+        required_joins=[edge],
+        selected_join_path=dict(selected_path),
+        selected_output_columns=outputs,
+        select_items=[
+            {
+                "expression": str(dimension_output["expression"]),
+                "alias": str(dimension_output["alias"]),
+                "kind": "dimension",
+            },
+            {
+                "expression": str(aggregate_output["expression"]),
+                "alias": str(aggregate_output["alias"]),
+                "kind": "aggregate",
+            },
+        ],
+        where_clauses=where_clauses,
+        where_conjunctions=where_conjunctions,
+        having_clauses=having_clauses,
+        group_by=[dimension_expression],
+        order_by=order_by,
+        limit=limit,
+        aggregation_type=aggregate_function,
+        metric_columns=[f"{base_table}.{metric_column}"] if metric_column else [],
+        dimension_columns=[dimension_expression],
+        filter_columns=filter_columns,
+        having_columns=having_columns,
+        required_evidence=list(capability.required_evidence),
+        evidence_sources=[
+            "query_context.selected_join_path",
+            "query_context.selected_metric",
+            "query_context.selected_dimensions",
+            "relationship_graph",
+            "knowledge_base.columns",
+        ],
+        sql_skeleton_type="joined_aggregate",
+        can_render=True,
+        route_reason="joined aggregate SQL generated from planner-selected Relationship Graph evidence",
+    )
+
+
 def _resolve_having_clauses(
     *,
     query_context: dict[str, Any],
@@ -1546,6 +1894,7 @@ _PLAN_RENDERERS = {
     "grouped_aggregate": _render_grouped_aggregate,
     "ranking_query": _render_plan_in_canonical_order,
     "joined_lookup": _render_plan_in_canonical_order,
+    "joined_aggregate": _render_plan_in_canonical_order,
 }
 
 
@@ -1569,7 +1918,10 @@ def _detect_aggregate_function(plan: dict[str, Any]) -> str | None:
 
 def _planner_aggregate_function(context: dict[str, Any], plan: dict[str, Any]) -> str | None:
     intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
-    if str((intent.get("ranking_diagnostics") or {}).get("mode_hint") or "") == "row":
+    if (
+        str(context.get("query_shape") or "") != "joined_aggregate"
+        and str((intent.get("ranking_diagnostics") or {}).get("mode_hint") or "") == "row"
+    ):
         return None
     selected_function = str(context.get("aggregate_function") or "").strip().lower()
     if selected_function:
