@@ -13,15 +13,15 @@ Avoid using the MySQL `root` user for normal project use. The CLI only needs rea
 Create a dedicated MySQL user with limited privileges:
 
 ```sql
-CREATE USER 'aisql_user'@'localhost' IDENTIFIED BY 'strong_password_here';
-GRANT SELECT ON ai_sales_demo.* TO 'aisql_user'@'localhost';
+CREATE USER 'sqlsense_user'@'localhost' IDENTIFIED BY 'strong_password_here';
+GRANT SELECT ON your_database_name.* TO 'sqlsense_user'@'localhost';
 FLUSH PRIVILEGES;
 ```
 
 Then update `.env`:
 
 ```env
-DB_USER=aisql_user
+DB_USER=sqlsense_user
 DB_PASSWORD=strong_password_here
 ```
 
@@ -40,13 +40,14 @@ The project validates generated SQL before execution:
 - Multiple SQL statements are rejected.
 - A default `LIMIT` is added when the generated query does not include one.
 - SQL structure is checked against the generated knowledge base where possible.
+- SQL is re-validated before execution even if previously validated.
 
 ## Secrets Management
 
 Current behavior:
 
 - Database credentials live in `.env`.
-- NVIDIA credentials, if used, live in `.env` or are entered for the current CLI session.
+- Local AI backend (Ollama) credentials are configured in `.env`.
 - `.env` is ignored by git.
 - Password input in the CLI uses `getpass` and is not echoed.
 
@@ -55,7 +56,7 @@ Recommendations:
 - Never commit `.env`.
 - Use a dedicated database user instead of an admin account.
 - Rotate credentials regularly.
-- Keep NVIDIA/API keys out of screenshots, logs, and shared terminals.
+- Keep API keys out of screenshots, logs, and shared terminals.
 
 ## Logging
 
@@ -73,5 +74,7 @@ Recommendations:
 - [ ] Keep `.env` out of version control.
 - [ ] Review SQL validation rules after adding new SQL generation features.
 - [ ] Keep dependencies updated.
-- [ ] Rotate database and AI-provider credentials regularly.
+- [ ] Rotate database credentials regularly.
 - [ ] Review generated query history before sharing output files.
+- [ ] Ensure Ollama is properly secured if running on a network-accessible server.
+- [ ] Review vector index files before sharing if they contain sensitive schema information.

@@ -5,15 +5,11 @@ Central AI backend service for CLI AI configuration, testing, and chat calls.
 """
 
 from __future__ import annotations
-
 from typing import Optional, Tuple
 import json
 import os
-
 from dotenv import load_dotenv
-
-from utils.logger import get_logger
-
+from logs.logger import get_logger
 try:
     import requests
 except ImportError:  # pragma: no cover
@@ -27,7 +23,7 @@ _DEFAULT_LOCAL_MODEL = "llama3"
 _DEFAULT_LOCAL_URL = "http://localhost:11434"
 _DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 _DEFAULT_NVIDIA_URL = "https://integrate.api.nvidia.com/v1"
-_BACKEND_TEST_MAX_TOKENS = 8
+_BACKEND_TEST_MAX_TOKENS = 1000
 
 
 def _response_preview(text: str, limit: int = 80) -> str:

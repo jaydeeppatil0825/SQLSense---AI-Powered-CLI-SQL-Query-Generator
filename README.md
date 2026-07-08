@@ -1,6 +1,6 @@
 # SQLSense - AI-Powered CLI SQL Query Generator
- CURRENTLY UNSTABLE
-A Python CLI tool that connects to a MySQL database, builds a semantic knowledge base, and converts plain-English questions into safe, read-only SQL `SELECT` queries using deterministic SQL generation with optional AI semantic enrichment during knowledge base build.
+
+A Python CLI tool that connects to MySQL databases, builds a semantic knowledge base, and converts plain-English questions into safe, read-only SQL `SELECT` queries using deterministic SQL generation with optional AI semantic enrichment during knowledge base build.
 
 **This project is CLI-only.** Run it with `python main.py`.
 **AI/LLM is used only during KB build/semantic enrichment.** Runtime question answering is entirely deterministic without AI.
@@ -21,10 +21,15 @@ SQL-Sense/
 ├── .env                             # Your credentials (not committed)
 ├── .env.template                    # Template — copy this to .env
 ├── requirements.txt                 # Pinned dependencies
-├── README.md
+├── README.md                        # Main documentation
+├── PIPELINE_ARCHITECTURE.md        # Pipeline architecture documentation
+├── SECURITY.md                      # Security recommendations
+├── LICENSE                          # MIT License
 ├── core/
 │   ├── app_service.py               # Main application service orchestrator
-│   └── ai_backend_service.py        # AI backend service (KB build only)
+│   ├── ai_backend_service.py        # AI backend service (KB build only)
+│   ├── chart_service.py             # Chart generation service
+│   └── insight_service.py           # Insight generation service (runtime disabled)
 ├── kb_pipeline/
 │   ├── database_service.py         # Database connection and KB build orchestration
 │   ├── connection.py                # Engine factory (env + interactive)
@@ -34,35 +39,45 @@ SQL-Sense/
 │   ├── schema_facts.py              # Schema enrichment and relationship detection
 │   ├── business_glossary.py         # Business term → column mapping
 │   ├── ai_semantic_enricher.py      # AI-powered semantic enrichment (KB build only)
+│   ├── relationship_graph.py       # Relationship graph for join paths
+│   ├── semantic_mapper.py          # Semantic type mapping
+│   ├── insights/
+│   │   └── insight_generator.py    # Insight generation (rule-based + AI)
+│   ├── charts/
+│   │   └── chart_generator.py       # Chart generation logic
 │   └── vector/                      # ChromaDB vector store and retrieval
-│       ├── chroma_store.py
-│       ├── index_builder.py
-│       ├── persistence.py
-│       └── retriever.py
+│       ├── chroma_store.py          # ChromaDB store and hybrid retriever
+│       ├── chroma_telemetry.py      # ChromaDB telemetry
+│       ├── embedding_service.py     # Embedding service for vectorization
+│       ├── index_builder.py         # Vector index builder
+│       ├── persistence.py           # Vector index persistence
+│       └── retriever.py             # Vector retriever
 ├── query_pipeline/
 │   ├── query_pipeline.py            # Query planning pipeline entry point
 │   ├── query_planner.py             # Query planning and routing logic with structured contract
 │   ├── intent_builder.py            # Schema-agnostic deterministic intent detection
 │   ├── context_retriever.py         # Context retrieval from KB/glossary/vector
-│   ├── question_normalizer.py       # Question normalization
+│   ├── question_normalizer.py      # Question normalization
 │   └── conversation/
+│       ├── action_detector.py       # Conversation action detection
+│       ├── followup_detector.py     # Follow-up question detection
 │       ├── question_rewriter.py     # Follow-up question rewriting (rule-based)
-│       └── conversation_memory.py  # Conversation session management
+│       └── conversation_memory.py   # Conversation session management
 ├── sql_pipeline/
 │   ├── question_service.py          # Question processing orchestration
+│   ├── deterministic_sql_generator.py  # Deterministic SQL generation
 │   ├── simple_query_generator.py    # Deterministic SQL for simple queries
-│   ├── sql_generator.py             # Blocked AI SQL generator (RuntimeError)
+│   ├── sql_generator.py             # SQL generator interface
+│   ├── prompt_builder.py            # AI SQL prompt builder (blocked at runtime)
 │   ├── sql_validator.py             # SQL validation
-│   └── query_executor.py            # Safe SELECT execution
-├── core/
-│   ├── result_service.py            # Result storage and retrieval
-│   ├── chart_service.py             # Chart generation
-│   └── insight_service.py          # Insight generation (not yet implemented)
+│   ├── query_executor.py            # Safe SELECT execution
+│   └── result_service.py            # Result storage and retrieval
 ├── utils/
 │   ├── file_utils.py                # save_json / load_json
-│   └── logger.py                   # Centralized logging configuration
+│   └── logger.py                    # Centralized logging configuration
 ├── semantic/
 │   ├── knowledge_base.json          # Generated output (git-ignored)
+│   ├── knowledge_base.meta.json    # KB metadata (git-ignored)
 │   └── business_glossary.json       # Generated business glossary (git-ignored)
 ├── logs/
 │   └── app.log                      # Application logs (git-ignored)
@@ -157,12 +172,12 @@ You will see:
   Backend  : local (llama3)
   Database : not connected
 ----------------------------------------------------
-  1) Connect Database
-  2) Build Knowledge Base
-  3) Ask a Question / Ask Business Question
-  4) Execute Last SQL
-  5) AI Backend Settings
-  6) Search Business Glossary
+  1) Connect Database / Auto Build KB
+  2) Ask a Question / Ask Business Question
+  3) Execute Last SQL
+  4) Semantic AI Settings
+  5) Search Business Glossary
+  6) Rebuild / Refresh Knowledge Base
   7) Exit
 ====================================================
 ```
@@ -189,18 +204,21 @@ A `SELECT 1` test is run immediately. If it passes, the connection is stored for
 
 ## How to Build the Knowledge Base
 
-Select **option 2**. The tool will:
+The knowledge base is automatically built when you connect to a database (option 1). You can also manually rebuild it using option 6.
+
+The tool will:
 
 1. Extract all table names, column names, types, nullable flags, primary keys, and foreign keys.
 2. Profile every table: row count, null/non-null/unique counts per column, up to 5 sample values, min/max for numeric and date columns.
 3. Assign a semantic type to each column (e.g. `price` → `value`, `customer_id` → `customer`).
 4. Optionally enrich with AI using local Ollama `llama3`.
 5. Generate a business glossary mapping business terms to actual columns.
-6. Save everything to `semantic/knowledge_base.json` and `semantic/business_glossary.json`.
+6. Build a relationship graph for join path detection.
+7. Build a vector index for enhanced context retrieval.
+8. Save everything to `semantic/knowledge_base.json`, `semantic/business_glossary.json`, and vector index files.
 
 Progress messages:
 ```
-  Run AI semantic enrichment? (y/n): y
   Building knowledge base...
   [OK] Schema extracted successfully.
   [OK] Data profiling completed successfully.
@@ -211,6 +229,7 @@ Progress messages:
   [OK] AI enrichment completed successfully
   [OK] Knowledge base saved successfully -> semantic/knowledge_base.json
   [OK] Business glossary saved -> semantic/business_glossary.json
+  [OK] Vector index built successfully
   Returning to main menu.
 ```
 
@@ -218,7 +237,7 @@ Progress messages:
 
 ## How to Ask Questions
 
-Select **option 3**. Type a plain-English question:
+Select **option 2**. Type a plain-English question:
 
 ```
   Enter your question: Show me the top 5 customers by total order value
@@ -226,11 +245,13 @@ Select **option 3**. Type a plain-English question:
 
 The tool will:
 - Load the knowledge base for context
-- Use deterministic SQL generation based on the query planner and business glossary
+- Normalize the question and detect intent
+- Retrieve relevant context from business glossary and vector index
+- Use deterministic SQL generation based on the query planner
 - Validate the generated SQL for safety
 - Store and display it if safe
 
-**Note:** Complex queries requiring joins, aggregations, or business reasoning that cannot be handled deterministically will return a clean message: "Complex deterministic SQL generation is not implemented yet. Please try a simpler query."
+**Note:** Complex queries requiring joins, aggregations, or business reasoning that cannot be handled deterministically will return a clean message: "Cannot plan safely - missing required evidence."
 
 ```
   Generated SQL:
@@ -242,7 +263,7 @@ The tool will:
   LIMIT 5
 ```
 
-Then select **option 4** to execute the same saved SQL.
+Then select **option 3** to execute the same saved SQL.
 
 ---
 
@@ -348,7 +369,7 @@ The tool supports conversational features that remember your previous questions 
 
 - **Follow-up Detection**: Automatically detects when your question is a follow-up (e.g., "Where do they live?", "Make it top 10")
 - **Question Rewriting**: Rewrites follow-up questions into standalone questions using rule-based logic
-- **Conversation Actions**: Supports commands like "chart", "new chat", "show history"
+- **Conversation Actions**: Supports commands like "chart", "insights", "new chat", "show history"
 - **Session Persistence**: Saves conversation sessions to `output/conversations/`
 
 ### Follow-up Question Examples
@@ -370,6 +391,7 @@ The tool supports conversational features that remember your previous questions 
 You can use these commands at any time:
 
 - **"chart"** or **"generate chart"**: Generate a chart for the last result
+- **"insights"**: Generate insights for the last result (rule-based only)
 - **"new chat"** or **"clear chat"**: Start a new conversation session
 - **"show last sql"** or **"repeat last sql"**: Show the last generated SQL
 - **"show history"** or **"show conversation history"**: Show recent conversation turns
@@ -455,7 +477,7 @@ The tool uses a **deterministic approach** for SQL generation with a structured 
 |---|---|---|
 | Simple list/count | Deterministic rule-based generator | "Show all customers", "Count total orders", "Show all partners" |
 | Grouped/Aggregated | Schema-agnostic intent builder with structured contract | "Show sales by region", "Top 5 customers by revenue" |
-| Complex joins/aggregations | Partially implemented (deterministic route recommendation) | Multi-table queries with join paths |
+| Complex joins/aggregations | Deterministic route recommendation with join paths | Multi-table queries with join paths |
 
 **Query Pipeline Architecture:**
 - **Intent Builder**: Schema-agnostic deterministic intent detection that extracts query shape (list, count, ranking, grouped_summary) without hardcoded semantic mappings
@@ -463,6 +485,7 @@ The tool uses a **deterministic approach** for SQL generation with a structured 
 - **Missing Evidence Detection**: Identifies missing metrics, dimensions, join paths, filter columns, and formula evidence
 - **Route Recommendation**: Categorizes queries as `deterministic_sql_required` or `cannot_plan_safely` based on evidence strength
 - **Context Retrieval**: Uses vector search, business glossary, and schema facts for evidence gathering
+- **Vector Index**: ChromaDB-based vector store for semantic similarity search
 
 **Why?** Deterministic SQL generation is safer, faster, and more predictable. AI/LLM is used only during knowledge base build for semantic enrichment, not at runtime for SQL generation. The schema-agnostic intent builder preserves raw business terms for context retrieval without mapping to specific database tables or columns.
 
@@ -482,6 +505,11 @@ The tool uses a **deterministic approach** for SQL generation with a structured 
 ### Chart Output
 
 Charts are automatically saved with timestamped filenames to `output/charts/chart_YYYYMMDD_HHMMSS.png`. This folder is git-ignored. The tool detects the best chart type (bar, line, or grouped bar) based on the query result structure and asks for confirmation before generating.
+
+Chart generation uses matplotlib and supports:
+- Bar charts for categorical data
+- Line charts for time-series data
+- Grouped bar charts for multi-category comparisons
 
 ### Query History
 
@@ -507,6 +535,7 @@ The application logs all key operations to `logs/app.log`:
 - Query execution
 - Chart generation
 - Insight generation
+- Vector index operations
 - Errors and AI fallback decisions
 
 Set `DEBUG_MODE=true` in `.env` for verbose debug logging. Passwords and API keys are never logged.
@@ -552,3 +581,5 @@ python -m pytest -v --basetemp=temp_pytest_full
 - Query history search and replay
 - More deterministic business-question coverage
 - Additional AI enrichment improvements for larger schemas
+- Enhanced vector retrieval with hybrid search
+- Support for more chart types and visualizations

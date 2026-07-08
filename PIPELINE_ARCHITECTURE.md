@@ -1,10 +1,8 @@
 # SQLSense Pipeline Architecture
 
-SQLSense stays CLI-only and is organized around three logical pipelines.
+SQLSense is a CLI-only tool organized around three logical pipelines.
 
-This document describes the active runtime boundaries without doing a risky
-folder migration. The goal is to keep the current codebase understandable,
-dynamic, and safe while preserving Phase 7 behavior.
+This document describes the active runtime boundaries and architecture of the system. The goal is to keep the codebase understandable, dynamic, and safe while maintaining the current behavior.
 
 ## Core Rule
 
@@ -39,19 +37,18 @@ Purpose:
 Connect to the runtime database and build trusted dynamic evidence.
 
 Responsibilities:
-- database connection
-- schema extraction
-- PK/FK discovery
-- profiling and sample statistics
-- structural semantic facts
-- AI semantic enrichment
-- dynamic glossary generation
-- relationship graph creation
-- BFS join-path foundation
-- vector index build/load
+- Database connection management
+- Schema extraction using SQLAlchemy reflection
+- PK/FK discovery and relationship detection
+- Data profiling and sample statistics
+- Structural semantic facts extraction
+- AI semantic enrichment (KB build only)
+- Dynamic business glossary generation
+- Relationship graph creation for join paths
+- Vector index build/load with ChromaDB
 - KB/glossary/vector metadata persistence
--
-
+- Chart generation logic
+- Insight generation (rule-based + AI)
 
 Current files:
 - `kb_pipeline/connection.py`
@@ -64,37 +61,28 @@ Current files:
 - `kb_pipeline/business_glossary.py`
 - `kb_pipeline/relationship_graph.py`
 - `kb_pipeline/schema_facts.py`
+- `kb_pipeline/insights/insight_generator.py`
+- `kb_pipeline/charts/chart_generator.py`
+- `kb_pipeline/vector/chroma_store.py`
+- `kb_pipeline/vector/chroma_telemetry.py`
 - `kb_pipeline/vector/embedding_service.py`
 - `kb_pipeline/vector/index_builder.py`
 - `kb_pipeline/vector/retriever.py`
 - `kb_pipeline/vector/persistence.py`
 
-Compatibility wrappers kept at old paths:
-- `db/connection.py`
-- `db/schema_reader.py`
-- `db/data_profiler.py`
-- `core/database_service.py`
-- `semantic/knowledge_base_builder.py`
-- `semantic/ai_semantic_enricher.py`
-- `semantic/semantic_mapper.py`
-- `semantic/business_glossary.py`
-- `semantic/relationship_graph.py`
-- `semantic/erp_metadata.py`
-- `vector_store/embedding_service.py`
-- `vector_store/index_builder.py`
-- `vector_store/retriever.py`
-- `vector_store/persistence.py`
-
 Outputs:
 - `semantic/knowledge_base.json`
 - `semantic/business_glossary.json`
 - `semantic/knowledge_base.meta.json`
-- vector index files
-- relationship graph evidence
+- Vector index files (ChromaDB)
+- Relationship graph evidence
+- Generated charts
+- Generated insights
 
 Boundary rules:
 - Must not depend on question normalization, intent detection, or SQL generation.
 - May expose KB/glossary/vector/relationship evidence to downstream pipelines.
+- AI is used only during KB build for semantic enrichment, not at runtime.
 
 ## Pipeline 2: Query Planning Pipeline
 
@@ -122,17 +110,6 @@ Current files:
 - `query_pipeline/conversation/followup_detector.py`
 - `query_pipeline/conversation/question_rewriter.py`
 - `query_pipeline/conversation/conversation_memory.py`
-
-Compatibility wrappers kept at old paths:
-- `utils/question_normalizer.py`
-- `core/intent_builder.py`
-- `core/context_retriever.py`
-- `core/query_planner.py`
-- `core/query_pipeline.py`
-- `conversation/action_detector.py`
-- `conversation/followup_detector.py`
-- `conversation/question_rewriter.py`
-- `conversation/conversation_memory.py`
 
 Outputs:
 - `normalized_question`
@@ -173,21 +150,11 @@ Current files:
 - `sql_pipeline/sql_generator.py`
 - `sql_pipeline/prompt_builder.py`
 - `sql_pipeline/simple_query_generator.py`
-- `sql_pipeline/erp_query_generator.py`
+- `sql_pipeline/deterministic_sql_generator.py`
 - `sql_pipeline/sql_validator.py`
 - `sql_pipeline/query_executor.py`
 - `sql_pipeline/question_service.py`
 - `sql_pipeline/result_service.py`
-
-Compatibility wrappers kept at old paths:
-- `ai/sql_generator.py`
-- `ai/prompt_builder.py`
-- `ai/simple_query_generator.py`
-- `ai/erp_query_generator.py`
-- `utils/sql_validator.py`
-- `db/query_executor.py`
-- `core/question_service.py`
-- `core/result_service.py`
 
 Boundary rules:
 - Must consume planning evidence instead of rebuilding hidden business meaning.
@@ -198,26 +165,31 @@ Boundary rules:
 
 ## Current Orchestration
 
-`core/question_service.py` remains the central orchestrator for now.
+`core/app_service.py` is the main application service orchestrator that coordinates all lower-level services behind the CLI.
 
-That is intentional in this phase. Phase 8A does not move the CLI flow or do a
-large refactor. Instead, it enforces that `QuestionService` consumes the
-planning pipeline output instead of rebuilding independent business guesses.
+The orchestration flow:
+1. `main.py` handles CLI menu display and user input
+2. `core/app_service.py` coordinates business logic across all pipelines
+3. `kb_pipeline/database_service.py` handles database connection and KB build
+4. `query_pipeline/query_pipeline.py` handles question processing and planning
+5. `sql_pipeline/question_service.py` handles SQL generation and execution
+6. `core/chart_service.py` handles chart generation
+7. `core/insight_service.py` handles insight generation (runtime disabled)
 
 ## Evidence Flow
 
 Runtime flow:
 
-1. Database connection is handled by the KB Pipeline.
+1. Database connection is handled by the KB Pipeline (`kb_pipeline/database_service.py`).
 2. Knowledge base, glossary, relationships, and vector state are built or loaded.
-3. `core/query_pipeline.py` normalizes the question and builds:
+3. `query_pipeline/query_pipeline.py` normalizes the question and builds:
    - intent
    - retrieved context
    - preview planning context
    - formula evidence
    - evidence sources
-4. `core/question_service.py` consumes that pipeline context.
-5. Rule-based or AI SQL generation uses:
+4. `sql_pipeline/question_service.py` consumes that pipeline context.
+5. Deterministic SQL generation uses:
    - selected tables
    - selected columns
    - measure candidates
@@ -226,36 +198,41 @@ Runtime flow:
    - `possible_join_paths`
    - formula evidence
    - evidence sources
-6. `utils/sql_validator.py` validates the generated SQL.
-7. `db/query_executor.py` executes only validated SELECT SQL.
+6. `sql_pipeline/sql_validator.py` validates the generated SQL.
+7. `sql_pipeline/query_executor.py` executes only validated SELECT SQL.
 
 ## Join-Path Ownership
 
-`semantic/relationship_graph.py` belongs to the KB Pipeline because it builds
+`kb_pipeline/relationship_graph.py` belongs to the KB Pipeline because it builds
 generic runtime graph evidence from schema relationships.
 
-`core/context_retriever.py` and `core/query_planner.py` consume that evidence
+`query_pipeline/context_retriever.py` and `query_pipeline/query_planner.py` consume that evidence
 to produce `possible_join_paths`.
 
-`core/question_service.py`, `ai/sql_generator.py`, and `ai/prompt_builder.py`
+`sql_pipeline/question_service.py` and `sql_pipeline/deterministic_sql_generator.py`
 consume `possible_join_paths` during SQL generation and retry/repair.
 
 ## Neutral Naming Notes
 
 - `kb_pipeline/schema_facts.py` is the primary runtime implementation for
   schema-fact enrichment and neutral metadata helpers.
-- `semantic/erp_metadata.py` is still the file path for backward compatibility.
 - Active runtime enrichment is schema-fact-only.
 - Use `enrich_knowledge_base_schema_facts(...)` as the neutral runtime API.
-- `enrich_knowledge_base_for_erp(...)` remains only as a backward-compatible
-  alias and should not be the preferred runtime entry point.
 
-## Phase 8A Non-Goals
+## Core Services
 
-This phase does not:
-- rewrite the project
-- move many files between folders
-- change the CLI menu
-- add frontend or API layers
-- change the active SQL generation behavior
-- reintroduce ERP templates or hardcoded business mappings
+The `core/` directory contains the main application services that orchestrate the pipelines:
+
+- `core/app_service.py`: Main application service orchestrator that coordinates all lower-level services
+- `core/ai_backend_service.py`: AI backend service for KB build only (local Ollama)
+- `core/chart_service.py`: Chart generation service
+- `core/insight_service.py`: Insight generation service (runtime disabled - AI restricted to KB enrichment)
+
+## Design Principles
+
+1. **Deterministic Runtime**: SQL generation at runtime is entirely deterministic without AI/LLM
+2. **AI for KB Build Only**: AI/LLM is used only during knowledge base build for semantic enrichment
+3. **Schema-Agnostic**: Intent detection and query planning are schema-agnostic to preserve business meaning
+4. **Evidence-Based**: All SQL generation must be backed by runtime evidence from the KB
+5. **Safety First**: SQL validation is the final gate before execution
+6. **Pipeline Boundaries**: Clear separation between KB, Query Planning, and SQL Generation pipelines
