@@ -1768,6 +1768,10 @@ def _filter_predicate(
         values = selected_filter.get("values") or selected_filter.get("value")
         if not isinstance(values, (list, tuple)) or len(values) != 2:
             return "", "filter_between_values_invalid"
+        if _filter_column_kind(schema_column) == "date":
+            range_reason = _validate_date_range_values(values)
+            if range_reason:
+                return "", range_reason
         lower, lower_reason = _filter_literal(values[0], schema_column, operator)
         upper, upper_reason = _filter_literal(values[1], schema_column, operator)
         if lower_reason or upper_reason:
@@ -1842,6 +1846,15 @@ def _date_filter_literal(text: str, schema_column: dict[str, Any]) -> tuple[str,
     except ValueError:
         return "", "filter_value_type_mismatch"
     return f"'{normalized}'", ""
+
+
+def _validate_date_range_values(values: Any) -> str:
+    try:
+        start = date.fromisoformat(str(values[0]).strip())
+        end = date.fromisoformat(str(values[1]).strip())
+    except (TypeError, ValueError):
+        return "filter_value_type_mismatch"
+    return "filter_between_range_invalid" if start > end else ""
 
 
 def _render_filtered_query(plan: DeterministicSqlPlan) -> str:

@@ -10,6 +10,8 @@ runtime tables, columns, formulas, or business mappings.
 from __future__ import annotations
 
 import re
+from calendar import monthrange
+from datetime import date, timedelta
 from typing import Any, Dict, Optional
 from utils.logger import get_logger
 from query_pipeline.question_normalizer import normalize_question
@@ -88,9 +90,15 @@ _WITH_RE = re.compile(
     r"\s+with\s+(.+?)(?=\s+(?:from|where|having|group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit\s+\d+)\b|$)",
     re.IGNORECASE,
 )
-_BETWEEN_RE = re.compile(r"\bbetween\s+(.+?)\s+and\s+(.+?)(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|$))", re.IGNORECASE)
-_BEFORE_RE = re.compile(r"\bbefore\s+(.+?)(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|$))", re.IGNORECASE)
-_AFTER_RE = re.compile(r"\bafter\s+(.+?)(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|$))", re.IGNORECASE)
+_INTERVAL_BOUNDARY = r"(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|where|with|for|from|limit\s+\d+)\b|$)"
+_BETWEEN_RE = re.compile(r"\bbetween\s+(.+?)\s+and\s+(.+?)" + _INTERVAL_BOUNDARY, re.IGNORECASE)
+_BEFORE_RE = re.compile(r"\bbefore\s+(.+?)" + _INTERVAL_BOUNDARY, re.IGNORECASE)
+_AFTER_RE = re.compile(r"\bafter\s+(.+?)" + _INTERVAL_BOUNDARY, re.IGNORECASE)
+_ON_DATE_RE = re.compile(r"\bon\s+(\d{4}-\d{2}-\d{2})\b", re.IGNORECASE)
+_IN_MONTH_YEAR_RE = re.compile(r"\bin\s+([a-z]+)\s+(20\d{2})\b", re.IGNORECASE)
+_IN_YEAR_RE = re.compile(r"\bin\s+(20\d{2})\b", re.IGNORECASE)
+_IN_MONTH_RE = re.compile(r"\bin\s+([a-z]+)\b", re.IGNORECASE)
+_RELATIVE_DAYS_RE = re.compile(r"\blast\s+(\d+)\s+days?\b", re.IGNORECASE)
 _GREATER_THAN_RE = re.compile(r"\bgreater\s+than\s+(.+?)(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|$))", re.IGNORECASE)
 _LESS_THAN_RE = re.compile(r"\bless\s+than\s+(.+?)(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|$))", re.IGNORECASE)
 _COMPARE_RE = re.compile(r"\b(?:vs|versus|compare|comparison)\b", re.IGNORECASE)
@@ -153,9 +161,23 @@ _JOIN_DETAIL_MARKER_MAP = {
     "with": "with",
     "details": "details",
 }
+_MONTHS = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
 
 
-def build_intent(question: str, ai_backend: str = "local") -> Dict[str, Any]:
+def build_intent(question: str, ai_backend: str = "local", today: date | None = None) -> Dict[str, Any]:
     """
     Return structured, schema-agnostic intent for the question.
 
@@ -166,7 +188,7 @@ def build_intent(question: str, ai_backend: str = "local") -> Dict[str, Any]:
     normalized_question, _ = normalize_question(question)
     intent = _build_fallback_intent(normalized_question)
     intent = _normalize_simple_target_entity_usage(intent, normalized_question)
-    return _apply_intent_contract(intent, normalized_question)
+    return _apply_intent_contract(intent, normalized_question, today=today)
 
 
 def extract_requested_limit(question: str) -> Optional[int]:
@@ -185,10 +207,14 @@ def extract_requested_limit(question: str) -> Optional[int]:
     return None
 
 
-def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, Any]:
+def _apply_intent_contract(intent: Dict[str, Any], question: str, *, today: date | None = None) -> Dict[str, Any]:
     """Attach additive, versioned diagnostics without changing legacy fields."""
     normalized = dict(intent or {})
-    structured_filters = _extract_structured_filters(question)
+    structured_filters = _extract_structured_filters(question, today=today)
+    structured_intervals = [
+        dict(entry) for entry in structured_filters
+        if entry.get("filter_kind") == "date_interval"
+    ]
     structured_having = _extract_structured_having(question)
     keyword_markers = _extract_keyword_markers(question)
     intent_type = str(normalized.get("intent_type") or "unknown").strip().lower()
@@ -223,6 +249,8 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
         confidence_reasons.append("explicit_sorting")
     if normalized.get("requested_filters"):
         confidence_reasons.append("explicit_filter_clause")
+    if structured_intervals:
+        confidence_reasons.append("explicit_interval_filter")
     if structured_having:
         confidence_reasons.append("explicit_having_clause")
     if normalized.get("grouping_phrase"):
@@ -268,6 +296,7 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str) -> Dict[str, A
     normalized["intent_contract_version"] = INTENT_CONTRACT_VERSION
     normalized["keyword_markers"] = keyword_markers
     normalized["structured_filters"] = structured_filters
+    normalized["structured_intervals"] = structured_intervals
     normalized["structured_having"] = structured_having
     normalized["requested_having"] = [
         str(entry.get("raw_phrase") or "").strip()
@@ -1159,6 +1188,11 @@ def _extract_requested_filters(question: str) -> list[str]:
             if value:
                 filters.append(f"{label} {value}")
 
+    for entry in _extract_interval_filters(question):
+        raw_phrase = str(entry.get("raw_phrase") or "").strip()
+        if raw_phrase:
+            filters.append(raw_phrase)
+
     return _merge_unique(filters)
 
 
@@ -1219,8 +1253,14 @@ def _split_filter_phrases(filter_text: str) -> list[tuple[str, str | None]]:
     return results
 
 
-def _extract_structured_filters(question: str) -> list[dict[str, Any]]:
+def _extract_structured_filters(question: str, *, today: date | None = None) -> list[dict[str, Any]]:
     filter_text = _extract_filter_text(question)
+    interval_filters = _extract_interval_filters(question, today=today)
+    interval_by_raw = {
+        str(entry.get("raw_phrase") or "").strip().lower(): entry
+        for entry in interval_filters
+        if str(entry.get("raw_phrase") or "").strip()
+    }
     phrases = _split_filter_phrases(filter_text) if filter_text else [
         (phrase, None) for phrase in _extract_requested_filters(question)
     ]
@@ -1272,8 +1312,197 @@ def _extract_structured_filters(question: str) -> list[dict[str, Any]]:
                 entry["values"] = [entry["value_phrase"]] if entry["value_phrase"] else []
                 entry["value"] = entry["value_phrase"]
             break
+        interval_entry = interval_by_raw.get(str(entry.get("raw_phrase") or "").strip().lower())
+        if entry.get("operator") == "unknown" and interval_entry:
+            entry = {**dict(interval_entry), "conjunction": conjunction}
+        else:
+            _apply_interval_metadata(entry, today=today)
         structured.append(entry)
+    for interval in interval_filters:
+        signature = str(interval.get("raw_phrase") or "").strip().lower()
+        if signature and not any(str(entry.get("raw_phrase") or "").strip().lower() == signature for entry in structured):
+            structured.append(interval)
     return structured
+
+
+def _extract_interval_filters(question: str, *, today: date | None = None) -> list[dict[str, Any]]:
+    current = today or date.today()
+    results: list[dict[str, Any]] = []
+
+    def add(raw: str, operator: str, values: list[str], granularity: str, field_phrase: str = "") -> None:
+        if not raw or not values:
+            return
+        value: Any = list(values) if operator == "between" else values[0]
+        results.append(
+            {
+                "raw_phrase": _cleanup_phrase(raw),
+                "field": field_phrase,
+                "field_phrase": field_phrase,
+                "date_column_phrase": field_phrase,
+                "operator": operator,
+                "value": value,
+                "value_phrase": " and ".join(values),
+                "values": list(values),
+                "conjunction": None,
+                "filter_kind": "date_interval",
+                "interval_granularity": granularity,
+            }
+        )
+
+    fielded_added = False
+    for pattern, operator in (
+        (r"\b([a-z0-9_ ]+?\s+date)\s+between\s+(\d{4}-\d{2}-\d{2})\s+and\s+(\d{4}-\d{2}-\d{2})\b", "between"),
+        (r"\b([a-z0-9_ ]+?\s+date)\s+(?:is\s+)?before\s+(\d{4}-\d{2}-\d{2})\b", "before"),
+        (r"\b([a-z0-9_ ]+?\s+date)\s+(?:is\s+)?after\s+(\d{4}-\d{2}-\d{2})\b", "after"),
+        (r"\b([a-z0-9_ ]+?\s+date)\s+(?:is\s+on|on)\s+(\d{4}-\d{2}-\d{2})\b", "eq"),
+    ):
+        match = re.search(pattern, question, re.IGNORECASE)
+        if not match:
+            continue
+        field_phrase = _date_field_phrase(match.group(1))
+        if operator == "between":
+            values = [match.group(2), match.group(3)]
+        else:
+            values = [match.group(2)]
+        add(match.group(0), operator, values, "day", field_phrase)
+        fielded_added = True
+
+    for pattern, operator, granularity in (
+        (_BEFORE_RE, "before", "day"),
+        (_AFTER_RE, "after", "day"),
+    ):
+        if fielded_added:
+            continue
+        match = pattern.search(question)
+        if match:
+            value = _cleanup_phrase(match.group(1))
+            if _is_iso_date(value):
+                add(match.group(0), operator, [value], granularity)
+
+    match = _BETWEEN_RE.search(question)
+    if match and not fielded_added:
+        start = _cleanup_phrase(match.group(1))
+        end = _cleanup_phrase(match.group(2))
+        if _is_iso_date(start) and _is_iso_date(end):
+            add(match.group(0), "between", [start, end], "day")
+        elif _looks_like_interval_value(start) or _looks_like_interval_value(end):
+            add(match.group(0), "unknown", [start, end], "unknown")
+
+    match = _ON_DATE_RE.search(question)
+    if match and not fielded_added:
+        add(match.group(0), "eq", [match.group(1)], "day")
+
+    match = _IN_MONTH_YEAR_RE.search(question)
+    if match and match.group(1).lower() in _MONTHS:
+        start, end = _month_range(int(match.group(2)), _MONTHS[match.group(1).lower()])
+        add(match.group(0), "between", [start, end], "month")
+    elif match:
+        add(match.group(0), "unknown", [match.group(1), match.group(2)], "unknown")
+
+    match = _IN_YEAR_RE.search(question)
+    if match:
+        year = int(match.group(1))
+        add(match.group(0), "between", [f"{year}-01-01", f"{year}-12-31"], "year")
+
+    match = _IN_MONTH_RE.search(question)
+    if match and not _IN_MONTH_YEAR_RE.search(question):
+        month_name = match.group(1).lower()
+        if month_name in _MONTHS:
+            start, end = _month_range(current.year, _MONTHS[month_name])
+            add(match.group(0), "between", [start, end], "month")
+
+    normalized = _cleanup_phrase(question).lower()
+    relative_ranges = {
+        "this month": _this_month(current),
+        "last month": _last_month(current),
+        "this year": (f"{current.year}-01-01", f"{current.year}-12-31"),
+        "last year": (f"{current.year - 1}-01-01", f"{current.year - 1}-12-31"),
+        "this quarter": _quarter_range(current.year, ((current.month - 1) // 3) + 1),
+        "last quarter": _last_quarter(current),
+    }
+    for phrase, (start, end) in relative_ranges.items():
+        if phrase in normalized:
+            add(phrase, "between", [start, end], phrase.replace(" ", "_"))
+
+    match = _RELATIVE_DAYS_RE.search(question)
+    if match:
+        days = int(match.group(1))
+        if days > 0:
+            start = current - timedelta(days=days - 1)
+            add(match.group(0), "between", [start.isoformat(), current.isoformat()], "relative_days")
+
+    return results
+
+
+def _apply_interval_metadata(entry: dict[str, Any], *, today: date | None = None) -> None:
+    operator = str(entry.get("operator") or "").strip().lower()
+    values = [str(value).strip() for value in (entry.get("values") or []) if str(value).strip()]
+    if operator not in {"before", "after", "between", "eq"}:
+        return
+    if operator == "between" and len(values) == 2 and all(_is_iso_date(value) for value in values):
+        entry["filter_kind"] = "date_interval"
+        entry["interval_granularity"] = "day"
+    elif operator in {"before", "after", "eq"} and len(values) == 1 and _is_iso_date(values[0]):
+        entry["filter_kind"] = "date_interval"
+        entry["interval_granularity"] = "day"
+    else:
+        return
+    entry["date_column_phrase"] = str(entry.get("field_phrase") or entry.get("field") or "").strip()
+
+
+def _is_iso_date(value: str) -> bool:
+    try:
+        date.fromisoformat(str(value).strip())
+    except ValueError:
+        return False
+    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value).strip()))
+
+
+def _looks_like_interval_value(value: str) -> bool:
+    normalized = _cleanup_phrase(value).lower()
+    return bool(
+        normalized in _MONTHS
+        or re.fullmatch(r"20\d{2}", normalized)
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized)
+    )
+
+
+def _date_field_phrase(value: str) -> str:
+    tokens = _tokenize(value)
+    if "date" not in tokens:
+        return _cleanup_phrase(value)
+    index = len(tokens) - 1 - list(reversed(tokens)).index("date")
+    start = max(0, index - 1)
+    return " ".join(tokens[start : index + 1])
+
+
+def _month_range(year: int, month: int) -> tuple[str, str]:
+    return f"{year:04d}-{month:02d}-01", f"{year:04d}-{month:02d}-{monthrange(year, month)[1]:02d}"
+
+
+def _this_month(today: date) -> tuple[str, str]:
+    return _month_range(today.year, today.month)
+
+
+def _last_month(today: date) -> tuple[str, str]:
+    year = today.year if today.month > 1 else today.year - 1
+    month = today.month - 1 if today.month > 1 else 12
+    return _month_range(year, month)
+
+
+def _quarter_range(year: int, quarter: int) -> tuple[str, str]:
+    start_month = ((quarter - 1) * 3) + 1
+    start = f"{year:04d}-{start_month:02d}-01"
+    end_month = start_month + 2
+    end = f"{year:04d}-{end_month:02d}-{monthrange(year, end_month)[1]:02d}"
+    return start, end
+
+
+def _last_quarter(today: date) -> tuple[str, str]:
+    quarter = ((today.month - 1) // 3) + 1
+    if quarter == 1:
+        return _quarter_range(today.year - 1, 4)
+    return _quarter_range(today.year, quarter - 1)
 
 
 def _extract_structured_having(question: str) -> list[dict[str, Any]]:
@@ -1402,6 +1631,9 @@ def _source_scope_match(question: str) -> Optional[re.Match[str]]:
             continue
         prefix = question[: match.start()].strip()
         body = _strip_leading_action(prefix)
+        matched_phrase = _cleanup_phrase(match.group(0))
+        if any(_cleanup_phrase(entry.get("raw_phrase") or "").lower() == matched_phrase.lower() for entry in _extract_interval_filters(question)):
+            continue
         if _COUNT_RE.search(body) or _detect_aggregate_function(prefix) or _TOP_RE.search(prefix) or _BOTTOM_RE.search(prefix):
             return match
     return None

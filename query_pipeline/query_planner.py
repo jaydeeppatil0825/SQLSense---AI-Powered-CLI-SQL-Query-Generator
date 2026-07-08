@@ -1631,21 +1631,28 @@ def _structured_filter_entries(
         if signature in seen:
             continue
         seen.add(signature)
-        filters.append(
-            {
-                "type": "value",
-                "table": table_name,
-                "column": column_name,
-                "value": value,
-                "term": raw_phrase or term,
-                "operator": str(clause.get("operator") or "unknown"),
-                "field_phrase": str(clause.get("field") or clause.get("field_phrase") or ""),
-                "value_phrase": clause.get("value", clause.get("value_phrase", "")),
-                "conjunction": clause.get("conjunction"),
-                "raw_phrase": raw_phrase,
-                "evidence_score": float(entry.get("score") or 0.0),
-            }
-        )
+        selected = {
+            "type": "value",
+            "table": table_name,
+            "column": column_name,
+            "value": value,
+            "term": raw_phrase or term,
+            "operator": str(clause.get("operator") or "unknown"),
+            "field_phrase": str(clause.get("field") or clause.get("field_phrase") or ""),
+            "value_phrase": clause.get("value", clause.get("value_phrase", "")),
+            "conjunction": clause.get("conjunction"),
+            "raw_phrase": raw_phrase,
+            "evidence_score": float(entry.get("score") or 0.0),
+        }
+        if clause.get("filter_kind") == "date_interval":
+            selected.update(
+                {
+                    "filter_kind": "date_interval",
+                    "interval_granularity": clause.get("interval_granularity"),
+                    "date_column_phrase": clause.get("date_column_phrase"),
+                }
+            )
+        filters.append(selected)
     return filters[:4]
 
 
@@ -1686,6 +1693,123 @@ def _filter_field_match_score(entry: dict[str, Any], clause: dict[str, Any]) -> 
             lexical_score = max(lexical_score, overlap * 0.6)
     evidence_score = min(float(entry.get("score") or 0.0), 1.0)
     return round((lexical_score * 0.9) + (evidence_score * 0.1), 4) if lexical_score else 0.0
+
+
+def _is_date_schema_column(column: dict[str, Any]) -> bool:
+    column_type = str(column.get("type") or column.get("data_type") or "").strip().lower()
+    return bool(
+        column.get("is_date")
+        or resolved_semantic_type(column) == "date"
+        or any(marker in column_type for marker in ("date", "time", "timestamp"))
+    )
+
+
+def _date_filter_candidates(
+    knowledge_base: dict[str, Any],
+    allowed_tables: set[str],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for table_name in sorted(allowed_tables):
+        for column in knowledge_base.get(table_name, {}).get("columns", []) or []:
+            column_name = str(column.get("name") or "").strip()
+            if not column_name or not _is_date_schema_column(column):
+                continue
+            candidates.append(
+                {
+                    "table": table_name,
+                    "column": column_name,
+                    "semantic_type": "date",
+                    "is_date": True,
+                    "is_dimension": True,
+                    "score": 1.0,
+                    "matched_terms": [
+                        column_name.replace("_", " "),
+                        f"{table_name} {column_name}".replace("_", " "),
+                    ],
+                    "source": "schema_date_evidence",
+                }
+            )
+    return candidates
+
+
+def _resolve_interval_clause(
+    clause: dict[str, Any],
+    *,
+    knowledge_base: dict[str, Any],
+    allowed_tables: set[str],
+) -> tuple[dict[str, Any] | None, str]:
+    if clause.get("filter_kind") != "date_interval":
+        return None, "not_interval"
+    candidates = _date_filter_candidates(knowledge_base, allowed_tables)
+    field_phrase = str(
+        clause.get("date_column_phrase") or clause.get("field_phrase") or clause.get("field") or ""
+    ).strip()
+    if field_phrase:
+        ranked = sorted(
+            (
+                (_filter_field_match_score(candidate, {**clause, "field_phrase": field_phrase}), candidate)
+                for candidate in candidates
+            ),
+            key=lambda item: (-item[0], item[1]["table"], item[1]["column"]),
+        )
+        ranked = [item for item in ranked if item[0] > 0]
+        if not ranked:
+            return None, "missing"
+        if len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) < 0.08:
+            return None, "ambiguous"
+        candidate = dict(ranked[0][1])
+    else:
+        if len(candidates) != 1:
+            return None, "ambiguous" if candidates else "missing"
+        candidate = dict(candidates[0])
+
+    candidate.update(
+        {
+            "type": "value",
+            "value": clause.get("value"),
+            "term": str(clause.get("raw_phrase") or ""),
+            "operator": str(clause.get("operator") or ""),
+            "field_phrase": field_phrase,
+            "value_phrase": clause.get("value_phrase"),
+            "values": list(clause.get("values") or []),
+            "conjunction": clause.get("conjunction"),
+            "raw_phrase": str(clause.get("raw_phrase") or ""),
+            "filter_kind": "date_interval",
+            "interval_granularity": clause.get("interval_granularity"),
+            "date_column_phrase": field_phrase,
+            "evidence_score": float(candidate.get("score") or 1.0),
+        }
+    )
+    return candidate, "resolved"
+
+
+def _resolve_interval_filters_for_scope(
+    selected_filters: list[dict[str, Any]],
+    structured_filters: list[dict[str, Any]],
+    *,
+    knowledge_base: dict[str, Any],
+    allowed_tables: set[str],
+) -> tuple[list[dict[str, Any]], str]:
+    interval_clauses = [
+        dict(entry) for entry in structured_filters
+        if isinstance(entry, dict) and entry.get("filter_kind") == "date_interval"
+    ]
+    if not interval_clauses:
+        return selected_filters, ""
+    resolved = [
+        dict(entry) for entry in selected_filters
+        if entry.get("filter_kind") != "date_interval"
+    ]
+    for clause in interval_clauses:
+        selected, status = _resolve_interval_clause(
+            clause,
+            knowledge_base=knowledge_base,
+            allowed_tables=allowed_tables,
+        )
+        if status != "resolved" or selected is None:
+            return resolved, f"date interval column evidence is {status}"
+        resolved.append(selected)
+    return resolved, ""
 
 
 def _has_structured_filter_ambiguity(
@@ -2037,6 +2161,12 @@ def _build_query_context_from_retrieved_context(
         filter_candidates,
         requested_filters,
         list((intent or {}).get("structured_filters") or []),
+    )
+    filters, _interval_filter_reason = _resolve_interval_filters_for_scope(
+        filters,
+        list((intent or {}).get("structured_filters") or []),
+        knowledge_base=knowledge_base,
+        allowed_tables={name for name in selected_table_names if name},
     )
     confidence = float(retrieved_context.get("confidence") or 0.0)
     if not selected_table_names:
@@ -2838,6 +2968,7 @@ def _joined_aggregate_filter_contract(
     intent: dict[str, Any],
     filter_candidates: list[dict[str, Any]],
     allowed_tables: set[str],
+    knowledge_base: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], str]:
     structured_filters = [
         dict(entry)
@@ -2849,6 +2980,16 @@ def _joined_aggregate_filter_contract(
 
     selected: list[dict[str, Any]] = []
     for clause in structured_filters:
+        if clause.get("filter_kind") == "date_interval":
+            selected_filter, status = _resolve_interval_clause(
+                clause,
+                knowledge_base=knowledge_base,
+                allowed_tables=allowed_tables,
+            )
+            if status != "resolved" or selected_filter is None:
+                return [], f"joined date interval evidence is {status}"
+            selected.append(selected_filter)
+            continue
         field_phrase = str(clause.get("field_phrase") or clause.get("field") or "").strip()
         resolved, status = _resolve_role_candidate(
             field_phrase,
@@ -3446,6 +3587,7 @@ def _apply_joined_aggregate_contract(
         intent,
         filter_candidates,
         allowed_tables,
+        knowledge_base,
     )
     if filter_reason:
         return _joined_aggregate_failure_context(
@@ -3976,6 +4118,23 @@ def _apply_join_lookup_contract(
             blocked_node="table_scope",
             reason="Relationship Graph direction does not resolve a unique base orientation",
             resolved_nodes={"unsafe_check", "requested_fields", "join_need"},
+        )
+
+    selected_filters, interval_reason = _resolve_interval_filters_for_scope(
+        selected_filters,
+        [dict(entry) for entry in structured_filters if isinstance(entry, dict)],
+        knowledge_base=knowledge_base,
+        allowed_tables=candidate_tables,
+    )
+    filter_tables = {
+        str(entry.get("table") or "") for entry in selected_filters if str(entry.get("table") or "")
+    }
+    if interval_reason:
+        return _join_failure_context(
+            context,
+            blocked_node="where",
+            reason=interval_reason,
+            resolved_nodes=resolved_nodes,
         )
 
     if structured_filters:

@@ -8,12 +8,14 @@ All functions in this module are stateless and generic.
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any
 
 from kb_pipeline.relationship_graph import (
     build_relationship_graph,
     find_safe_direct_join_relationships,
 )
+from kb_pipeline.schema_facts import resolved_semantic_type
 
 # Forbidden DML/DDL keywords that must never appear in a safe SELECT query.
 _FORBIDDEN_KEYWORDS = [
@@ -999,6 +1001,99 @@ def _validate_order_by_expression(sql: str) -> tuple[bool, str]:
     return True, "ORDER BY aggregate matches the SELECT output."
 
 
+def _schema_column_is_date(column: dict[str, Any]) -> bool:
+    column_type = str(column.get("type") or column.get("data_type") or "").strip().lower()
+    return bool(
+        column.get("is_date")
+        or resolved_semantic_type(column) == "date"
+        or any(marker in column_type for marker in ("date", "time", "timestamp"))
+    )
+
+
+def _lookup_schema_column(
+    qualifier: str,
+    column_name: str,
+    knowledge_base: dict[str, Any],
+    referenced_tables: list[str],
+    alias_to_table: dict[str, str],
+) -> tuple[dict[str, Any] | None, str]:
+    table_names = []
+    if qualifier:
+        table_names = [alias_to_table.get(qualifier, qualifier)]
+    else:
+        table_names = list(referenced_tables)
+    matches: list[dict[str, Any]] = []
+    for table_name in table_names:
+        for column in knowledge_base.get(table_name, {}).get("columns", []) or []:
+            if str(column.get("name") or "") == column_name:
+                matches.append(column)
+    if len(matches) == 1:
+        return matches[0], ""
+    return None, "unknown_or_ambiguous_interval_column"
+
+
+def _validate_date_interval_predicates(
+    sql: str,
+    knowledge_base: dict[str, Any],
+    referenced_tables: list[str],
+    alias_to_table: dict[str, str],
+) -> tuple[bool, str]:
+    where_match = re.search(
+        r"\bWHERE\s+(.*?)(?=\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|;|$)",
+        sql,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not where_match:
+        return True, "No WHERE date predicates to validate."
+    where_sql = where_match.group(1)
+    between_pattern = re.compile(
+        r"\b(?:(?P<bq>[A-Za-z_][A-Za-z0-9_]*)\.)?(?P<bc>[A-Za-z_][A-Za-z0-9_]*)\s+BETWEEN\s+'(?P<start>[^']+)'\s+AND\s+'(?P<end>[^']+)'",
+        re.IGNORECASE,
+    )
+    comparison_pattern = re.compile(
+        r"\b(?:(?P<cq>[A-Za-z_][A-Za-z0-9_]*)\.)?(?P<cc>[A-Za-z_][A-Za-z0-9_]*)\s*(?:<=|>=|=|<|>)\s*'(?P<value>\d{4}-\d{2}-\d{2})'",
+        re.IGNORECASE,
+    )
+    for match in between_pattern.finditer(where_sql):
+        column, reason = _lookup_schema_column(
+            match.group("bq") or "",
+            match.group("bc"),
+            knowledge_base,
+            referenced_tables,
+            alias_to_table,
+        )
+        if column is None:
+            return False, reason
+        if not _schema_column_is_date(column):
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", match.group("start")) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", match.group("end")):
+                return False, "Date interval predicate references a non-date column."
+            continue
+        try:
+            start = date.fromisoformat(match.group("start"))
+            end = date.fromisoformat(match.group("end"))
+        except ValueError:
+            return False, "Date interval contains an invalid date literal."
+        if start > end:
+            return False, "Date interval start must not be after end."
+    for match in comparison_pattern.finditer(where_sql):
+        column, reason = _lookup_schema_column(
+            match.group("cq") or "",
+            match.group("cc"),
+            knowledge_base,
+            referenced_tables,
+            alias_to_table,
+        )
+        if column is None:
+            return False, reason
+        if not _schema_column_is_date(column):
+            return False, "Date interval predicate references a non-date column."
+        try:
+            date.fromisoformat(match.group("value"))
+        except ValueError:
+            return False, "Date interval contains an invalid date literal."
+    return True, "Date interval predicates are valid."
+
+
 def _has_dangling_comma(sql: str) -> bool:
     return bool(re.search(r",\s*(FROM|WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|JOIN|;|$)", sql, re.IGNORECASE))
 
@@ -1318,6 +1413,15 @@ def validate_sql_structure(
         unqualified_ok, unqualified_reason = _validate_unqualified_columns(stripped, knowledge_base, referenced_tables, alias_to_table)
         if not unqualified_ok:
             return False, unqualified_reason
+
+        interval_ok, interval_reason = _validate_date_interval_predicates(
+            stripped,
+            knowledge_base,
+            referenced_tables,
+            alias_to_table,
+        )
+        if not interval_ok:
+            return False, interval_reason
 
     group_ok, group_reason = _validate_group_by_for_aggregates(stripped)
     if not group_ok:
