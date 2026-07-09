@@ -1737,6 +1737,9 @@ def _resolve_interval_clause(
     *,
     knowledge_base: dict[str, Any],
     allowed_tables: set[str],
+    preferred_table: str | None = None,
+    preferred_owner_phrases: list[str] | None = None,
+    allow_preferred_owner_date: bool = False,
 ) -> tuple[dict[str, Any] | None, str]:
     if clause.get("filter_kind") != "date_interval":
         return None, "not_interval"
@@ -1759,9 +1762,20 @@ def _resolve_interval_clause(
             return None, "ambiguous"
         candidate = dict(ranked[0][1])
     else:
-        if len(candidates) != 1:
+        if len(candidates) != 1 and allow_preferred_owner_date:
+            preferred = _resolve_preferred_owner_date_candidate(
+                candidates,
+                preferred_table=preferred_table,
+                preferred_owner_phrases=preferred_owner_phrases or [],
+            )
+            if preferred is not None:
+                candidate = dict(preferred)
+            else:
+                return None, "ambiguous" if candidates else "missing"
+        elif len(candidates) != 1:
             return None, "ambiguous" if candidates else "missing"
-        candidate = dict(candidates[0])
+        else:
+            candidate = dict(candidates[0])
 
     candidate.update(
         {
@@ -1783,12 +1797,56 @@ def _resolve_interval_clause(
     return candidate, "resolved"
 
 
+def _resolve_preferred_owner_date_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    preferred_table: str | None,
+    preferred_owner_phrases: list[str],
+) -> dict[str, Any] | None:
+    if not preferred_table:
+        return None
+    owner_tokens: set[str] = set()
+    for phrase in preferred_owner_phrases:
+        owner_tokens.update(
+            _singularize_token(token)
+            for token in _tokenize(phrase)
+            if token not in {"total", "sum", "average", "avg", "count", "amount", "value", "cost", "price"}
+        )
+    owner_tokens.update(
+        _singularize_token(token)
+        for token in _tokenize(preferred_table)
+        if token not in {"table", "data"}
+    )
+    if not owner_tokens:
+        return None
+    ranked: list[tuple[int, str, dict[str, Any]]] = []
+    for candidate in candidates:
+        if str(candidate.get("table") or "") != preferred_table:
+            continue
+        column_tokens = {
+            _singularize_token(token)
+            for token in _tokenize(str(candidate.get("column") or ""))
+        }
+        overlap = len(owner_tokens & column_tokens)
+        if overlap:
+            ranked.append((overlap, str(candidate.get("column") or ""), candidate))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    if not ranked:
+        return None
+    if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+        return None
+    return dict(ranked[0][2])
+
+
 def _resolve_interval_filters_for_scope(
     selected_filters: list[dict[str, Any]],
     structured_filters: list[dict[str, Any]],
     *,
     knowledge_base: dict[str, Any],
     allowed_tables: set[str],
+    preferred_table: str | None = None,
+    preferred_owner_phrases: list[str] | None = None,
+    allow_preferred_owner_date: bool = False,
 ) -> tuple[list[dict[str, Any]], str]:
     interval_clauses = [
         dict(entry) for entry in structured_filters
@@ -1805,6 +1863,9 @@ def _resolve_interval_filters_for_scope(
             clause,
             knowledge_base=knowledge_base,
             allowed_tables=allowed_tables,
+            preferred_table=preferred_table,
+            preferred_owner_phrases=preferred_owner_phrases or [],
+            allow_preferred_owner_date=allow_preferred_owner_date,
         )
         if status != "resolved" or selected is None:
             return resolved, f"date interval column evidence is {status}"
@@ -2062,6 +2123,7 @@ def _build_query_context_from_retrieved_context(
     retrieved_context: dict[str, Any],
     knowledge_base: dict[str, Any],
 ) -> dict:
+    full_knowledge_base = dict(knowledge_base or {})
     planner_intent = _planner_intent_from_structured_intent(intent)
     dimension = _structured_dimension(intent)
     sorting = _structured_sorting(intent, planner_intent)
@@ -2216,6 +2278,17 @@ def _build_query_context_from_retrieved_context(
         retrieved_context.get("formula_evidence") or [],
     )
 
+    interval_raw_phrases = {
+        _normalize(str(entry.get("raw_phrase") or ""))
+        for entry in ((intent or {}).get("structured_filters") or [])
+        if isinstance(entry, dict)
+        and entry.get("filter_kind") == "date_interval"
+        and str(entry.get("raw_phrase") or "").strip()
+    }
+    requested_filters_for_missing = [
+        value for value in requested_filters
+        if _normalize(str(value or "")) not in interval_raw_phrases
+    ]
     missing_evidence_flags = _detect_missing_evidence(
         plan,
         selected_tables,
@@ -2223,13 +2296,15 @@ def _build_query_context_from_retrieved_context(
         join_paths,
         required_metric_phrases,
         requested_dimensions,
-        requested_filters,
+        requested_filters_for_missing,
         effective_measure_candidates,
         dimension_candidates,
         filters,
         retrieved_context.get("formula_evidence") or [],
         legacy_query_shape,
     )
+    if _interval_filter_reason:
+        missing_evidence_flags["missing_filter_column"] = True
     if ranking_mode_hint == "row":
         missing_evidence_flags["missing_metric"] = False
         missing_evidence_flags["missing_formula_evidence"] = False
@@ -2288,6 +2363,7 @@ def _build_query_context_from_retrieved_context(
         selected_table_names=selected_table_names,
         selected_knowledge_base=reduced_kb,
         knowledge_base={},
+        full_knowledge_base=knowledge_base,
         warnings=warnings,
         confidence=confidence,
         vector_results={},
@@ -2969,6 +3045,9 @@ def _joined_aggregate_filter_contract(
     filter_candidates: list[dict[str, Any]],
     allowed_tables: set[str],
     knowledge_base: dict[str, Any],
+    base_table: str | None = None,
+    preferred_date_phrases: list[str] | None = None,
+    allow_preferred_owner_date: bool = False,
 ) -> tuple[list[dict[str, Any]], str]:
     structured_filters = [
         dict(entry)
@@ -2985,6 +3064,9 @@ def _joined_aggregate_filter_contract(
                 clause,
                 knowledge_base=knowledge_base,
                 allowed_tables=allowed_tables,
+                preferred_table=base_table,
+                preferred_owner_phrases=preferred_date_phrases or [],
+                allow_preferred_owner_date=allow_preferred_owner_date,
             )
             if status != "resolved" or selected_filter is None:
                 return [], f"joined date interval evidence is {status}"
@@ -3588,6 +3670,14 @@ def _apply_joined_aggregate_contract(
         filter_candidates,
         allowed_tables,
         knowledge_base,
+        base_table=base_table,
+        preferred_date_phrases=[
+            metric_phrase,
+            source_phrase,
+            str(intent.get("target_entity_phrase") or ""),
+            base_table,
+        ],
+        allow_preferred_owner_date=bool(ranking_candidate),
     )
     if filter_reason:
         return _joined_aggregate_failure_context(
@@ -5378,6 +5468,7 @@ def _normalize_planner_output(
     selected_table_names: list[str],
     selected_knowledge_base: dict[str, Any],
     knowledge_base: dict[str, Any],
+    full_knowledge_base: dict[str, Any] | None = None,
     warnings: list[str],
     confidence: float,
     vector_results: dict[str, Any] | None,
@@ -5394,6 +5485,7 @@ def _normalize_planner_output(
     legacy_route_recommendation: str,
     debug_trace_details: dict[str, Any],
 ) -> dict[str, Any]:
+    full_knowledge_base = dict(full_knowledge_base or knowledge_base or {})
     structured_intent = intent if isinstance(intent, dict) else {}
     intent_type = str(structured_intent.get("intent_type") or "").strip().lower()
     ranking_mode_hint = str(
@@ -5531,16 +5623,25 @@ def _normalize_planner_output(
     else:
         primary_table = str(explicit_base or metric_table or sole_selected_table or "")
     implicit_filter_phrase = str(structured_intent.get("target_entity_phrase") or "").strip()
+    structured_filter_entries = [
+        entry for entry in (structured_intent.get("structured_filters") or [])
+        if isinstance(entry, dict)
+    ]
     has_explicit_filter_request = bool(
-        structured_intent.get("structured_filters")
+        structured_filter_entries
         or structured_intent.get("requested_filters")
         or plan.get("filters")
     )
+    has_explicit_non_interval_filter_request = bool(
+        [entry for entry in structured_filter_entries if entry.get("filter_kind") != "date_interval"]
+        or structured_intent.get("requested_filters")
+        or [entry for entry in (plan.get("filters") or []) if entry.get("filter_kind") != "date_interval"]
+    )
     if (
-        query_shape == "single_table_list"
+        query_shape in {"single_table_list", "filtered_query"}
         and primary_table
         and implicit_filter_phrase
-        and not has_explicit_filter_request
+        and not has_explicit_non_interval_filter_request
         and str(structured_intent.get("intent_type") or "").strip().lower() in {"list", "filter"}
     ):
         implicit_filter, implicit_filter_status = _source_scope_as_filter(
@@ -5698,10 +5799,10 @@ def _normalize_planner_output(
         }
 
     if (
-        query_shape == "single_table_list"
+        query_shape in {"single_table_list", "filtered_query"}
         and len(selected_table_names) == 1
         and implicit_filter_phrase
-        and not has_explicit_filter_request
+        and not has_explicit_non_interval_filter_request
         and str(structured_intent.get("intent_type") or "").strip().lower() in {"list", "filter"}
     ):
         implicit_filter, implicit_filter_status = _source_scope_as_filter(
@@ -5734,14 +5835,18 @@ def _normalize_planner_output(
         if isinstance(intent, dict)
         else []
     )
+    non_interval_filter_clauses = [
+        clause for clause in structured_filter_clauses
+        if not (isinstance(clause, dict) and clause.get("filter_kind") == "date_interval")
+    ]
     requested_filter_count = len(
-        structured_filter_clauses or list((intent or {}).get("requested_filters") or [])
+        non_interval_filter_clauses or list((intent or {}).get("requested_filters") or [])
         if isinstance(intent, dict)
         else []
     )
     has_filter_ambiguity = (
-        _has_structured_filter_ambiguity(filter_candidates, structured_filter_clauses)
-        if structured_filter_clauses
+        _has_structured_filter_ambiguity(filter_candidates, non_interval_filter_clauses)
+        if non_interval_filter_clauses
         else requested_filter_count == 1 and _has_close_role_ambiguity(filter_candidates)
     )
     if requested_filter_count and has_filter_ambiguity:
@@ -5793,6 +5898,71 @@ def _normalize_planner_output(
     selected_filters = [] if "filter_selection" in blocking_ambiguities else [
         dict(entry) for entry in (plan.get("filters") or [])
     ]
+    final_interval_primary_table = primary_table if primary_table in knowledge_base else (
+        selected_table_names[0] if len(selected_table_names) == 1 else ""
+    )
+    final_interval_tables = {final_interval_primary_table} if final_single_table_scope and final_interval_primary_table else {
+        str(name) for name in selected_table_names if str(name)
+    }
+    has_date_interval_clause = any(
+        isinstance(entry, dict) and entry.get("filter_kind") == "date_interval"
+        for entry in structured_filter_clauses
+    )
+    if has_date_interval_clause and final_interval_tables:
+        allow_relative_owner_date = bool(
+            len(final_interval_tables) == 1
+            and any(entry.get("source") == "source_scope_value_filter" for entry in selected_filters)
+            and any(
+                isinstance(entry, dict)
+                and entry.get("filter_kind") == "date_interval"
+                and entry.get("interval_granularity") == "relative_days"
+                and not str(entry.get("date_column_phrase") or "").strip()
+                for entry in structured_filter_clauses
+            )
+        )
+        selected_filters, final_interval_reason = _resolve_interval_filters_for_scope(
+            selected_filters,
+            structured_filter_clauses,
+            knowledge_base=full_knowledge_base,
+            allowed_tables=final_interval_tables,
+            preferred_table=final_interval_primary_table or next(iter(final_interval_tables), None),
+            preferred_owner_phrases=[implicit_filter_phrase, primary_table, final_interval_primary_table],
+            allow_preferred_owner_date=allow_relative_owner_date,
+        )
+        plan["filters"] = [dict(entry) for entry in selected_filters]
+        if final_interval_reason:
+            missing_evidence_flags["missing_filter_column"] = True
+        else:
+            missing_evidence_flags["missing_filter_column"] = False
+            blocking_ambiguities.discard("filter_selection")
+    if selected_filters:
+        structured_signatures = {
+            (
+                str(entry.get("raw_phrase") or "").strip().lower(),
+                str(entry.get("column") or entry.get("field") or entry.get("field_phrase") or "").strip().lower(),
+            )
+            for entry in structured_filter_clauses
+            if isinstance(entry, dict)
+        }
+        implicit_structured_filters = [
+            dict(entry)
+            for entry in selected_filters
+            if (
+                str(entry.get("raw_phrase") or "").strip().lower(),
+                str(entry.get("column") or entry.get("field") or entry.get("field_phrase") or "").strip().lower(),
+            )
+            not in structured_signatures
+            and entry.get("filter_kind") != "date_interval"
+            and entry.get("source") == "source_scope_value_filter"
+        ]
+        if implicit_structured_filters:
+            structured_intent = dict(structured_intent)
+            structured_filter_clauses = [
+                *[dict(entry) for entry in structured_filter_clauses if isinstance(entry, dict)],
+                *implicit_structured_filters,
+            ]
+            structured_intent["structured_filters"] = structured_filter_clauses
+            intent = structured_intent
     raw_aggregate_function = structured_intent.get("aggregate_function")
     aggregate_function = str(raw_aggregate_function or "").strip().lower()
     if not aggregate_function and ranking_mode != "row" and metric_fallback_allowed:

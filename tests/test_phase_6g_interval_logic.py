@@ -6,7 +6,7 @@ from sql_pipeline.deterministic_sql_generator import generate_deterministic_sql
 from sql_pipeline.sql_validator import validate_sql_structure
 
 
-FIXED_TODAY = date(2026, 7, 8)
+FIXED_TODAY = date(2026, 7, 9)
 
 
 def _orders_kb(*, extra_date=False):
@@ -126,10 +126,48 @@ def test_joined_aggregate_month_interval_uses_base_table_date_where():
     assert validate_sql_structure(result.sql, kb, selected_join_path=context["selected_join_path"])[0] is True
 
 
+def test_explicit_date_phrase_does_not_crash_or_pollute_filters():
+    intent = build_intent("show orders where order date after 2026-01-15", today=FIXED_TODAY)
+
+    assert intent["target_entity_phrase"] == "orders"
+    assert intent["requested_filters"] == []
+    assert intent["structured_intervals"][0]["date_column_phrase"] == "order date"
+
+
+def test_fielded_month_interval_resolves_on_multi_date_scope():
+    kb = _orders_kb(extra_date=True)
+    context = _context("show orders where order date in January 2026", kb)
+
+    assert context["selected_filters"][0]["column"] == "order_date"
+    assert context["selected_filters"][0]["values"] == ["2026-01-01", "2026-01-31"]
+
+
+def test_interval_text_is_removed_from_grouping_and_ranking_roles():
+    grouped = build_intent("show total payment amount by payment status in February 2026", today=FIXED_TODAY)
+    ranking = build_intent("top 3 customers by total order amount in 2026", today=FIXED_TODAY)
+
+    assert grouped["requested_dimensions"] == ["payment status"]
+    assert grouped["metric_phrase"] == "payment amount"
+    assert ranking["metric_phrase"] == "total order amount"
+    assert ranking["requested_sort"]["terms"] == "total order amount"
+
+
+def test_joined_interval_does_not_pollute_dimension_or_source_scope():
+    intent = build_intent(
+        "show total order amount by customer city for order date in January 2026",
+        today=FIXED_TODAY,
+    )
+
+    assert intent["requested_dimensions"] == ["customer city"]
+    assert intent["source_scope"] == []
+    assert intent["structured_intervals"][0]["date_column_phrase"] == "order date"
+
+
 def test_relative_last_30_days_uses_fixed_clock():
     intent = build_intent("show delivered orders from last 30 days", today=FIXED_TODAY)
 
-    assert intent["structured_intervals"][0]["values"] == ["2026-06-09", "2026-07-08"]
+    assert intent["target_entity_phrase"] == "delivered orders"
+    assert intent["structured_intervals"][0]["values"] == ["2026-06-10", "2026-07-09"]
 
 
 def test_on_date_and_this_year_are_normalized():

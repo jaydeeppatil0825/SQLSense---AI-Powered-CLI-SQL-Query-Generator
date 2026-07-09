@@ -61,10 +61,20 @@ def retrieve_context(
         if isinstance(entry, dict)
     ]
     requested_filter_terms = [
-        str(entry.get("field_phrase") or entry.get("field") or "").strip()
+        str(
+            entry.get("date_column_phrase")
+            if entry.get("filter_kind") == "date_interval"
+            else entry.get("field_phrase") or entry.get("field") or ""
+        ).strip()
         for entry in structured_filters
-        if str(entry.get("field_phrase") or entry.get("field") or "").strip()
-    ] or list(intent.get("requested_filters") or [])
+        if str(
+            entry.get("date_column_phrase")
+            if entry.get("filter_kind") == "date_interval"
+            else entry.get("field_phrase") or entry.get("field") or ""
+        ).strip()
+    ]
+    if not structured_filters:
+        requested_filter_terms = list(intent.get("requested_filters") or [])
     join_lookup_request = dict(intent.get("join_lookup_request") or {})
     requested_output_terms = [
         str(value).strip()
