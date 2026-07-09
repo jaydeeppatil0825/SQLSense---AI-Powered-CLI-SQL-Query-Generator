@@ -9,8 +9,14 @@ This service handles CLI chart generation from query results.
 from typing import Optional, Dict, Any
 from datetime import datetime
 
-from charts.chart_generator import detect_chart_type, generate_chart
 from utils.logger import get_logger
+
+try:
+    from charts.chart_generator import detect_chart_type as _detect_chart_type
+    from charts.chart_generator import generate_chart as _generate_chart
+except ImportError:  # pragma: no cover - optional chart package is not always present.
+    _detect_chart_type = None
+    _generate_chart = None
 
 logger = get_logger()
 
@@ -39,12 +45,15 @@ class ChartService:
         Returns:
             (success, message, chart_path, chart_type)
         """
+        if _detect_chart_type is None or _generate_chart is None:
+            return False, "Chart generation is not available in this installation", None, None
+
         if not rows:
             return False, "No data to chart", None, None
         
         # Detect chart type if not provided
         if not chart_type or chart_type == "auto":
-            chart_type = detect_chart_type(rows)
+            chart_type = _detect_chart_type(rows)
             if not chart_type:
                 return False, "Chart not suitable for this result", None, None
         
@@ -54,7 +63,7 @@ class ChartService:
             output_path = f"output/charts/chart_{timestamp}.png"
         
         try:
-            chart_path = generate_chart(rows, chart_type, output_path)
+            chart_path = _generate_chart(rows, chart_type, output_path)
             logger.info(f"Chart saved successfully: {chart_path}")
             
             # Store chart info
@@ -79,9 +88,9 @@ class ChartService:
         Returns:
             Chart type or None
         """
-        if not rows:
+        if not rows or _detect_chart_type is None:
             return None
-        return detect_chart_type(rows)
+        return _detect_chart_type(rows)
     
     def get_last_chart_path(self) -> Optional[str]:
         """Get last generated chart path."""

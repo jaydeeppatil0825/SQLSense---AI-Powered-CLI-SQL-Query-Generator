@@ -30,7 +30,7 @@ class EmbeddingService:
     def __init__(self):
         self._model = None
         self._use_fallback = True
-        self._backend = (os.getenv("EMBEDDING_BACKEND") or "local").strip().lower() or "local"
+        self._backend = (os.getenv("EMBEDDING_BACKEND") or "fallback").strip().lower() or "fallback"
         self._configured_model_name = (
             os.getenv("EMBEDDING_MODEL") or "sentence-transformers/all-MiniLM-L6-v2"
         ).strip() or "sentence-transformers/all-MiniLM-L6-v2"
@@ -71,6 +71,10 @@ class EmbeddingService:
     
     def _init_model(self):
         """Initialize the embedding model if available."""
+        if self._backend in {"fallback", "deterministic", "hash"}:
+            self._activate_fallback("Deterministic fallback embedding backend selected")
+            return
+
         if self._backend != "local":
             self._activate_fallback(f"Unsupported embedding backend '{self._backend}'")
             return

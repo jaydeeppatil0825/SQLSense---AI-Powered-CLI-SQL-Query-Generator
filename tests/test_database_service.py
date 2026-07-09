@@ -307,7 +307,7 @@ def test_build_knowledge_base_keeps_generated_glossary_active_and_builds_vector_
     assert "orders" in retriever.get_relevant_tables("show order sales", top_k=5)
     embedding_status = service.get_embedding_status()
     vector_status = service.get_vector_status()
-    assert embedding_status["configured_backend"] == "local"
+    assert embedding_status["configured_backend"] == "fallback"
     assert "backend" in embedding_status
     assert vector_status["index_status"] == "ready"
     assert vector_status["retriever"]["index_built"] is True
