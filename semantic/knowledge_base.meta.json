@@ -1,10 +1,10 @@
 {
-    "db_engine": "sqlite",
-    "db_host": "",
-    "db_port": "",
-    "db_name": ":memory:",
-    "database_type": "sqlite",
-    "database_name": ":memory:",
-    "schema_hash": "10a3b1de425f9167030fc9531cc90972446130bb1542e4c93102aa19d270632a",
-    "schema_fingerprint": "10a3b1de425f9167030fc9531cc90972446130bb1542e4c93102aa19d270632a"
+    "db_engine": "mysql",
+    "db_host": "localhost",
+    "db_port": "3306",
+    "db_name": "sqlsense_phase6g_interval_lab",
+    "database_type": "mysql",
+    "database_name": "sqlsense_phase6g_interval_lab",
+    "schema_hash": "db33307ebab3cd10cb0030735cafba181933d3c948ef01a125c0eb44a4418794",
+    "schema_fingerprint": "db33307ebab3cd10cb0030735cafba181933d3c948ef01a125c0eb44a4418794"
 }
