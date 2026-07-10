@@ -2,6 +2,7 @@ from datetime import date
 
 from query_pipeline.intent_builder import build_intent
 from query_pipeline.query_planner import build_query_context
+from kb_pipeline.schema_facts import column_planner_roles
 from sql_pipeline.deterministic_sql_generator import generate_deterministic_sql
 from sql_pipeline.sql_validator import validate_sql_structure
 
@@ -170,6 +171,22 @@ def test_relative_last_30_days_uses_fixed_clock():
     assert intent["structured_intervals"][0]["values"] == ["2026-06-10", "2026-07-09"]
 
 
+def test_relative_interval_combines_with_sample_backed_source_filter():
+    kb = _orders_kb(extra_date=True)
+    context = _context("show delivered service orders from last 30 days", kb)
+
+    assert context["query_shape"] == "filtered_query"
+    assert [(entry["column"], entry.get("filter_kind")) for entry in context["selected_filters"]] == [
+        ("order_status", None),
+        ("order_date", "date_interval"),
+    ]
+    result = generate_deterministic_sql(query_context=context, knowledge_base=kb)
+
+    assert result.status == "generated"
+    assert "order_status = 'Delivered'" in result.sql
+    assert "order_date BETWEEN '2026-06-10' AND '2026-07-09'" in result.sql
+
+
 def test_on_date_and_this_year_are_normalized():
     on_intent = build_intent("show orders on 2026-01-15", today=FIXED_TODAY)
     year_intent = build_intent("count orders by customer segment this year", today=FIXED_TODAY)
@@ -205,3 +222,27 @@ def test_invalid_between_phrase_stays_unresolved():
     intent = build_intent("show orders between January and pending", today=FIXED_TODAY)
 
     assert intent["structured_intervals"][0]["operator"] == "unknown"
+
+
+def test_text_columns_with_stale_measure_role_are_not_numeric_metrics():
+    status_roles = column_planner_roles(
+        {
+            "name": "customer_status",
+            "type": "VARCHAR(30)",
+            "semantic_type": "category_candidate",
+            "planner_roles": {"measure_candidate": True, "dimension_candidate": False},
+        }
+    )
+    amount_roles = column_planner_roles(
+        {
+            "name": "order_amount",
+            "type": "DECIMAL(12,2)",
+            "semantic_type": "numeric_candidate",
+            "planner_roles": {"measure_candidate": True},
+        }
+    )
+
+    assert status_roles["measure_candidate"] is False
+    assert status_roles["dimension_candidate"] is True
+    assert status_roles["filter_candidate"] is True
+    assert amount_roles["measure_candidate"] is True

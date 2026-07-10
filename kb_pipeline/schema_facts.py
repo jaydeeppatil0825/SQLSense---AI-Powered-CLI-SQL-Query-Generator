@@ -222,6 +222,35 @@ def column_structural_facts(
     }
 
 
+def _column_type_contains(column: dict[str, Any], *tokens: str) -> bool:
+    column_type = str((column or {}).get("type") or (column or {}).get("data_type") or "").lower()
+    return any(token in column_type for token in tokens)
+
+
+def _column_is_numeric_eligible(column: dict[str, Any], semantic_type: str, core_semantic_type: str) -> bool:
+    if semantic_type in _MEASURE_SEMANTIC_TYPES or core_semantic_type == "numeric_candidate":
+        return True
+    return _column_type_contains(
+        column,
+        "decimal",
+        "numeric",
+        "float",
+        "double",
+        "real",
+        "int",
+        "integer",
+        "bigint",
+        "smallint",
+        "tinyint",
+    )
+
+
+def _column_is_descriptive_eligible(column: dict[str, Any], semantic_type: str, core_semantic_type: str) -> bool:
+    if semantic_type in _DIMENSION_SEMANTIC_TYPES or core_semantic_type in {"text_candidate", "category_candidate", "date", "boolean"}:
+        return True
+    return _column_type_contains(column, "char", "text", "string", "enum", "set")
+
+
 def column_planner_roles(column: dict[str, Any]) -> dict[str, bool]:
     raw = (column or {}).get("planner_roles")
     if not isinstance(raw, dict):
@@ -229,25 +258,29 @@ def column_planner_roles(column: dict[str, Any]) -> dict[str, bool]:
     core_semantic_type = column_core_semantic_type(column)
     semantic_type = resolved_semantic_type(column)
     structural = column_structural_facts(column)
+    numeric_eligible = _column_is_numeric_eligible(column, semantic_type, core_semantic_type)
+    descriptive_eligible = _column_is_descriptive_eligible(column, semantic_type, core_semantic_type)
     measure_candidate = bool(
-        raw.get(
-            "measure_candidate",
-            bool((column or {}).get("is_measure"))
+        (
+            raw.get("measure_candidate", bool((column or {}).get("is_measure")))
             or semantic_type in _MEASURE_SEMANTIC_TYPES
-            or core_semantic_type == "numeric_candidate",
+            or core_semantic_type == "numeric_candidate"
         )
+        and numeric_eligible
     )
     dimension_candidate = bool(
         raw.get(
             "dimension_candidate",
-            bool((column or {}).get("is_dimension")) or semantic_type in _DIMENSION_SEMANTIC_TYPES or core_semantic_type in {"text_candidate", "category_candidate", "date", "boolean"},
+            bool((column or {}).get("is_dimension")) or descriptive_eligible,
         )
+        or (descriptive_eligible and not measure_candidate)
     )
     filter_candidate = bool(
         raw.get(
             "filter_candidate",
-            dimension_candidate or core_semantic_type in {"date", "boolean", "category_candidate", "text_candidate"},
+            dimension_candidate or descriptive_eligible,
         )
+        or descriptive_eligible
     )
     join_candidate = bool(raw.get("join_candidate", structural["is_primary_key"] or structural["is_foreign_key"] or structural["is_id"]))
     date_candidate = bool(raw.get("date_candidate", structural["is_date"]))

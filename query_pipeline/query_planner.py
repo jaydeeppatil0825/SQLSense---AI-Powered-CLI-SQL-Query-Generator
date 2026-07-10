@@ -3185,9 +3185,32 @@ def _apply_implicit_sample_filter_contract(
     knowledge_base: dict[str, Any],
 ) -> dict[str, Any]:
     intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
-    if str(context.get("query_shape") or "") != "single_table_list":
+    query_shape = str(context.get("query_shape") or "")
+    if query_shape not in {"single_table_list", "filtered_query"}:
         return context
-    if intent.get("structured_filters") or intent.get("requested_filters") or context.get("selected_filters"):
+    structured_filters = [
+        dict(entry)
+        for entry in (intent.get("structured_filters") or [])
+        if isinstance(entry, dict)
+    ]
+    selected_filters = [
+        dict(entry)
+        for entry in (context.get("selected_filters") or [])
+        if isinstance(entry, dict)
+    ]
+    has_only_date_intervals = bool(structured_filters or selected_filters) and all(
+        entry.get("filter_kind") == "date_interval"
+        for entry in [*structured_filters, *selected_filters]
+    )
+    if query_shape == "single_table_list":
+        if (structured_filters or selected_filters) and not has_only_date_intervals:
+            return context
+        if intent.get("requested_filters") and not has_only_date_intervals:
+            return context
+    elif not (
+        (structured_filters or selected_filters)
+        and all(entry.get("filter_kind") == "date_interval" for entry in [*structured_filters, *selected_filters])
+    ):
         return context
     if str(intent.get("intent_type") or "").strip().lower() not in {"list", "filter"}:
         return context
@@ -3211,15 +3234,36 @@ def _apply_implicit_sample_filter_contract(
 
     planned = dict(context)
     planned_intent = dict(intent)
-    planned_intent["structured_filters"] = []
-    planned_intent["requested_filters"] = [
-        str(implicit_filter.get("raw_phrase") or implicit_filter.get("value_phrase") or "").strip()
+    planned_intent["structured_filters"] = [*structured_filters, implicit_filter]
+    requested_filters = [
+        str(value).strip()
+        for value in (intent.get("requested_filters") or [])
+        if str(value).strip()
     ]
+    implicit_requested_filter = str(
+        implicit_filter.get("raw_phrase") or implicit_filter.get("value_phrase") or ""
+    ).strip()
+    if implicit_requested_filter and implicit_requested_filter not in requested_filters:
+        requested_filters.append(implicit_requested_filter)
+    planned_intent["requested_filters"] = requested_filters
+    planned_filters = [*selected_filters, implicit_filter]
+    if has_only_date_intervals:
+        planned_filters, interval_reason = _resolve_interval_filters_for_scope(
+            planned_filters,
+            structured_filters,
+            knowledge_base=knowledge_base,
+            allowed_tables={selected_table_names[0]},
+            preferred_table=selected_table_names[0],
+            preferred_owner_phrases=[phrase, selected_table_names[0]],
+            allow_preferred_owner_date=True,
+        )
+        if interval_reason:
+            return context
     planned.update(
         {
             "intent": planned_intent,
             "query_shape": "filtered_query",
-            "selected_filters": [implicit_filter],
+            "selected_filters": planned_filters,
             "filter_candidates": _merge_candidate_columns(
                 [implicit_filter],
                 [entry for entry in (context.get("filter_candidates") or []) if isinstance(entry, dict)],
@@ -3229,9 +3273,24 @@ def _apply_implicit_sample_filter_contract(
                 [implicit_filter],
             ),
             "required_evidence": ["selected_table", "filter_candidate"],
+            "missing_evidence": [
+                entry
+                for entry in (context.get("missing_evidence") or [])
+                if entry != "missing_filter_column"
+            ],
+            "missing_evidence_flags": {
+                **dict(context.get("missing_evidence_flags") or {}),
+                "missing_filter_column": False,
+            },
+            "route_recommendation": "deterministic_sql_required",
+            "route": "deterministic_sql_required",
+            "route_used": "deterministic_sql_required",
+            "route_reason": "clear deterministic table and filter evidence",
+            "planner_reason": "clear deterministic table and filter evidence",
+            "can_plan": True,
         }
     )
-    planned["plan"] = {**dict(planned.get("plan") or {}), "filters": [implicit_filter]}
+    planned["plan"] = {**dict(planned.get("plan") or {}), "filters": planned_filters}
     clause_plan = dict(planned.get("clause_plan") or {})
     clause_plan["clause_shape"] = "where_only"
     requires = dict(clause_plan.get("requires") or {})
@@ -3241,12 +3300,17 @@ def _apply_implicit_sample_filter_contract(
     for entry in clause_plan.get("decision_path") or []:
         node = dict(entry)
         if node.get("node") == "query_shape":
+            node["status"] = "resolved"
             node["reason"] = "resolved clause shape 'where_only'"
         elif node.get("node") == "where":
             node["status"] = "resolved"
             node["reason"] = "row-level sample value filter resolved from KB profile evidence"
         elif node.get("node") == "clause_shape":
+            node["status"] = "resolved"
             node["reason"] = "final clause shape 'where_only' is complete"
+        elif node.get("node") == "route":
+            node["status"] = "resolved"
+            node["reason"] = "deterministic SQL generation is supported for this clause shape"
         decision_path.append(node)
     clause_plan["decision_path"] = decision_path
     planned["clause_plan"] = clause_plan
