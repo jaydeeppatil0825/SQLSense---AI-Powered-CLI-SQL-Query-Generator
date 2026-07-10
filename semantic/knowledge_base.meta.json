@@ -5,6 +5,6 @@
     "db_name": "sqlsense_business_benchmark_lab",
     "database_type": "mysql",
     "database_name": "sqlsense_business_benchmark_lab",
-    "schema_hash": "dede36a7900d7123c95cf65bd7dff14cb93937802bd73a80212164c541587be9",
-    "schema_fingerprint": "dede36a7900d7123c95cf65bd7dff14cb93937802bd73a80212164c541587be9"
+    "schema_hash": "be5dc6708bb7835fa1fafee4131ccee748f01653bdd83737c5c7ddb14c673831",
+    "schema_fingerprint": "be5dc6708bb7835fa1fafee4131ccee748f01653bdd83737c5c7ddb14c673831"
 }
