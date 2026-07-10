@@ -1852,6 +1852,7 @@ class QuestionService:
     def reset_conversation(self) -> None:
         """Reset conversation memory."""
         self.conversation_memory = ConversationMemory()
+        self.last_query_context = None
     
     def get_conversation_memory(self) -> ConversationMemory:
         """Get conversation memory."""

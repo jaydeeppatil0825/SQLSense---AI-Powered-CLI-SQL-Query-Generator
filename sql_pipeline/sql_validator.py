@@ -1101,7 +1101,7 @@ def _has_dangling_comma(sql: str) -> bool:
 def _has_partial_clause(sql: str) -> tuple[bool, str]:
     if re.search(r"\b(?:FROM|JOIN|WHERE|ON|GROUP\s+BY|ORDER\s+BY|HAVING)\s*;?\s*$", sql, re.IGNORECASE):
         return True, "SQL ends with an incomplete clause."
-    if re.search(r"(=|<|>|<=|>=|<>|!=|AND|OR|LIKE|BETWEEN|IS|NOT)\s*;?\s*$", sql, re.IGNORECASE):
+    if re.search(r"(?:<=|>=|<>|!=|=|<|>|\b(?:AND|OR|LIKE|BETWEEN|IS|NOT)\b)\s*;?\s*$", sql, re.IGNORECASE):
         return True, "SQL ends with an incomplete expression."
     if re.search(r"\bBETWEEN\s+(?:[-+]?\d+(?:\.\d+)?|'[^']*')\s*;?\s*$", sql, re.IGNORECASE):
         return True, "SQL has an incomplete BETWEEN expression."

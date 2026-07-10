@@ -237,6 +237,7 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
 
     if contract_shape == "ranking_query":
         intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
+        ranking_mode = str((intent.get("ranking_diagnostics") or {}).get("mode_hint") or "")
         if intent.get("unsupported_constructs"):
             return DeterministicCapabilityResult(
                 status="cannot_plan_safely",
@@ -253,7 +254,9 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
                 blocked_by=["single_table_ranking_required"],
                 reason="ranking requires exactly one selected table and no joins",
             )
-        if context.get("formula_evidence") or len(list(intent.get("requested_metrics") or [])) > 1:
+        formula_evidence = context.get("formula_evidence")
+        formula_allowed_as_count = ranking_mode == "grouped_aggregate" and aggregate_function == "count"
+        if (formula_evidence and not formula_allowed_as_count) or len(list(intent.get("requested_metrics") or [])) > 1:
             return DeterministicCapabilityResult(
                 status="cannot_plan_safely",
                 query_shape="ranking_query",
@@ -280,7 +283,6 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
                 blocked_by=["limit_out_of_safe_range"],
                 reason="ranking LIMIT must be between 1 and 1000",
             )
-        ranking_mode = str((intent.get("ranking_diagnostics") or {}).get("mode_hint") or "")
         if ranking_mode == "grouped_aggregate":
             if aggregate_function not in {"sum", "avg", "min", "max", "count"}:
                 return DeterministicCapabilityResult(
@@ -1183,9 +1185,9 @@ def _resolve_join_filter_clauses(
     structured_filters = [
         entry for entry in (intent.get("structured_filters") or []) if isinstance(entry, dict)
     ]
-    if not structured_filters:
+    if not selected_filters:
         return [], [], [], ""
-    if len(selected_filters) != len(structured_filters):
+    if structured_filters and len(selected_filters) != len(structured_filters):
         return [], [], [], "filter_evidence_incomplete"
     clauses: list[str] = []
     conjunctions: list[str] = []

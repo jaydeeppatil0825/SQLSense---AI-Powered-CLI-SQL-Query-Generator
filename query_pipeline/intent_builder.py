@@ -87,7 +87,7 @@ _HAVING_RE = re.compile(
     re.IGNORECASE,
 )
 _WITH_RE = re.compile(
-    r"\s+with\s+(.+?)(?=\s+(?:from|where|having|group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit\s+\d+)\b|$)",
+    r"\s+with\s+(.+?)(?=\s+(?:from|where|having|group(?:ed)?\s+by|sort(?:ed)?\s+by|order(?:ed)?\s+by|limit\s+\d+)\b|$)",
     re.IGNORECASE,
 )
 _INTERVAL_BOUNDARY = r"(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|where|with|for|from|limit\s+\d+)\b|$)"
@@ -121,6 +121,7 @@ _GENERIC_METRIC_TERMS = {
     "qty",
     "count",
 }
+_IMPLICIT_SUM_METRIC_NOUNS = {"sale", "sales", "revenue", "revenues"}
 _AGGREGATE_KEYWORD_MAP = {
     "total": "sum",
     "sum": "sum",
@@ -138,7 +139,14 @@ _RANKING_KEYWORD_MAP = {
 }
 _OPERATOR_KEYWORD_MAP = {
     "greater than": "gt",
+    "more than": "gt",
+    "above": "gt",
+    "over": "gt",
     "less than": "lt",
+    "below": "lt",
+    "under": "lt",
+    "at least": "gte",
+    "at most": "lte",
     "between": "between",
     "contains": "contains",
     "equal": "eq",
@@ -532,6 +540,8 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
             if right:
                 requested_metrics = [right]
         else:
+            if intent_type in {"list", "filter"} and aggregate_function is None:
+                aggregate_function = _detect_implicit_grouped_sum_metric(left)
             metric_phrase = _metric_phrase_from_segment(left, aggregate_function)
             if metric_phrase:
                 requested_metrics = [metric_phrase]
@@ -1018,16 +1028,25 @@ def _detect_aggregate_function(question: str) -> str | None:
     return min(matches, default=(0, None), key=lambda item: item[0])[1]
 
 
+def _detect_implicit_grouped_sum_metric(segment: str) -> str | None:
+    tokens = [token for token in re.split(r"[^a-z0-9_]+", _cleanup_phrase(segment).lower()) if token]
+    return "sum" if any(token in _IMPLICIT_SUM_METRIC_NOUNS for token in tokens) else None
+
+
 def _detect_ranking_aggregate_function(target_phrase: str) -> str | None:
     """Require an explicit aggregate verb in a grouped ranking target."""
     match = re.match(
-        r"^\s*(sum|average|avg|mean|count|maximum|max|minimum|min)\b",
+        r"^\s*(total|sum|average|avg|mean|count|maximum|max|minimum|min)\b",
         str(target_phrase or ""),
         re.IGNORECASE,
     )
+    if not match and re.search(r"\bcount\s*$", str(target_phrase or ""), re.IGNORECASE):
+        return "count"
     if not match:
         return None
     token = match.group(1).lower()
+    if token == "total":
+        return "sum"
     if token in {"average", "avg", "mean"}:
         return "avg"
     if token in {"maximum", "max"}:
@@ -1063,6 +1082,8 @@ def _extract_ranking_request(question: str) -> dict[str, Any]:
     ):
         return {}
     metric_phrase = _metric_phrase_from_segment(target_phrase, aggregate_function)
+    if aggregate_function == "sum" and re.match(r"^\s*total\b", target_phrase, re.IGNORECASE):
+        metric_phrase = target_phrase
     grouped = bool(aggregate_function)
     return {
         "keyword": keyword,
@@ -1098,12 +1119,17 @@ def _extract_join_lookup_request(body: str) -> dict[str, Any]:
     if with_match:
         base_phrase = _cleanup_phrase(cleaned[: with_match.start()])
         related_phrase = _cleanup_phrase(with_match.group(1))
+        related_phrase = _cleanup_phrase(
+            re.split(r"\s+(?:for|where)\s+", related_phrase, maxsplit=1, flags=re.IGNORECASE)[0]
+        )
         if not base_phrase or not related_phrase:
+            return _empty_join_lookup_request()
+        if _with_phrase_is_row_filter(related_phrase):
             return _empty_join_lookup_request()
         aggregate_condition = bool(
             re.match(r"^(?:sum|total|average|avg|mean|count|minimum|min|maximum|max)\b", related_phrase, re.IGNORECASE)
             and re.search(
-                r"\b(?:greater\s+than|less\s+than|at\s+least|at\s+most|above|below|over|under|equals?|=|>|<)\b",
+                r"\b(?:greater\s+than|more\s+than|less\s+than|at\s+least|at\s+most|above|below|over|under|equals?|=|>|<)\b",
                 related_phrase,
                 re.IGNORECASE,
             )
@@ -1298,7 +1324,7 @@ def _with_phrase_is_row_filter(phrase: str) -> bool:
     if not phrase or _parse_having_condition(phrase).get("aggregate_function"):
         return False
     if re.search(
-        r"\b(?:between|contains|equals?|is|not\s+equal|greater\s+than|less\s+than|null|=|!=|<>|>=|<=|>|<)\b",
+        r"\b(?:between|contains|equals?|is|not\s+equal|greater\s+than|more\s+than|less\s+than|at\s+least|at\s+most|above|below|over|under|null|=|!=|<>|>=|<=|>|<)\b",
         phrase,
         re.IGNORECASE,
     ):
@@ -1354,8 +1380,8 @@ def _extract_structured_filters(question: str, *, today: date | None = None) -> 
         (r"^(.+?)\s+(?:is\s+not|not\s+equals?(?:\s+to)?|!=|<>)\s+(.+)$", "neq"),
         (r"^(.+?)\s+(?:greater\s+than\s+or\s+equal\s+to|at\s+least|>=)\s+(.+)$", "gte"),
         (r"^(.+?)\s+(?:less\s+than\s+or\s+equal\s+to|at\s+most|<=)\s+(.+)$", "lte"),
-        (r"^(.+?)\s+(?:greater\s+than|>)\s+(.+)$", "gt"),
-        (r"^(.+?)\s+(?:less\s+than|<)\s+(.+)$", "lt"),
+        (r"^(.+?)\s+(?:greater\s+than|more\s+than|above|over|>)\s+(.+)$", "gt"),
+        (r"^(.+?)\s+(?:less\s+than|below|under|<)\s+(.+)$", "lt"),
         (r"^(.+?)\s+(?:is\s+)?before\s+(.+)$", "before"),
         (r"^(.+?)\s+(?:is\s+)?after\s+(.+)$", "after"),
         (r"^(.+?)\s+(?:is\s+on|on)\s+(.+)$", "eq"),
@@ -1666,11 +1692,43 @@ def _parse_having_condition(phrase: str) -> dict[str, Any]:
     if not cleaned:
         return entry
 
+    count_prefix_match = re.match(
+        r"^(?P<operator>more\s+than|greater\s+than|above|over|less\s+than|below|under|at\s+least|at\s+most)\s+"
+        r"(?P<value>[-+]?\d+(?:\.\d+)?)\s+(?P<entity>.+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if count_prefix_match:
+        operator_word = count_prefix_match.group("operator").lower()
+        entry["aggregate_function"] = "count"
+        entry["operator"] = {
+            "more than": "gt",
+            "greater than": "gt",
+            "above": "gt",
+            "over": "gt",
+            "less than": "lt",
+            "below": "lt",
+            "under": "lt",
+            "at least": "gte",
+            "at most": "lte",
+        }[operator_word]
+        entry["value"] = count_prefix_match.group("value")
+        entry["value_phrase"] = count_prefix_match.group("value")
+        entry["values"] = [count_prefix_match.group("value")]
+        return entry
+
     operator_patterns = (
         (r"\s+(?:is\s+)?greater\s+than\s+or\s+equal\s+to\s+", "gte"),
         (r"\s+(?:is\s+)?less\s+than\s+or\s+equal\s+to\s+", "lte"),
+        (r"\s+(?:is\s+)?more\s+than\s+", "gt"),
         (r"\s+(?:is\s+)?greater\s+than\s+", "gt"),
+        (r"\s+(?:is\s+)?above\s+", "gt"),
+        (r"\s+(?:is\s+)?over\s+", "gt"),
+        (r"\s+(?:is\s+)?below\s+", "lt"),
+        (r"\s+(?:is\s+)?under\s+", "lt"),
         (r"\s+(?:is\s+)?less\s+than\s+", "lt"),
+        (r"\s+(?:is\s+)?at\s+least\s+", "gte"),
+        (r"\s+(?:is\s+)?at\s+most\s+", "lte"),
         (r"\s+(?:is\s+)?not\s+equal(?:s)?(?:\s+to)?\s+", "neq"),
         (r"\s+(?:equals?|is)\s+", "eq"),
         (r"\s*(>=)\s*", "gte"),
@@ -1771,7 +1829,13 @@ def _source_scope_match(question: str) -> Optional[re.Match[str]]:
             for raw in interval_raws
         ):
             continue
-        if _COUNT_RE.search(body) or _detect_aggregate_function(prefix) or _TOP_RE.search(prefix) or _BOTTOM_RE.search(prefix):
+        if (
+            _COUNT_RE.search(body)
+            or _detect_aggregate_function(prefix)
+            or _TOP_RE.search(prefix)
+            or _BOTTOM_RE.search(prefix)
+            or re.search(r"\s+with\s+", prefix, re.IGNORECASE)
+        ):
             return match
     return None
 
@@ -1819,6 +1883,9 @@ def _remove_filter_clauses(question: str) -> str:
         if not match:
             continue
         stripped = _clean_scalar(f"{stripped[: match.start()]} {stripped[match.end() :]}")
+    with_match = _WITH_RE.search(stripped)
+    if with_match and _with_phrase_is_row_filter(_cleanup_phrase(with_match.group(1))):
+        stripped = _clean_scalar(f"{stripped[: with_match.start()]} {stripped[with_match.end() :]}")
     having_match = _HAVING_RE.search(stripped)
     if having_match:
         stripped = _clean_scalar(f"{stripped[: having_match.start()]} {stripped[having_match.end() :]}")

@@ -1,4 +1,4 @@
-"""Verify SQLSense business benchmark NLP/planner behavior on an already-created MySQL database.
+r"""Verify SQLSense business benchmark NLP/planner behavior on an already-created MySQL database.
 
 Database expected to already exist:
     sqlsense_business_benchmark_lab
