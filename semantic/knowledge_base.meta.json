@@ -2,9 +2,9 @@
     "db_engine": "mysql",
     "db_host": "localhost",
     "db_port": "3306",
-    "db_name": "sqlsense_phase6g_interval_lab",
+    "db_name": "sqlsense_business_benchmark_lab",
     "database_type": "mysql",
-    "database_name": "sqlsense_phase6g_interval_lab",
-    "schema_hash": "db33307ebab3cd10cb0030735cafba181933d3c948ef01a125c0eb44a4418794",
-    "schema_fingerprint": "db33307ebab3cd10cb0030735cafba181933d3c948ef01a125c0eb44a4418794"
+    "database_name": "sqlsense_business_benchmark_lab",
+    "schema_hash": "dede36a7900d7123c95cf65bd7dff14cb93937802bd73a80212164c541587be9",
+    "schema_fingerprint": "dede36a7900d7123c95cf65bd7dff14cb93937802bd73a80212164c541587be9"
 }
