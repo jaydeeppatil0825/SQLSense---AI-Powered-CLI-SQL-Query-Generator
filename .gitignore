@@ -2,6 +2,10 @@
 .env
 .env.local
 
+# Local connection config - never commit database credentials
+.sqlsense/
+.sqlsense/local_connection.json
+
 # Virtual environments
 
 env/

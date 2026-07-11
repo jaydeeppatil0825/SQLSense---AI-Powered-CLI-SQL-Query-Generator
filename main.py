@@ -1,16 +1,16 @@
-"""
+﻿"""
 main.py
 =======
 CLI entry point for the AI SQL Query Generator.
 
 Menu flow
 ---------
-  1) Connect Database / Auto Build KB
-  2) Ask a Question        — deterministic intent → KB/planner → validated SQL
-  3) Execute Last SQL      — run stored SQL, display results as a table
-  4) Semantic AI Settings  — view KB enrichment backend status
-  5) Search Business Glossary
-  6) Rebuild / Refresh Knowledge Base
+  1) Connect / Reuse Database  — connect once, save for reuse
+  2) Ask Question              — auto-executes safe validated SQL
+  3) Rebuild Knowledge Base    — force KB/glossary/vector rebuild
+  4) Semantic AI Settings      — view KB enrichment backend status
+  5) Search Business Glossary  — search business terms
+  6) Show Current Connection   — view active connection details
   7) Exit
 
 All exceptions are caught at the boundary of each handler so the user
@@ -18,6 +18,9 @@ never sees a raw Python traceback — only a clean one-line error message.
 
 Phase 5: CLI is now thin - business logic moved to core services.
 CLI only handles menu display, input collection, and output formatting.
+
+CLI UX Phase: Improved menu display, connection reuse, and auto-execution
+of safe validated SQL queries.
 """
 
 from __future__ import annotations
@@ -36,6 +39,12 @@ from core.app_service import AppService
 # Keep these for CLI-specific utilities
 from kb_pipeline.connection import SUPPORTED_DB_TYPES
 from utils.logger import get_logger
+from utils.config_manager import (
+    save_connection_config,
+    load_connection_config,
+    has_saved_connection,
+    format_connection_summary,
+)
 
 # Initialize logger
 logger = get_logger()
@@ -136,28 +145,40 @@ def _as_dict(value: object) -> dict:
 def display_menu(state: SessionState) -> None:
     """Print the full CLI menu with current session context in the header."""
     print()
-    print("=" * 52)
-    print(f"  AI SQL Query Generator")
-    print("=" * 52)
-    print(f"  Backend  : {_backend_label(state)}")
-    print(f"  Database : {_db_label(state)}")
+    print("+" + "=" * 62 + "+")
+    print("|  " + "SQLSense - AI SQL Query Generator".center(58) + "  |")
+    print("+" + "=" * 62 + "+")
     
-    last_sql = state.app_service.get_last_sql()
-    if last_sql:
-        # Show a short preview of the last SQL so the user knows it's ready.
-        preview = last_sql.replace("\n", " ")
-        if len(preview) > 48:
-            preview = preview[:48] + "…"
-        print(f"  Last SQL : {preview}")
-    print("-" * 52)
-    print("  1) Connect Database / Auto Build KB")
-    print("  2) Ask a Question / Ask Business Question")
-    print("  3) Execute Last SQL")
-    print("  4) Semantic AI Settings")
-    print("  5) Search Business Glossary")
-    print("  6) Rebuild / Refresh Knowledge Base")
-    print("  7) Exit")
-    print("=" * 52)
+    # Database status
+    db_status = _db_label(state)
+    db_icon = "+" if state.app_service.is_database_connected() else "x"
+    print(f"|  [{db_icon}] Database : {db_status:<45}|")
+    
+    # KB/Vector status
+    if state.app_service.is_database_connected():
+        kb_ready = state.app_service.is_database_ready()
+        kb_icon = "+" if kb_ready else "x"
+        kb_status = "ready" if kb_ready else "not ready"
+        print(f"|  [{kb_icon}] Knowledge Base : {kb_status:<39}|")
+        
+        vector_status = state.app_service.get_vector_status()
+        vector_index = vector_status.get("index_status", "unknown") if vector_status else "unknown"
+        vector_icon = "+" if vector_index == "ready" else "o"
+        print(f"|  [{vector_icon}] Vector Index : {vector_index:<41}|")
+    
+    # Backend status
+    backend = _backend_label(state)
+    print(f"|  [o] AI Backend : {backend:<43}|")
+    
+    print("+" + "-" * 62 + "+")
+    print("|  1. Connect / Reuse Database                               |")
+    print("|  2. Ask Question (auto-executes safe SQL)                  |")
+    print("|  3. Rebuild Knowledge Base                                 |")
+    print("|  4. Semantic AI Settings                                   |")
+    print("|  5. Search Business Glossary                               |")
+    print("|  6. Show Current Connection                                |")
+    print("|  7. Exit                                                   |")
+    print("+" + "=" * 62 + "+")
 
 
 def read_menu_choice() -> int | None:
@@ -169,7 +190,7 @@ def read_menu_choice() -> int | None:
 
     Returns None on empty or invalid input so the caller can loop again.
     """
-    raw = _input("  Choose an option (1-7): ")
+    raw = _input("\n  Choose an option (1-7): ")
 
     if not raw:
         print("  Please enter a menu option.")
@@ -206,28 +227,97 @@ def _print_database_prepare_report(state: SessionState, report: dict[str, object
 
 def handle_connect_database(state: SessionState) -> None:
     """
-    Phase 1 — Connect Database / Auto Build KB.
-    Collects connection details, connects once, and immediately prepares KB,
-    glossary, and vector state for questioning.
+    Option 1 — Connect Database / Reuse Last Connection.
+    
+    Supports:
+    - Reusing last saved connection
+    - Entering new connection details
+    - Auto-building KB after connection
+    
     Password is collected via getpass and never written to any file.
     """
-    logger.info("User chose option 1: Connect Database / Auto Build KB")
-    print(f"\n  Supported database type: mysql")
+    logger.info("User chose option 1: Connect / Reuse Database")
+    
+    # Check if we have a saved connection
+    saved_config = load_connection_config()
+    
+    if saved_config and has_saved_connection():
+        print(f"\n  Last connection: {format_connection_summary(saved_config)}")
+        reuse = _input("  Reuse last connection? [Y/n]: ").lower()
+        
+        if reuse in {"", "y", "yes"}:
+            # Reuse saved connection
+            db_type = saved_config.get("db_type", "mysql")
+            
+            if db_type == "sqlite":
+                sqlite_path = saved_config.get("sqlite_path", "")
+                print(f"\n  Connecting to SQLite: {sqlite_path}")
+                print("  Building knowledge base...")
+                success, message, report = state.app_service.connect_database_and_prepare(
+                    db_type="sqlite",
+                    sqlite_path=sqlite_path,
+                    use_ai_enrichment=True,
+                )
+                _print_database_prepare_report(state, report)
+                if success:
+                    print("  [+] Database ready.")
+                else:
+                    print(f"  [x] Preparation failed: {message}")
+                return
+            
+            # MySQL/PostgreSQL - need password
+            host = saved_config.get("host", "localhost")
+            port = saved_config.get("port", 3306)
+            username = saved_config.get("username", "")
+            database = saved_config.get("database", "")
+            
+            # Try password from environment first
+            password = os.getenv("DB_PASSWORD", "")
+            if not password:
+                try:
+                    sys.stdout.flush()
+                    password = getpass.getpass("  Password: ")
+                    sys.stdout.flush()
+                except (KeyboardInterrupt, EOFError):
+                    print("\n  Password input cancelled.")
+                    return
+            
+            print(f"\n  Connecting to {db_type}://{username}@{host}:{port}/{database}...")
+            print("  Building knowledge base...")
+            success, message, report = state.app_service.connect_database_and_prepare(
+                db_type=db_type,
+                host=host,
+                port=port,
+                username=username,
+                password=password,
+                database=database,
+                use_ai_enrichment=True,
+            )
+            _print_database_prepare_report(state, report)
+            if success:
+                logger.info(f"Successfully reconnected to {db_type}://{username}@{host}:{port}/{database}")
+                print("  [+] Database ready.")
+            else:
+                logger.error(f"Database reconnect failed: {message}")
+                print(f"  [x] Preparation failed: {message}")
+            return
+    
+    # No saved connection or user chose to enter new details
+    print(f"\n  Supported database types: mysql")
     print("  PostgreSQL and SQLite are planned for future phases.\n")
 
     db_type = _prompt("Database type", "mysql").lower()
     if db_type not in SUPPORTED_DB_TYPES:
-        print(f"  Unsupported type '{db_type}'. Only mysql is currently supported.")
-        print("  PostgreSQL and SQLite are planned for future phases.")
+        print(f"  [x] Unsupported type '{db_type}'. Only mysql is currently supported.")
         return
 
     # ── SQLite path ──────────────────────────────────────────────────────────
     if db_type == "sqlite":
         sqlite_path = _prompt("SQLite file path")
         if not sqlite_path:
-            print("  SQLite file path cannot be empty.")
+            print("  [x] SQLite file path cannot be empty.")
             return
-        print("\n  Connecting database...")
+        print("\n  Connecting to database...")
         print("  Building knowledge base...")
         success, message, report = state.app_service.connect_database_and_prepare(
             db_type="sqlite",
@@ -236,9 +326,12 @@ def handle_connect_database(state: SessionState) -> None:
         )
         _print_database_prepare_report(state, report)
         if not success:
-            print(f"  Preparation failed: {message}")
+            print(f"  [x] Preparation failed: {message}")
             return
-        print("  Database ready.")
+        
+        # Save connection config
+        save_connection_config(db_type=db_type, sqlite_path=sqlite_path)
+        print("  [+] Database ready. Connection saved for next session.")
         return
 
     # ── MySQL / PostgreSQL ───────────────────────────────────────────────────
@@ -246,24 +339,23 @@ def handle_connect_database(state: SessionState) -> None:
     port     = _prompt_int("Port", _DEFAULT_PORTS.get(db_type, 3306))
     username = _prompt("Username")
     if not username:
-        print("  Username cannot be empty.")
+        print("  [x] Username cannot be empty.")
         return
     database = _prompt("Database name")
     if not database:
-        print("  Database name cannot be empty.")
+        print("  [x] Database name cannot be empty.")
         return
 
-    # getpass hides the password so it is never echoed in the terminal.
-    # Flush stdout before and after so the Windows console buffer is clean.
+    # Get password securely
     try:
         sys.stdout.flush()
         password = getpass.getpass("  Password: ")
-        sys.stdout.flush()  # restore normal stdout state after getpass
+        sys.stdout.flush()
     except (KeyboardInterrupt, EOFError):
         print("\n  Password input cancelled.")
         return
 
-    print(f"\n  Connecting to {db_type}://{username}@{host}:{port}/{database} …")
+    print(f"\n  Connecting to {db_type}://{username}@{host}:{port}/{database}...")
     print("  Building knowledge base...")
     success, message, report = state.app_service.connect_database_and_prepare(
         db_type=db_type,
@@ -277,40 +369,49 @@ def handle_connect_database(state: SessionState) -> None:
     _print_database_prepare_report(state, report)
     if not success:
         logger.error(f"Database connect/prepare failed: {message}")
-        print(f"  Preparation failed: {message}")
+        print(f"  [x] Preparation failed: {message}")
         return
 
+    # Save connection config (password excluded)
+    save_connection_config(
+        db_type=db_type,
+        host=host,
+        port=port,
+        username=username,
+        database=database,
+    )
     logger.info(f"Successfully connected and prepared database: {db_type}://{username}@{host}:{port}/{database}")
-    print(f"  Successfully connected to {_db_label(state)}.")
-    print("  Database ready.")
+    print("  [+] Database ready. Connection saved for next session.")
+    print("  Note: Password is not saved. Set DB_PASSWORD in .env or enter when prompted.")
 
 
 def handle_rebuild_or_refresh_knowledge_base(state: SessionState) -> None:
     """
+    Option 3 — Rebuild Knowledge Base.
     Force rebuild of KB/glossary/vector assets for the active database.
     """
-    logger.info("User chose option 6: Rebuild / Refresh Knowledge Base")
+    logger.info("User chose option 3: Rebuild Knowledge Base")
     if not state.app_service.is_database_connected():
-        print("  No database connection. Please run option 1 first.")
+        print("  [x] No database connection. Please run option 1 first.")
         return
 
-    print("\n  Building knowledge base…")
+    print("\n  Building knowledge base...")
     success, message, knowledge_base = state.app_service.rebuild_or_refresh_knowledge_base(
         use_ai_enrichment=True,
         ai_backend=state.app_service.get_active_backend(),
     )
     if not success:
         logger.error(f"Knowledge base build failed: {message}")
-        print(f"  Knowledge base build failed: {message}")
+        print(f"  [x] Knowledge base build failed: {message}")
         return
 
     enrichment_status, enrichment_message = state.app_service.get_last_ai_enrichment_result()
     if enrichment_status == "completed":
-        print("  [OK] AI enrichment completed successfully")
+        print("  [+] AI enrichment completed successfully")
     elif enrichment_status == "partial":
-        print(f"  [OK] {enrichment_message}")
+        print(f"  [o] {enrichment_message}")
     else:
-        print(f"  [OK] AI enrichment skipped/fallback used ({enrichment_message})")
+        print(f"  [o] AI enrichment skipped/fallback used ({enrichment_message})")
 
     build_summary = state.app_service.get_last_build_summary()
     if build_summary:
@@ -340,33 +441,35 @@ def handle_rebuild_or_refresh_knowledge_base(state: SessionState) -> None:
         else:
             print("  - tables with missing relationships: none")
 
-    print(f"  [OK] Knowledge base saved successfully -> semantic/knowledge_base.json")
-    print(f"  [OK] Business glossary saved -> semantic/business_glossary.json")
-    vector_status = _as_dict(state.app_service.get_vector_status() or {})
-    embedding_status = _as_dict(vector_status.get("embedding") or {})
-    retriever_status = _as_dict(vector_status.get("retriever") or {})
-    persistence_status = _as_dict(vector_status.get("persistence") or {})
-    print("\n  Vector / Embedding Status:")
-    print(f"  - index status: {vector_status.get('index_status')}")
-    print(f"  - index source: {persistence_status.get('source')}")
-    print(f"  - index fresh: {persistence_status.get('is_fresh')}")
-    print(f"  - embedding backend: {embedding_status.get('backend')}")
-    print(f"  - embedding model: {embedding_status.get('model')}")
-    print(f"  - fallback used: {embedding_status.get('fallback_used')}")
-    print(f"  - indexed documents: {retriever_status.get('document_count', 0)}")
-    if persistence_status.get("stale_reason"):
-        print(f"  - stale reason: {persistence_status.get('stale_reason')}")
-    if persistence_status.get("persistence_error"):
-        print(f"  - persistence note: {persistence_status.get('persistence_error')}")
-    if embedding_status.get("init_error"):
-        print(f"  - backend note: {embedding_status.get('init_error')}")
-    print("  Database ready.")
-    print("  Returning to main menu.")
+    print(f"\n  [+] Knowledge base saved → semantic/knowledge_base.json")
+    print(f"  [+] Business glossary saved → semantic/business_glossary.json")
+    
+    vector_status = state.app_service.get_vector_status()
+    if vector_status:
+        embedding_status = vector_status.get("embedding", {})
+        retriever_status = vector_status.get("retriever", {})
+        persistence_status = vector_status.get("persistence", {})
+        print("\n  Vector / Embedding Status:")
+        print(f"  - index status: {vector_status.get('index_status')}")
+        print(f"  - index source: {persistence_status.get('source')}")
+        print(f"  - index fresh: {persistence_status.get('is_fresh')}")
+        print(f"  - embedding backend: {embedding_status.get('backend')}")
+        print(f"  - embedding model: {embedding_status.get('model')}")
+        print(f"  - fallback used: {embedding_status.get('fallback_used')}")
+        print(f"  - indexed documents: {retriever_status.get('document_count', 0)}")
+        if persistence_status.get("stale_reason"):
+            print(f"  - stale reason: {persistence_status.get('stale_reason')}")
+        if persistence_status.get("persistence_error"):
+            print(f"  - persistence note: {persistence_status.get('persistence_error')}")
+        if embedding_status.get("init_error"):
+            print(f"  - backend note: {embedding_status.get('init_error')}")
+    
+    print("\n  [+] Database ready.")
 
 
 def handle_ask_question(state: SessionState) -> None:
     """
-    Option 3 — Ask a Question (Hybrid SQL Generation with Conversation Memory).
+    Option 2 — Ask a Question (Auto-Execute Safe SQL).
 
     Flow
     ----
@@ -375,34 +478,41 @@ def handle_ask_question(state: SessionState) -> None:
     3. Check action detector (chart, insights, new_chat, etc.).
     4. If action exists, handle action and return to menu.
     5. Process question using core service.
-    6. Display the SQL.
-    7. Save conversation session.
+    6. Display the SQL and context.
+    7. If SQL is safe and validated, auto-execute and show results.
+    8. Save conversation session.
+    
+    Auto-execution rules:
+    - Only execute if validation passes
+    - Only execute if route is deterministic (rule-based)
+    - Never execute if blocked_unsafe or cannot_plan_safely
+    - Never execute invalid, ambiguous, or unsafe SQL
     """
     logger.info("User chose option 2: Ask a Question")
     
     # ── Load knowledge base ───────────────────────────────────────────────
     if not state.app_service.is_database_connected():
-        print("  No database connection. Please run option 1 first.")
+        print("  [x] No database connection. Please run option 1 first.")
         return
 
     if not state.app_service.is_database_ready():
-        print("  Database is not ready. Connect a database and let SQLSense prepare the knowledge base first.")
+        print("  [x] Database is not ready. Connect a database first (option 1).")
         return
 
     success, message, knowledge_base = state.app_service.load_knowledge_base()
     if not success:
-        print(f"  {message}")
+        print(f"  [x] {message}")
         return
 
     # ── Get the question ──────────────────────────────────────────────────
     question = _input("\n  Enter your question: ")
     if not question:
         logger.warning("Empty question submitted")
-        print("  Question cannot be empty.")
+        print("  [x] Question cannot be empty.")
         return
     if len(question) > 500:
         logger.warning(f"Question too long: {len(question)} characters")
-        print("  Question is too long — please keep it to 500 characters or fewer.")
+        print("  [x] Question is too long — please keep it to 500 characters or fewer.")
         return
 
     logger.info(f"User question: {question}")
@@ -419,146 +529,113 @@ def handle_ask_question(state: SessionState) -> None:
     result = state.app_service.process_question(question, ai_backend)
     if result is None:
         logger.error("Ask Question returned no result payload")
-        print("  Internal error: question processing returned no result.")
+        print("  [x] Internal error: question processing returned no result.")
         return
     if not isinstance(result, dict):
         logger.error(f"Ask Question returned invalid result payload: {type(result).__name__}")
-        print("  Internal error: question processing returned an invalid result.")
+        print("  [x] Internal error: question processing returned an invalid result.")
         return
 
     success = bool(result.get("success"))
     message = str(result.get("message") or "")
     error = result.get("error")
     sql = result.get("sql") or result.get("generated_sql")
+    route_used = str(result.get("route_used") or result.get("route") or "").strip()
+    validation_result = result.get("validation_result") or {}
+    is_valid = validation_result.get("is_valid", False)
+    
     if not success:
-        print(f"  {error or message}")
+        print(f"\n  [x] {error or message}")
         return
+    
     if not sql:
         logger.error("Ask Question succeeded without SQL in result payload")
-        print("  Internal error: SQL generation succeeded without a SQL result.")
+        print("  [x] Internal error: SQL generation succeeded without a SQL result.")
         return
 
-    # ── Display the SQL ───────────────────────────────────────────────────
-    query_context = _as_dict(result.get("query_context") or state.app_service.get_last_query_context() or {})
-    query_plan = _as_dict(query_context.get("plan") or {})
-    vector_status = _as_dict(state.app_service.get_vector_status() or {})
-    persistence_status = _as_dict(vector_status.get("persistence") or {})
-    route_used = str(result.get("route_used") or query_context.get("route_used") or "").strip()
-    route_reason = str(query_context.get("route_reason") or "").strip()
-    route_labels = {
-        "rule-based": "rule-based",
-        "rule_based": "rule-based",
-        "simple_rule_based": "rule-based",
-        "simple-rule-based": "rule-based",
-        "ai": "AI",
-        "ai-retry": "AI retry",
-        "fallback-failed": "fallback failed",
-    }
-
-    if route_used:
-        print("\n  Routing:")
-        print(f"  Route: {route_labels.get(route_used, route_used)}")
-        if route_reason:
-            print(f"  Reason: {route_reason}")
-
-    if query_plan:
-        print("\n  Query Plan:")
-        print(f"  - intent: {query_plan.get('intent')}")
-        print(f"  - metric: {query_plan.get('metric')}")
-        print(f"  - dimension: {query_plan.get('dimension')}")
-        print(f"  - filters: {query_plan.get('filters')}")
-        print(f"  - date range: {query_plan.get('date_range')}")
-
-    selected_tables = query_context.get("selected_tables") or []
-    if selected_tables:
-        print("\n  Selected Tables:")
-        for table_entry in selected_tables:
-            if not isinstance(table_entry, dict):
-                continue
-            print(f"  - {table_entry.get('table', '')} (confidence: {table_entry.get('confidence', 'unknown')})")
-            if table_entry.get("reason"):
-                print(f"    reason: {table_entry['reason']}")
-            selected_columns = table_entry.get("selected_columns", [])
-            if selected_columns:
-                column_descriptions = [
-                    f"{column_entry.get('column')} [{column_entry.get('semantic_type', 'general')}]"
-                    for column_entry in selected_columns[:6]
-                    if isinstance(column_entry, dict)
-                ]
-                print(f"    selected columns: {', '.join(column_descriptions)}")
-
-    # Display vector retrieval information
-    if query_context.get("vector_used"):
-        print("\n  Vector Retrieval:")
-        print("  - route: vector-enhanced")
-        vector_results = _as_dict(query_context.get("vector_results") or {})
-        retriever_status = _as_dict(vector_results.get("retriever_status") or {})
-        embedding_status = _as_dict(retriever_status.get("embedding") or {})
-        last_search = _as_dict(retriever_status.get("last_search") or {})
-        if persistence_status:
-            print(f"  - index source: {persistence_status.get('source')}")
-            print(f"  - index fresh: {persistence_status.get('is_fresh')}")
-            if persistence_status.get("stale_reason"):
-                print(f"  - stale reason: {persistence_status.get('stale_reason')}")
-        if embedding_status:
-            print(f"  - embedding backend: {embedding_status.get('backend')}")
-            print(f"  - embedding model: {embedding_status.get('model')}")
-            print(f"  - fallback used: {embedding_status.get('fallback_used')}")
-        if last_search:
-            print(f"  - vector result count: {last_search.get('result_count', 0)}")
-        if vector_results.get("table_names"):
-            print(f"  - top vector tables: {', '.join(vector_results['table_names'][:5])}")
-        if vector_results.get("columns"):
-            top_columns = [
-                f"{entry.get('table_name')}.{entry.get('column_name')}"
-                for entry in vector_results["columns"][:5]
-                if isinstance(entry, dict) and entry.get("table_name") and entry.get("column_name")
-            ]
-            if top_columns:
-                print(f"  - top vector columns: {', '.join(top_columns)}")
-        if vector_results.get("glossary_terms"):
-            glossary_names = [
-                entry.get("term", "")
-                for entry in vector_results["glossary_terms"][:3]
-                if isinstance(entry, dict)
-            ]
-            print(f"  - top glossary terms: {', '.join(glossary_names)}")
-        if vector_results.get("relationships"):
-            relationship_names = [
-                f"{entry.get('from_table')}.{entry.get('from_column')} -> {entry.get('to_table')}.{entry.get('to_column')}"
-                for entry in vector_results["relationships"][:3]
-                if isinstance(entry, dict) and entry.get("from_table") and entry.get("to_table")
-            ]
-            if relationship_names:
-                print(f"  - top relationships: {', '.join(relationship_names)}")
-    else:
-        print("\n  Vector Retrieval:")
-        print("  - route: rule-based (vector unavailable or not needed)")
-        vector_results = _as_dict(query_context.get("vector_results") or {})
-        retriever_status = _as_dict(vector_results.get("retriever_status") or {})
-        embedding_status = _as_dict(retriever_status.get("embedding") or {})
-        if persistence_status:
-            print(f"  - index source: {persistence_status.get('source')}")
-            print(f"  - index fresh: {persistence_status.get('is_fresh')}")
-            if persistence_status.get("stale_reason"):
-                print(f"  - stale reason: {persistence_status.get('stale_reason')}")
-        if embedding_status:
-            print(f"  - embedding backend: {embedding_status.get('backend')}")
-            print(f"  - embedding model: {embedding_status.get('model')}")
-            print(f"  - fallback used: {embedding_status.get('fallback_used')}")
-
-    if query_context.get("confidence") is not None:
-        print(f"\n  Planning Confidence: {query_context['confidence']}")
-    if query_context.get("generation_confidence") is not None:
-        print(f"  Generation Confidence: {query_context['generation_confidence']}")
-
-    if query_context.get("warnings"):
-        print("\n  Warnings:")
-        for warning in query_context["warnings"]:
-            print(f"  - {warning}")
-
-    print("\n  Generated SQL:")
+    # ── Display the SQL and context ───────────────────────────────────────
+    query_context = result.get("query_context") or state.app_service.get_last_query_context() or {}
+    
+    print("\n" + "─" * 60)
+    print("  Generated SQL:")
+    print("─" * 60)
     print(f"  {sql}")
+    print("─" * 60)
+    
+    # Show route information (compact)
+    route_labels = {
+        "rule-based": "[+] Rule-based (deterministic)",
+        "rule_based": "[+] Rule-based (deterministic)",
+        "simple_rule_based": "[+] Rule-based (deterministic)",
+        "simple-rule-based": "[+] Rule-based (deterministic)",
+        "deterministic_sql_required": "[+] Deterministic SQL",
+        "cannot_plan_safely": "[x] Cannot plan safely",
+        "blocked_unsafe": "[x] Unsafe query blocked",
+        "ai": "[o] AI-generated",
+        "ai-retry": "[o] AI retry",
+    }
+    route_display = route_labels.get(route_used, f"[o] {route_used}")
+    print(f"  Route: {route_display}")
+    
+    # Show validation status
+    if is_valid:
+        print(f"  Validation: [+] Passed")
+    else:
+        reason = validation_result.get("reason", "unknown")
+        print(f"  Validation: [x] Failed - {reason}")
+    
+    # Show warnings if any
+    warnings = query_context.get("warnings", [])
+    if warnings:
+        print(f"  Warnings: {len(warnings)} issue(s)")
+        for warning in warnings[:3]:
+            print(f"    • {warning}")
+    
+    print("─" * 60)
+    
+    # ── Auto-execute decision ──────────────────────────────────────────────
+    can_auto_execute = (
+        is_valid
+        and route_used in {"rule-based", "rule_based", "simple_rule_based", "simple-rule-based", "deterministic_sql_required"}
+        and route_used not in {"cannot_plan_safely", "blocked_unsafe"}
+    )
+    
+    if not can_auto_execute:
+        if route_used in {"cannot_plan_safely", "blocked_unsafe"}:
+            print(f"\n  [!] Auto-execution skipped: {route_used.replace('_', ' ')}")
+        elif not is_valid:
+            print(f"\n  [!] Auto-execution skipped: SQL validation failed")
+        else:
+            print(f"\n  [!] Auto-execution skipped: Route '{route_used}' is not deterministic")
+        
+        # Save conversation session
+        conversation_memory = state.app_service.get_conversation_memory()
+        conversation_memory.save_session()
+        return
+    
+    # ── Auto-execute safe validated SQL ────────────────────────────────────
+    print(f"\n  > Auto-executing safe validated SQL...")
+    logger.info(f"Auto-executing SQL: {sql[:100]}...")
+    
+    exec_success, exec_message, rows = state.app_service.execute_sql(sql, revalidate=True)
+    if not exec_success:
+        print(f"  [x] Execution failed: {exec_message}")
+        # Save conversation session
+        conversation_memory = state.app_service.get_conversation_memory()
+        conversation_memory.save_session()
+        return
+
+    if not rows:
+        print("  [+] Query executed successfully. No rows returned.")
+    else:
+        # Display results as a table
+        print("\n" + "─" * 60)
+        print("  Results:")
+        print("─" * 60)
+        print(_format_table(rows))
+        print("─" * 60)
+        print(f"  [+] {len(rows)} row{'s' if len(rows) != 1 else ''} returned")
+        print("─" * 60)
     
     # ── Save conversation session ─────────────────────────────────────────
     conversation_memory = state.app_service.get_conversation_memory()
@@ -662,101 +739,65 @@ def _format_table(rows: list[dict]) -> str:
     return "\n".join([header, separator, *body_rows])
 
 
-def handle_execute_last_sql(state: SessionState) -> None:
+def handle_show_current_connection(state: SessionState) -> None:
     """
-    Option 4 — Execute Last SQL.
-
-    Guaranteed execution order (no early returns after rows are fetched):
-    ---------------------------------------------------------------
-    1. Guard checks  (no SQL stored / no engine)  → return early only here
-    2. Re-validate SQL
-    3. Execute query
-    4. Display result table
-    5. Store rows in state
-    6. Chart detection + optional chart generation
-       — prints "Chart not suitable" OR asks user — then CONTINUES regardless
-    7. Insight generation + display
-       — always runs, even if chart was skipped or failed
-    ---------------------------------------------------------------
+    Option 6 — Show Current Connection.
+    Displays detailed information about the active database connection.
     """
-    logger.info("User chose option 3: Execute Last SQL")
+    logger.info("User chose option 6: Show Current Connection")
     
-    # ── Guard 1: need a SQL query ─────────────────────────────────────────
-    sql = state.app_service.get_last_sql()
-    if not sql:
-        logger.warning("No SQL available to execute")
-        print("  No SQL available. Please choose option 3 first.")
-        return
-
-    # ── Guard 2: need a database connection ───────────────────────────────
     if not state.app_service.is_database_connected():
-        print("  No database connection. Please run option 1 first.")
+        print("\n  [x] No active database connection.")
+        saved_config = load_connection_config()
+        if saved_config:
+            print(f"\n  Last saved connection: {format_connection_summary(saved_config)}")
+            print("  Use option 1 to reconnect.")
         return
-
-    # ── Execute query ───────────────────────────────────────────────────
-    logger.info(f"Executing SQL: {sql[:100]}...")
-    print(f"\n  Executing:\n  {sql}\n")
-
-    query_context = _as_dict(state.app_service.get_last_query_context() or {})
-    if query_context.get("warnings"):
-        print("  Execution warnings:")
-        for warning in query_context["warnings"]:
-            print(f"  - {warning}")
-        print()
     
-    success, message, rows = state.app_service.execute_sql(sql, revalidate=True)
-    if not success:
-        print(f"  Execution failed: {message}")
+    db_config = state.app_service.database_service.get_db_config()
+    if not db_config:
+        print("\n  [x] No database configuration available.")
         return
-
-    if not rows:
-        print("  No rows returned.")
+    
+    print("\n" + "═" * 60)
+    print("  Current Database Connection")
+    print("═" * 60)
+    
+    db_type = db_config.get("db_type", "unknown")
+    
+    if db_type == "sqlite":
+        sqlite_path = db_config.get("sqlite_path", "")
+        print(f"  Type: SQLite")
+        print(f"  Path: {sqlite_path}")
     else:
-        # Display results as a table
-        print(_format_table(rows))
-        print(f"\n  ({len(rows)} row{'s' if len(rows) != 1 else ''} returned)")
-
-    # Chart generation (only if rows exist)
-    if rows:
-        chart_type = state.app_service.detect_chart_type(rows)
-        if chart_type is None:
-            print("\n  Chart not suitable for this result.")
-        else:
-            try:
-                answer = _input(
-                    f"\n  Generate chart for this result? "
-                    f"(detected: {chart_type}) (y/n): "
-                ).lower()
-            except (KeyboardInterrupt, EOFError):
-                print()
-                answer = "n"
-
-            if answer == "y":
-                success, message, chart_path, chart_type_result = state.app_service.generate_chart(rows, chart_type)
-                if success:
-                    print(f"  Chart saved successfully: {chart_path}")
-                else:
-                    print(f"  Chart: {message}")
-
-    # Insight generation — ask user if they want insights
-    try:
-        answer = _input(
-            "\n  Do you want to generate insights for this result? (y/n): "
-        ).lower()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        answer = "n"
-
-    if answer == "y":
-        print("\n  Insights:")
-        success, message, insights = state.app_service.generate_insights()
-        if success:
-            for insight in insights:
-                print(f"  • {insight}")
-        else:
-            print(f"  Insight generation skipped due to error: {message}")
-    else:
-        print("  Insights skipped.")
+        host = db_config.get("host", "")
+        port = db_config.get("port", "")
+        username = db_config.get("username", "")
+        database = db_config.get("database", "")
+        print(f"  Type: {db_type}")
+        print(f"  Host: {host}")
+        print(f"  Port: {port}")
+        print(f"  Username: {username}")
+        print(f"  Database: {database}")
+    
+    print("─" * 60)
+    
+    # Show KB and vector status
+    kb_ready = state.app_service.is_database_ready()
+    print(f"  Knowledge Base: {'[+] Ready' if kb_ready else '[x] Not ready'}")
+    
+    vector_status = state.app_service.get_vector_status()
+    if vector_status:
+        index_status = vector_status.get("index_status", "unknown")
+        print(f"  Vector Index: {index_status}")
+        
+        embedding = vector_status.get("embedding", {})
+        if embedding:
+            backend = embedding.get("backend", "unknown")
+            model = embedding.get("model", "unknown")
+            print(f"  Embedding: {backend} ({model})")
+    
+    print("═" * 60)
 
 
 def handle_ai_backend_settings(state: SessionState) -> None:
@@ -925,9 +966,9 @@ def handle_test_backend_connection(state: SessionState) -> tuple[bool, str]:
     
     success, message = state.app_service.test_backend_connection()
     if success:
-        print(f"  ✓ {message}")
+        print(f"  [+] {message}")
     else:
-        print(f"  ✗ {message}")
+        print(f"  [x] {message}")
     
     print("-" * 52)
     return success, message
@@ -935,7 +976,7 @@ def handle_test_backend_connection(state: SessionState) -> tuple[bool, str]:
 
 def handle_search_business_glossary(state: SessionState) -> None:
     """
-    Phase 9 — Search Business Glossary.
+    Option 5 — Search Business Glossary.
     Allows users to search for business terms and see their mappings
     to database tables and columns.
     """
@@ -944,10 +985,10 @@ def handle_search_business_glossary(state: SessionState) -> None:
     # Load the glossary using core service
     success, message, glossary = state.app_service.load_business_glossary()
     if not success:
-        print(f"  {message}")
+        print(f"  [x] {message}")
         return
     
-    print(f"\n  Business glossary loaded with {len(glossary)} terms.")
+    print(f"\n  [+] Business glossary loaded with {len(glossary)} terms.")
     
     while True:
         search_term = _input("\n  Enter search term (or 'back' to return): ").strip()
@@ -961,12 +1002,12 @@ def handle_search_business_glossary(state: SessionState) -> None:
         # Search the glossary using core service
         success, message, matches = state.app_service.search_glossary(search_term)
         if not success:
-            print(f"  {message}")
+            print(f"  [x] {message}")
             continue
         
         # Display matches
         print(f"\n  Found {len(matches)} match(es) for '{search_term}':")
-        print("-" * 52)
+        print("─" * 60)
         
         for term, term_data in matches.items():
             print(f"\n  Term: {term}")
@@ -984,10 +1025,10 @@ def handle_search_business_glossary(state: SessionState) -> None:
             example_questions = term_data.get("example_questions", [])
             if example_questions:
                 print("  Example questions:")
-                for question in example_questions:
+                for question in example_questions[:3]:
                     print(f"    • {question}")
         
-        print("-" * 52)
+        print("─" * 60)
 
 
 def handle_choice(choice: int, state: SessionState) -> None:
@@ -995,13 +1036,13 @@ def handle_choice(choice: int, state: SessionState) -> None:
     Dispatch a validated menu choice to its handler.
     Catches all unexpected exceptions so no raw traceback ever reaches the user.
     
-    Menu (CLI-only mode):
-      1) Connect Database / Auto Build KB
-      2) Ask a Question
-      3) Execute Last SQL
+    Menu:
+      1) Connect / Reuse Database
+      2) Ask Question (auto-executes safe SQL)
+      3) Rebuild Knowledge Base
       4) Semantic AI Settings
       5) Search Business Glossary
-      6) Rebuild / Refresh Knowledge Base
+      6) Show Current Connection
       7) Exit
     """
     try:
@@ -1010,13 +1051,13 @@ def handle_choice(choice: int, state: SessionState) -> None:
         elif choice == 2:
             handle_ask_question(state)
         elif choice == 3:
-            handle_execute_last_sql(state)
+            handle_rebuild_or_refresh_knowledge_base(state)
         elif choice == 4:
             handle_ai_backend_settings(state)
         elif choice == 5:
             handle_search_business_glossary(state)
         elif choice == 6:
-            handle_rebuild_or_refresh_knowledge_base(state)
+            handle_show_current_connection(state)
         elif choice == 7:
             logger.info("User chose option 7: Exit")
             # End conversation session before exit
@@ -1025,15 +1066,15 @@ def handle_choice(choice: int, state: SessionState) -> None:
                 state.app_service.get_conversation_memory().save_session()
             except Exception as exc:
                 # Log but don't block exit if session cleanup fails
-                logger.warning(f"Failed to save conversation session on exit: {exc}")
-            print("  Goodbye!")
+                logger.debug(f"Failed to save conversation session on exit: {exc}")
+            print("\n  Goodbye! ")
             sys.exit(0)
     except SystemExit:
         raise
     except Exception as exc:
         # Last-resort catch — keeps the menu loop alive and hides tracebacks.
         logger.error(f"Unexpected error in handle_choice: {exc}")
-        print(f"  Unexpected error: {exc}")
+        print(f"  [x] Unexpected error: {exc}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -1057,3 +1098,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

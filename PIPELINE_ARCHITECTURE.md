@@ -169,12 +169,13 @@ Boundary rules:
 
 The orchestration flow:
 1. `main.py` handles CLI menu display and user input
-2. `core/app_service.py` coordinates business logic across all pipelines
-3. `kb_pipeline/database_service.py` handles database connection and KB build
-4. `query_pipeline/query_pipeline.py` handles question processing and planning
-5. `sql_pipeline/question_service.py` handles SQL generation and execution
-6. `core/chart_service.py` handles chart generation
-7. `core/insight_service.py` handles insight generation (runtime disabled)
+2. `utils/config_manager.py` handles local connection configuration persistence
+3. `core/app_service.py` coordinates business logic across all pipelines
+4. `kb_pipeline/database_service.py` handles database connection and KB build
+5. `query_pipeline/query_pipeline.py` handles question processing and planning
+6. `sql_pipeline/question_service.py` handles SQL generation and execution
+7. `core/chart_service.py` handles chart generation
+8. `core/insight_service.py` handles insight generation (runtime disabled)
 
 ## Evidence Flow
 
@@ -227,6 +228,23 @@ The `core/` directory contains the main application services that orchestrate th
 - `core/ai_backend_service.py`: AI backend service for KB build only (local Ollama)
 - `core/chart_service.py`: Chart generation service
 - `core/insight_service.py`: Insight generation service (runtime disabled - AI restricted to KB enrichment)
+
+## Utility Services
+
+The `utils/` directory contains utility services used across the application:
+
+- `utils/config_manager.py`: Local connection configuration manager (stores last-used connection details in `.sqlsense/local_connection.json`)
+- `utils/file_utils.py`: JSON file utilities for save/load operations
+- `utils/logger.py`: Centralized logging configuration
+
+## CLI Features
+
+The CLI (`main.py`) provides a professional user experience with:
+
+- **Connection Reuse**: Remembers last database connection and offers to reuse it (passwords not stored)
+- **Auto-Execute**: Automatically executes validated SQL after question processing
+- **Status Indicators**: Shows real-time status for AI backend, database connection, and KB load status
+- **Clean Menu Design**: Uses ASCII box-drawing characters for a modern, clean interface
 
 ## Design Principles
 

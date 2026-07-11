@@ -73,12 +73,15 @@ SQL-Sense/
 │   ├── query_executor.py            # Safe SELECT execution
 │   └── result_service.py            # Result storage and retrieval
 ├── utils/
+│   ├── config_manager.py            # Local connection configuration manager
 │   ├── file_utils.py                # save_json / load_json
 │   └── logger.py                    # Centralized logging configuration
 ├── semantic/
 │   ├── knowledge_base.json          # Generated output (git-ignored)
 │   ├── knowledge_base.meta.json    # KB metadata (git-ignored)
 │   └── business_glossary.json       # Generated business glossary (git-ignored)
+├── .sqlsense/                       # Local configuration directory (git-ignored)
+│   └── local_connection.json        # Last-used connection details (git-ignored)
 ├── logs/
 │   └── app.log                      # Application logs (git-ignored)
 ├── output/
@@ -166,27 +169,59 @@ python main.py
 You will see:
 
 ```
-====================================================
-  AI SQL Query Generator
-====================================================
-  Backend  : local (llama3)
-  Database : not connected
-----------------------------------------------------
-  1) Connect Database / Auto Build KB
-  2) Ask a Question / Ask Business Question
-  3) Execute Last SQL
-  4) Semantic AI Settings
-  5) Search Business Glossary
-  6) Rebuild / Refresh Knowledge Base
-  7) Exit
-====================================================
+╔════════════════════════════════════════════════════════════╗
+║                    SQLSense - AI SQL Generator             ║
+╠════════════════════════════════════════════════════════════╣
+║  Backend    : local (llama3) ✓                             ║
+║  Database   : Not connected                                 ║
+║  KB Status  : Not loaded                                    ║
+╠════════════════════════════════════════════════════════════╣
+║  1. Connect / Reuse Database                                ║
+║  2. Ask Question                                            ║
+║  3. Rebuild Knowledge Base                                  ║
+║  4. Semantic AI Settings                                    ║
+║  5. Search Business Glossary                                ║
+║  6. Show Current Connection                                 ║
+║  7. Exit                                                    ║
+╚════════════════════════════════════════════════════════════╝
 ```
+
+### CLI Features
+
+**Connection Reuse**: The CLI remembers your last database connection and offers to reuse it on subsequent runs. Connection details (host, port, username, database) are saved locally in `.sqlsense/local_connection.json` (git-ignored). Passwords are never stored and must be entered each time.
+
+**Auto-Execute Validated SQL**: When you ask a question, the CLI automatically:
+1. Generates deterministic SQL based on the query planner
+2. Validates the SQL for safety (SELECT-only, no dangerous keywords)
+3. Executes it automatically if validation passes
+4. Shows both the SQL and results
+
+This eliminates the need to manually execute queries through a separate menu option. Only safe, validated SELECT queries are auto-executed.
+
+**Status Indicators**: The menu displays real-time status for:
+- AI backend availability (✓ or ✗)
+- Current database connection
+- Knowledge base load status with table count
 
 ---
 
 ## How to Connect a Database from the CLI
 
-Select **option 1**. The tool will ask for:
+Select **option 1** from the main menu.
+
+If you have previously connected to a database, the CLI will offer to reuse the last connection:
+
+```
+═══════════════════════════════════════════════════════════
+  Last connection found:
+  mysql://root@localhost:3306/mydb
+───────────────────────────────────────────────────────────
+  Reuse this connection? [Y/n]:
+```
+
+Press **Enter** to reuse the connection (you'll still need to enter the password), or type **n** to enter new connection details.
+
+If this is your first connection or you chose to enter new details, the tool will ask for:
 
 ```
   Supported database type: mysql
@@ -243,27 +278,46 @@ Select **option 2**. Type a plain-English question:
   Enter your question: Show me the top 5 customers by total order value
 ```
 
-The tool will:
-- Load the knowledge base for context
-- Normalize the question and detect intent
-- Retrieve relevant context from business glossary and vector index
-- Use deterministic SQL generation based on the query planner
-- Validate the generated SQL for safety
-- Store and display it if safe
+The tool will automatically:
+1. Load the knowledge base for context
+2. Normalize the question and detect intent
+3. Retrieve relevant context from business glossary and vector index
+4. Use deterministic SQL generation based on the query planner
+5. Validate the generated SQL for safety
+6. **Execute the SQL automatically** if validation passes
+7. Display both the SQL and results
 
 **Note:** Complex queries requiring joins, aggregations, or business reasoning that cannot be handled deterministically will return a clean message: "Cannot plan safely - missing required evidence."
 
+Example output:
+
 ```
+  ═══════════════════════════════════════════════════════════
   Generated SQL:
+  ───────────────────────────────────────────────────────────
   SELECT c.name, SUM(o.total_amount) AS total
   FROM customers c
   JOIN orders o ON c.id = o.customer_id
   GROUP BY c.id
   ORDER BY total DESC
   LIMIT 5
+  ═══════════════════════════════════════════════════════════
+  
+  Executing query...
+  
+  Results (5 rows):
+  ┌──────────────────┬──────────┐
+  │ name             │ total    │
+  ├──────────────────┼──────────┤
+  │ Acme Corp        │ 125000   │
+  │ TechStart Inc    │ 98000    │
+  │ Global Solutions │ 87500    │
+  │ Beta Systems     │ 76000    │
+  │ Alpha Industries │ 65000    │
+  └──────────────────┴──────────┘
 ```
 
-Then select **option 3** to execute the same saved SQL.
+The SQL is automatically executed for you - no need for a separate "Execute Last SQL" option.
 
 ---
 

@@ -13,6 +13,7 @@ It must not generate SQL directly or call SQL runtime orchestration.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import os
 from typing import Any, Dict, Optional
 
 from query_pipeline.context_retriever import retrieve_context
@@ -162,6 +163,8 @@ class QueryPipeline:
                 retrieved_context=retrieved_context,
             )
         except Exception as exc:
+            if str(os.getenv("SQLSENSE_DEBUG_RERAISE_PLANNER", "")).strip().lower() in {"1", "true", "yes", "on"}:
+                raise
             return {
                 "normalized_question": question,
                 "intent": dict(intent or {}),

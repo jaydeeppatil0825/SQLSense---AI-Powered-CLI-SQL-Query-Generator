@@ -1,7 +1,7 @@
 import importlib
 from pathlib import Path
 
-from core.query_pipeline import QueryPipeline
+from query_pipeline.query_pipeline import QueryPipeline
 from core.question_service import QuestionService
 from query_pipeline.query_planner import build_query_context
 
@@ -95,9 +95,9 @@ def test_query_pipeline_returns_structured_debug_fields_without_calling_question
         retrieval_call.update(kwargs)
         return retrieved_context
 
-    monkeypatch.setattr("core.query_pipeline.build_intent", lambda *args, **kwargs: built_intent)
-    monkeypatch.setattr("core.query_pipeline.retrieve_context", fake_retrieve_context)
-    monkeypatch.setattr("core.query_pipeline.build_query_context", lambda *args, **kwargs: preview_context)
+    monkeypatch.setattr("query_pipeline.query_pipeline.build_intent", lambda *args, **kwargs: built_intent)
+    monkeypatch.setattr("query_pipeline.query_pipeline.retrieve_context", fake_retrieve_context)
+    monkeypatch.setattr("query_pipeline.query_pipeline.build_query_context", lambda *args, **kwargs: preview_context)
 
     result = pipeline.run(
         question="  show   all accounts ",
@@ -183,9 +183,9 @@ def test_query_pipeline_reports_cannot_plan_safely_without_calling_question_serv
         "can_plan": False,
     }
 
-    monkeypatch.setattr("core.query_pipeline.build_intent", lambda *args, **kwargs: built_intent)
-    monkeypatch.setattr("core.query_pipeline.retrieve_context", lambda *args, **kwargs: retrieved_context)
-    monkeypatch.setattr("core.query_pipeline.build_query_context", lambda *args, **kwargs: failed_context)
+    monkeypatch.setattr("query_pipeline.query_pipeline.build_intent", lambda *args, **kwargs: built_intent)
+    monkeypatch.setattr("query_pipeline.query_pipeline.retrieve_context", lambda *args, **kwargs: retrieved_context)
+    monkeypatch.setattr("query_pipeline.query_pipeline.build_query_context", lambda *args, **kwargs: failed_context)
 
     result = pipeline.run(
         question="show all accounts",
@@ -201,6 +201,28 @@ def test_query_pipeline_reports_cannot_plan_safely_without_calling_question_serv
     assert result.route == "cannot_plan_safely"
     assert result.route_reason == "table evidence is missing or ambiguous"
     assert result.query_shape == "unknown"
+
+
+def test_query_pipeline_debug_reraises_planner_exception(monkeypatch):
+    pipeline = QueryPipeline(_FailingQuestionService())
+    built_intent = {"intent_type": "list"}
+    retrieved_context = {"retrieval_sources": []}
+
+    monkeypatch.setenv("SQLSENSE_DEBUG_RERAISE_PLANNER", "1")
+    monkeypatch.setattr("query_pipeline.query_pipeline.build_intent", lambda *args, **kwargs: built_intent)
+    monkeypatch.setattr("query_pipeline.query_pipeline.retrieve_context", lambda *args, **kwargs: retrieved_context)
+
+    def fail_planner(*args, **kwargs):
+        raise RuntimeError("planner boom")
+
+    monkeypatch.setattr("query_pipeline.query_pipeline.build_query_context", fail_planner)
+
+    try:
+        pipeline.run("show accounts", KNOWLEDGE_BASE)
+    except RuntimeError as exc:
+        assert str(exc) == "planner boom"
+    else:
+        raise AssertionError("expected planner exception to be re-raised")
 
 
 def test_pipeline_architecture_document_exists():

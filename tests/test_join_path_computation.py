@@ -3,12 +3,12 @@ Test dynamic join path computation for complex multi-table queries.
 """
 
 import pytest
-from core.query_planner import (
+from query_pipeline.query_planner import _add_missing_tables_for_columns
+from query_pipeline.planner.phase7_bfs_join_resolver import (
     _build_fk_relationship_graph,
     _find_shortest_path,
     _compute_join_paths,
     _find_bridge_tables,
-    _add_missing_tables_for_columns,
 )
 
 
