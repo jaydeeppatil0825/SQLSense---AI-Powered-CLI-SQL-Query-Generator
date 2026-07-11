@@ -323,7 +323,7 @@ Enter your question:   show orders with order amount greater than 10000
 └────────────────────────────────────────────────────────────────────────────┘
 
 🧠 Business Question
-   show paid payments
+ 
 
 🧾 Expected SQL / Safe Behavior
    SELECT payment_id, order_id, payment_date, payment_method, payment_status, payment_amount FROM payments WHERE payment_status = 'Paid' LIMIT 50;

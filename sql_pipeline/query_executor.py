@@ -7,7 +7,12 @@ from sqlalchemy import text
 from sql_pipeline.sql_validator import validate_sql
 
 
-def execute_query(sql: str, engine, knowledge_base: dict | None = None) -> list[dict]:
+def execute_query(
+    sql: str,
+    engine,
+    knowledge_base: dict | None = None,
+    selected_join_path: dict | None = None,
+) -> list[dict]:
     """Validate and execute a read-only SELECT query using a SQLAlchemy engine."""
     is_valid, reason = validate_sql(sql)
     if not is_valid:
@@ -19,7 +24,11 @@ def execute_query(sql: str, engine, knowledge_base: dict | None = None) -> list[
     # If knowledge_base provided, also run structure validation.
     if knowledge_base:
         from sql_pipeline.sql_validator import validate_sql_structure
-        struct_ok, struct_reason = validate_sql_structure(sql, knowledge_base)
+        struct_ok, struct_reason = validate_sql_structure(
+            sql,
+            knowledge_base,
+            selected_join_path=selected_join_path,
+        )
         if not struct_ok:
             raise ValueError(f"SQL structure invalid: {struct_reason}")
 

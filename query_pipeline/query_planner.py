@@ -52,6 +52,7 @@ from query_pipeline.planner.confidence import (
     _has_close_role_ambiguity,
 )
 from query_pipeline.planner.having_resolver import _selected_having_for_contract
+from query_pipeline.planner.phase7_bfs_join_resolver import resolve_safe_multi_hop_path
 from query_pipeline.planner.join_resolver import (
     _DIMENSION_SEMANTIC_TYPES,
     _GENERIC_ROLE_TERMS,
@@ -1152,7 +1153,8 @@ def _build_query_context_from_retrieved_context(
     joined_aggregate_result = _apply_joined_aggregate_contract(normalized_result, knowledge_base)
     if joined_aggregate_result is not normalized_result:
         return joined_aggregate_result
-    return _apply_join_lookup_contract(normalized_result, knowledge_base)
+    join_lookup_result = _apply_join_lookup_contract(normalized_result, knowledge_base)
+    return _apply_multi_hop_join_lookup_contract(join_lookup_result, knowledge_base)
 
 
 def _resolve_metric_with_modifier(
@@ -1171,6 +1173,178 @@ def _resolve_metric_with_modifier(
         if status == "ambiguous":
             return None, None, "ambiguous"
     return None, None, "missing"
+
+
+def _apply_multi_hop_join_lookup_contract(
+    context: dict[str, Any],
+    knowledge_base: dict[str, Any],
+) -> dict[str, Any]:
+    intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
+    lookup = dict(intent.get("join_lookup_request") or {})
+    if (
+        not lookup.get("requested")
+        or context.get("selected_join_path")
+        or context.get("route_recommendation") == "deterministic_sql_required"
+        or intent.get("needs_aggregation")
+        or intent.get("needs_grouping")
+    ):
+        return context
+
+    retrieved = context.get("retrieved_context") if isinstance(context.get("retrieved_context"), dict) else {}
+    retrieved_tables = [dict(entry) for entry in (retrieved.get("matched_tables") or []) if isinstance(entry, dict)]
+    retrieved_columns = [dict(entry) for entry in (retrieved.get("matched_columns") or []) if isinstance(entry, dict)]
+    base_phrase = str(lookup.get("base_entity_phrase") or intent.get("target_entity_phrase") or "").strip()
+    base_table, base_status = _resolve_join_table(base_phrase, knowledge_base, retrieved_tables)
+    if base_status != "resolved" or not base_table:
+        return context
+
+    target_tables: set[str] = set()
+    related_phrase = str(lookup.get("related_request_phrase") or "").strip()
+    if related_phrase:
+        target_table, target_status = _resolve_join_table(related_phrase, knowledge_base, retrieved_tables)
+        if target_status == "resolved" and target_table:
+            target_tables.add(target_table)
+    for phrase in lookup.get("requested_output_fields") or []:
+        field, status = _resolve_join_output_field(str(phrase), knowledge_base, retrieved_columns)
+        if status == "resolved" and field and str(field.get("table") or "") != base_table:
+            target_tables.add(str(field.get("table") or ""))
+
+    target_tables.discard(base_table)
+    if len(target_tables) != 1:
+        return context
+    target_table = next(iter(target_tables))
+
+    graph = build_relationship_graph(knowledge_base, infer_relationships=False)
+    result = resolve_safe_multi_hop_path(
+        base_table=base_table,
+        target_table=target_table,
+        relationship_graph=graph,
+        schema=knowledge_base,
+        max_depth=2,
+    )
+    if result["status"] != "unique_safe_path":
+        planned = dict(context)
+        planned.update(
+            {
+                "query_shape": "joined_lookup",
+                "route": "cannot_plan_safely",
+                "route_recommendation": "cannot_plan_safely",
+                "route_reason": f"{result['status']}: {result['reason']}",
+                "planner_reason": f"{result['status']}: {result['reason']}",
+                "can_plan": False,
+                "selected_join_path": None,
+                "missing_evidence": list(dict.fromkeys([*(planned.get("missing_evidence") or []), result["status"]])),
+            }
+        )
+        return planned
+    if len(result.get("path") or []) != 2:
+        return context
+
+    selected_join_path = {
+        "base_table": base_table,
+        "joined_tables": result["tables"][1:],
+        "edges": result["path"],
+        "path_source": "relationship_graph",
+        "ambiguity_status": "resolved",
+    }
+    output_columns = [
+        output
+        for table_name in result["tables"]
+        for output in _all_table_outputs(table_name, knowledge_base, "multi_hop_joined_lookup_projection")
+    ]
+    selected_tables = [
+        {
+            "table": table_name,
+            "confidence": 1.0,
+            "selected_columns": [
+                {"column": output["column"], "confidence": 1.0, "reason": output["source"]}
+                for output in output_columns
+                if output["table"] == table_name
+            ],
+        }
+        for table_name in result["tables"]
+    ]
+    resolved_limit = intent.get("limit") if intent.get("limit") is not None else 50
+    planned = dict(context)
+    planned.update(
+        {
+            "query_shape": "joined_lookup",
+            "route": "deterministic_sql_required",
+            "route_recommendation": "deterministic_sql_required",
+            "route_reason": "joined lookup can be generated from one safe two-edge Relationship Graph path",
+            "planner_reason": "joined lookup can be generated from one safe two-edge Relationship Graph path",
+            "can_plan": True,
+            "selected_tables": selected_tables,
+            "selected_join_path": selected_join_path,
+            "selected_relationship_path": selected_join_path,
+            "selected_table_names": result["tables"],
+            "selected_knowledge_base": {
+                table_name: deepcopy(knowledge_base[table_name])
+                for table_name in result["tables"]
+            },
+            "selected_columns": list(output_columns),
+            "selected_output_columns": list(output_columns),
+            "join_paths": [selected_join_path],
+            "limit": resolved_limit,
+            "missing_evidence": [],
+            "ambiguities": [],
+            "ambiguity_details": [],
+        }
+    )
+    clause_plan = dict(planned.get("clause_plan") or {})
+    clause_plan["selected_join_path"] = selected_join_path
+    clause_plan["clause_shape"] = "joined_lookup"
+    clause_plan["limit"] = resolved_limit
+    clause_plan["requires"] = {
+        "aggregate": False,
+        "metric": False,
+        "dimension": False,
+        "where": bool(planned.get("selected_filters")),
+        "having": False,
+        "order_by": False,
+        "limit": True,
+        "join": True,
+        "requested_fields": True,
+        "selected_output_columns": True,
+    }
+    clause_plan["decision_path"] = [
+        {
+            "node": node_name,
+            "status": "not_required" if node_name == "where" and not planned.get("selected_filters") else "resolved",
+            "reason": (
+                "no row-level filter was requested"
+                if node_name == "where" and not planned.get("selected_filters")
+                else f"{node_name.replace('_', ' ')} resolved from deterministic evidence"
+            ),
+        }
+        for node_name in (
+            "unsafe_check",
+            "table_scope",
+            "requested_fields",
+            "join_need",
+            "relationship_graph_lookup",
+            "safe_join_path",
+            "ambiguity_check",
+            "where",
+            "selected_output_columns",
+            "route",
+        )
+    ]
+    planned["clause_plan"] = clause_plan
+    planned["plan"] = {
+        **dict(planned.get("plan") or {}),
+        "limit": resolved_limit,
+    }
+    planned["complex_sql_plan"] = {
+        "query_shape": "joined_lookup",
+        "selected_tables": selected_tables,
+        "selected_columns": list(output_columns),
+        "selected_filters": list(planned.get("selected_filters") or []),
+        "selected_join_path": selected_join_path,
+        "limit": resolved_limit,
+        "route_recommendation": "deterministic_sql_required",
+    }
+    return planned
 
 
 def _normalize_planner_output(

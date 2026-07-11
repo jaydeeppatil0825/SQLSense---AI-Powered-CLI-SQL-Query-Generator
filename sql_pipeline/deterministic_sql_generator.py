@@ -183,18 +183,21 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
         selected_outputs = [
             entry for entry in (context.get("selected_output_columns") or []) if isinstance(entry, dict)
         ]
+        joined_tables = list((selected_path or {}).get("joined_tables") or []) if isinstance(selected_path, dict) else []
+        edges = list((selected_path or {}).get("edges") or []) if isinstance(selected_path, dict) else []
+        path_table_count = 1 + len(joined_tables)
         if (
-            len(selected_tables) != 2
-            or not isinstance(selected_path, dict)
-            or len(list(selected_path.get("joined_tables") or [])) != 1
-            or len(list(selected_path.get("edges") or [])) != 1
+            not isinstance(selected_path, dict)
+            or len(joined_tables) not in {1, 2}
+            or len(edges) != len(joined_tables)
+            or (selected_tables and len(selected_tables) != path_table_count)
         ):
             return DeterministicCapabilityResult(
                 status="cannot_plan_safely",
                 query_shape="joined_lookup",
                 supported_now=True,
                 blocked_by=["selected_join_path_missing"],
-                reason="joined lookup requires exactly two tables and one planner-selected graph edge",
+                reason="selected_join_path_invalid",
             )
         if not selected_outputs:
             return DeterministicCapabilityResult(
@@ -1232,6 +1235,36 @@ def _resolve_join_filter_clauses(
     return clauses, conjunctions, filter_columns, ""
 
 
+def _validate_joined_lookup_path(path_tables: list[str], edges: list[dict[str, Any]], knowledge_base: dict[str, Any]) -> str:
+    if len(path_tables) not in {2, 3} or len(edges) != len(path_tables) - 1:
+        return "selected_join_path_invalid"
+    for table_name in path_tables:
+        if not _SAFE_IDENTIFIER_RE.fullmatch(table_name) or table_name not in knowledge_base:
+            return "join_table_not_in_schema"
+    for index, edge in enumerate(edges):
+        from_table = str(edge.get("from_table") or "")
+        to_table = str(edge.get("to_table") or "")
+        from_column = str(edge.get("from_column") or "")
+        to_column = str(edge.get("to_column") or "")
+        if edge.get("safe_for_planner") is not True:
+            return "selected_join_path_not_authorized"
+        if from_table != path_tables[index] or to_table != path_tables[index + 1]:
+            return "selected_join_path_order_invalid"
+        if not all(_SAFE_IDENTIFIER_RE.fullmatch(value) for value in (from_table, to_table, from_column, to_column)):
+            return "selected_join_path_invalid"
+        if from_column not in _schema_column_names(knowledge_base, from_table) or to_column not in _schema_column_names(knowledge_base, to_table):
+            return "join_edge_not_in_schema"
+    return ""
+
+
+def _schema_column_names(knowledge_base: dict[str, Any], table_name: str) -> set[str]:
+    return {
+        str(column.get("name") or "")
+        for column in knowledge_base.get(table_name, {}).get("columns", []) or []
+        if str(column.get("name") or "")
+    }
+
+
 def _build_joined_lookup_plan(
     *,
     query_context: dict[str, Any],
@@ -1250,21 +1283,18 @@ def _build_joined_lookup_plan(
     base_table = str(selected_path.get("base_table") or "").strip()
     joined_tables = [str(value).strip() for value in (selected_path.get("joined_tables") or [])]
     edges = [dict(edge) for edge in (selected_path.get("edges") or []) if isinstance(edge, dict)]
-    if len(joined_tables) != 1 or len(edges) != 1:
+    path_tables = [base_table, *joined_tables]
+    if len(joined_tables) not in {1, 2} or len(edges) != len(joined_tables) or len(set(path_tables)) != len(path_tables):
         return DeterministicSqlPlan(
             query_shape="joined_lookup",
             status="cannot_plan_safely",
             supported_now=True,
             missing_evidence=["selected_join_path_invalid"],
-            route_reason="joined lookup requires one joined table and one direct graph edge",
+            route_reason="selected_join_path_invalid",
         )
-    joined_table = joined_tables[0]
-    edge = edges[0]
     if (
         selected_path.get("path_source") != "relationship_graph"
         or selected_path.get("ambiguity_status") != "resolved"
-        or edge.get("safe_for_planner") is not True
-        or {str(edge.get("from_table") or ""), str(edge.get("to_table") or "")} != {base_table, joined_table}
     ):
         return DeterministicSqlPlan(
             query_shape="joined_lookup",
@@ -1273,21 +1303,15 @@ def _build_joined_lookup_plan(
             missing_evidence=["selected_join_path_not_authorized"],
             route_reason="selected join path is not an authorized Relationship Graph edge",
         )
-    for table_name, column_name in (
-        (str(edge.get("from_table") or ""), str(edge.get("from_column") or "")),
-        (str(edge.get("to_table") or ""), str(edge.get("to_column") or "")),
-    ):
-        if table_name not in knowledge_base or column_name not in {
-            str(column.get("name") or "")
-            for column in knowledge_base[table_name].get("columns", []) or []
-        }:
-            return DeterministicSqlPlan(
-                query_shape="joined_lookup",
-                status="cannot_plan_safely",
-                supported_now=True,
-                missing_evidence=["join_edge_not_in_schema"],
-                route_reason="selected join edge references an unknown schema column",
-            )
+    path_reason = _validate_joined_lookup_path(path_tables, edges, knowledge_base)
+    if path_reason:
+        return DeterministicSqlPlan(
+            query_shape="joined_lookup",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=[path_reason],
+            route_reason=path_reason,
+        )
 
     outputs = [
         dict(entry) for entry in (query_context.get("selected_output_columns") or []) if isinstance(entry, dict)
@@ -1299,7 +1323,7 @@ def _build_joined_lookup_plan(
         expression = str(output.get("expression") or "")
         alias = str(output.get("alias") or "")
         if (
-            table_name not in {base_table, joined_table}
+            table_name not in set(path_tables)
             or expression != f"{table_name}.{column_name}"
             or alias != f"{table_name}__{column_name}"
             or column_name not in {
@@ -1319,7 +1343,7 @@ def _build_joined_lookup_plan(
     where_clauses, where_conjunctions, filter_columns, filter_reason = _resolve_join_filter_clauses(
         query_context,
         knowledge_base,
-        {base_table, joined_table},
+        set(path_tables),
     )
     if filter_reason:
         return DeterministicSqlPlan(
@@ -1335,8 +1359,8 @@ def _build_joined_lookup_plan(
         status="ready",
         supported_now=True,
         base_table=base_table,
-        joins=[{"table": joined_table, "edge": edge}],
-        required_joins=[edge],
+        joins=[{"table": edge["to_table"], "edge": edge} for edge in edges],
+        required_joins=edges,
         selected_join_path=dict(selected_path),
         selected_output_columns=outputs,
         select_items=select_items,

@@ -507,6 +507,57 @@ def _relationship_signature(edge: dict[str, Any]) -> tuple[tuple[str, str], tupl
     )
 
 
+def _join_on_equalities(
+    sql: str,
+    alias_to_table: dict[str, str],
+) -> tuple[bool, str, list[tuple[str, str, str, str]]]:
+    tokens = _tokenize_sql(sql)
+    clause_boundaries = {"WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", ";"}
+    join_boundaries = {"JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "NATURAL"}
+    equalities: list[tuple[str, str, str, str]] = []
+
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx].upper() != "JOIN":
+            idx += 1
+            continue
+
+        cursor = idx + 1
+        while cursor < len(tokens):
+            upper = tokens[cursor].upper()
+            if upper == "ON":
+                break
+            if upper == "USING":
+                return False, "JOIN USING is not allowed; an explicit graph-backed ON condition is required.", []
+            if upper in clause_boundaries or upper in join_boundaries:
+                return False, "JOIN is missing an ON condition.", []
+            cursor += 1
+        if cursor >= len(tokens) or tokens[cursor].upper() != "ON":
+            return False, "JOIN is missing an ON condition.", []
+
+        condition_start = cursor + 1
+        condition_end = condition_start
+        while condition_end < len(tokens):
+            upper = tokens[condition_end].upper()
+            if upper in clause_boundaries or upper in join_boundaries:
+                break
+            condition_end += 1
+        condition = tokens[condition_start:condition_end]
+        if len(condition) != 7 or condition[1] != "." or condition[3] != "=" or condition[5] != ".":
+            return False, "JOIN ON must be exactly one qualified column equality from Relationship Graph evidence.", []
+        left_alias, left_column, right_alias, right_column = condition[0], condition[2], condition[4], condition[6]
+        if not all(_is_identifier(value) for value in (left_alias, left_column, right_alias, right_column)):
+            return False, "JOIN ON must be exactly one qualified column equality from Relationship Graph evidence.", []
+        left_table = alias_to_table.get(_normalize_identifier(left_alias).lower())
+        right_table = alias_to_table.get(_normalize_identifier(right_alias).lower())
+        if not left_table or not right_table:
+            return False, "JOIN ON references an unknown table alias.", []
+        equalities.append((left_table, _normalize_identifier(left_column), right_table, _normalize_identifier(right_column)))
+        idx = condition_end
+
+    return True, "JOIN ON equalities are valid.", equalities
+
+
 def _validate_join_relationship_evidence(
     sql: str,
     knowledge_base: dict[str, Any],
@@ -534,7 +585,54 @@ def _validate_join_relationship_evidence(
     ):
         return False, "SELECT * is not allowed for deterministic joined SQL."
     if join_count != 1 or len(set(referenced_tables)) != 2:
-        return False, "Deterministic joined SQL permits exactly two tables and one direct INNER JOIN."
+        if join_count != 2:
+            return False, "Deterministic joined SQL permits at most two ordered INNER JOIN clauses."
+        if selected_join_path is None:
+            return False, "Multi-hop joined SQL requires a planner-selected Relationship Graph path."
+        if len(referenced_tables) != 3 or len(set(referenced_tables)) != 3:
+            return False, "Multi-hop joined SQL requires exactly three unique tables."
+        path_tables = [
+            str(selected_join_path.get("base_table") or ""),
+            *[str(value) for value in (selected_join_path.get("joined_tables") or [])],
+        ]
+        selected_edges = [
+            edge for edge in (selected_join_path.get("edges") or []) if isinstance(edge, dict)
+        ]
+        if (
+            selected_join_path.get("path_source") != "relationship_graph"
+            or selected_join_path.get("ambiguity_status") != "resolved"
+            or len(path_tables) != 3
+            or len(set(path_tables)) != 3
+            or len(selected_edges) != 2
+            or any(edge.get("safe_for_planner") is not True for edge in selected_edges)
+            or path_tables != referenced_tables
+        ):
+            return False, "Planner-selected multi-hop join path does not match SQL table order."
+        if re.search(r"\b(?:CROSS|NATURAL|LEFT|RIGHT|FULL|OUTER)\s+(?:OUTER\s+)?JOIN\b", sql, re.IGNORECASE):
+            return False, "Only INNER JOIN is allowed for deterministic joined SQL."
+        if re.search(r"\bJOIN\b.*?\bUSING\b", sql, re.IGNORECASE | re.DOTALL):
+            return False, "JOIN USING is not allowed; an explicit graph-backed ON condition is required."
+
+        equality_ok, equality_reason, sql_edges = _join_on_equalities(sql, alias_to_table)
+        if not equality_ok:
+            return False, equality_reason
+        if len(sql_edges) != 2:
+            return False, "Multi-hop joined SQL requires exactly two JOIN ON equalities."
+
+        graph = build_relationship_graph(knowledge_base, infer_relationships=False)
+        for index, (left_table, left_column, right_table, right_column) in enumerate(sql_edges):
+            expected_tables = {path_tables[index], path_tables[index + 1]}
+            if {left_table, right_table} != expected_tables:
+                return False, "JOIN ON condition does not match selected_join_path table order."
+            sql_signature = _canonical_join_edge(left_table, left_column, right_table, right_column)
+            if sql_signature != _relationship_signature(selected_edges[index]):
+                return False, "JOIN ON condition does not match selected_join_path evidence."
+            graph_edges = find_safe_direct_join_relationships(graph, path_tables[index], path_tables[index + 1])
+            if len(graph_edges) != 1:
+                return False, "Relationship Graph does not expose one unambiguous safe direct edge for this JOIN."
+            if sql_signature != _relationship_signature(graph_edges[0]):
+                return False, "JOIN ON condition does not match Relationship Graph evidence."
+        return True, "JOIN matches persisted Relationship Graph evidence."
     if re.search(r"\b(?:CROSS|NATURAL|LEFT|RIGHT|FULL|OUTER)\s+(?:OUTER\s+)?JOIN\b", sql, re.IGNORECASE):
         return False, "Only INNER JOIN is allowed for deterministic joined SQL."
     if re.search(r"\bJOIN\b.*?\bUSING\b", sql, re.IGNORECASE | re.DOTALL):

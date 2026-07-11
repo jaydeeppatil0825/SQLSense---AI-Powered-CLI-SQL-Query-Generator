@@ -1813,7 +1813,12 @@ class QuestionService:
             "error": error,
         }
 
-    def validate_sql(self, sql: str, knowledge_base: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
+    def validate_sql(
+        self,
+        sql: str,
+        knowledge_base: Optional[Dict[str, Any]] = None,
+        selected_join_path: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str]:
         """
         Validate SQL for safety and structure.
         
@@ -1831,7 +1836,11 @@ class QuestionService:
         
         # Validate structure if knowledge base is available
         if knowledge_base:
-            struct_ok, struct_reason = validate_sql_structure(sql, knowledge_base)
+            struct_ok, struct_reason = validate_sql_structure(
+                sql,
+                knowledge_base,
+                selected_join_path=selected_join_path,
+            )
             if not struct_ok:
                 return False, struct_reason
         

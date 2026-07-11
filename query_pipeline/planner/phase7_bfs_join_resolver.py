@@ -12,6 +12,158 @@ from typing import Any
 
 from kb_pipeline.schema_facts import resolved_semantic_type
 
+PHASE7A_STATUSES = {
+    "unique_safe_path",
+    "no_safe_path",
+    "ambiguous_path",
+    "unsupported_depth",
+    "invalid_graph_edge",
+}
+
+
+def resolve_safe_multi_hop_path(
+    *,
+    base_table: str,
+    target_table: str,
+    relationship_graph: dict[str, dict[str, Any]],
+    schema: dict[str, Any],
+    max_depth: int = 2,
+) -> dict[str, Any]:
+    """Resolve one safe graph-authorized path without integrating it into planning."""
+    if base_table not in schema or target_table not in schema:
+        return _phase7a_result("invalid_graph_edge", "base or target table is missing from schema")
+    if base_table == target_table:
+        return _phase7a_result("unique_safe_path", "base and target are the same table", path=[], tables=[base_table])
+
+    queue = deque([(base_table, [base_table], [])])
+    shortest_paths: list[list[dict[str, Any]]] = []
+    over_depth_seen = False
+    invalid_edge_seen = False
+
+    while queue:
+        current, tables, path = queue.popleft()
+        if len(path) > max_depth:
+            over_depth_seen = True
+            continue
+        if shortest_paths and len(path) >= len(shortest_paths[0]):
+            continue
+
+        for edge in _safe_sorted_edges(relationship_graph, current):
+            next_table = str(edge.get("to_table") or "")
+            if not next_table or next_table in tables:
+                continue
+            normalized_edge = _normalize_traversed_edge(current, edge)
+            if not _edge_columns_exist(normalized_edge, schema):
+                invalid_edge_seen = True
+                continue
+
+            next_path = [*path, normalized_edge]
+            if len(next_path) > max_depth:
+                over_depth_seen = True
+                continue
+            if next_table == target_table:
+                if not shortest_paths or len(next_path) < len(shortest_paths[0]):
+                    shortest_paths = [next_path]
+                elif _path_signature(next_path) not in {_path_signature(item) for item in shortest_paths}:
+                    shortest_paths.append(next_path)
+                continue
+            queue.append((next_table, [*tables, next_table], next_path))
+
+    if len(shortest_paths) == 1:
+        path = shortest_paths[0]
+        return _phase7a_result(
+            "unique_safe_path",
+            "one safe relationship graph path resolved",
+            path=path,
+            tables=_tables_for_path(base_table, path),
+        )
+    if len(shortest_paths) > 1:
+        return _phase7a_result("ambiguous_path", "multiple equally short safe relationship graph paths exist")
+    if invalid_edge_seen:
+        return _phase7a_result("invalid_graph_edge", "relationship graph edge references missing schema columns")
+    if over_depth_seen:
+        return _phase7a_result("unsupported_depth", "safe path exceeds maximum supported depth")
+    return _phase7a_result("no_safe_path", "no safe relationship graph path exists")
+
+
+def _phase7a_result(status: str, reason: str, *, path: list[dict[str, Any]] | None = None, tables: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "status": status,
+        "resolved": status == "unique_safe_path",
+        "reason": reason,
+        "path": path or [],
+        "tables": tables or [],
+        "edge_count": len(path or []),
+        "path_source": "relationship_graph",
+    }
+
+
+def _safe_sorted_edges(graph: dict[str, dict[str, Any]], table_name: str) -> list[dict[str, Any]]:
+    edges = [
+        dict(edge)
+        for edge in graph.get(table_name, {}).get("edges", []) or []
+        if edge.get("safe_for_planner") is True
+    ]
+    return sorted(
+        edges,
+        key=lambda edge: (
+            str(edge.get("to_table") or ""),
+            str(edge.get("authoritative_from_table") or ""),
+            str(edge.get("authoritative_from_column") or edge.get("from_column") or ""),
+            str(edge.get("authoritative_to_table") or ""),
+            str(edge.get("authoritative_to_column") or edge.get("to_column") or ""),
+        ),
+    )
+
+
+def _normalize_traversed_edge(current_table: str, edge: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "from_table": current_table,
+        "from_column": str(edge.get("from_column") or ""),
+        "to_table": str(edge.get("to_table") or ""),
+        "to_column": str(edge.get("to_column") or ""),
+        "authoritative_from_table": str(edge.get("authoritative_from_table") or current_table),
+        "authoritative_from_column": str(edge.get("authoritative_from_column") or edge.get("from_column") or ""),
+        "authoritative_to_table": str(edge.get("authoritative_to_table") or edge.get("to_table") or ""),
+        "authoritative_to_column": str(edge.get("authoritative_to_column") or edge.get("to_column") or ""),
+        "relationship_type": edge.get("relationship_type"),
+        "source": edge.get("source"),
+        "confidence": float(edge.get("confidence") or 0.0),
+        "safe_for_planner": True,
+        "evidence": list(edge.get("evidence") or []),
+        "evidence_reasons": list(edge.get("evidence_reasons") or []),
+    }
+
+
+def _edge_columns_exist(edge: dict[str, Any], schema: dict[str, Any]) -> bool:
+    return (
+        edge["from_column"] in _schema_columns(schema, edge["from_table"])
+        and edge["to_column"] in _schema_columns(schema, edge["to_table"])
+    )
+
+
+def _schema_columns(schema: dict[str, Any], table_name: str) -> set[str]:
+    return {str(column.get("name") or "") for column in schema.get(table_name, {}).get("columns", []) or []}
+
+
+def _path_signature(path: list[dict[str, Any]]) -> tuple[tuple[str, str, str, str], ...]:
+    return tuple(
+        (
+            str(edge.get("from_table") or ""),
+            str(edge.get("from_column") or ""),
+            str(edge.get("to_table") or ""),
+            str(edge.get("to_column") or ""),
+        )
+        for edge in path
+    )
+
+
+def _tables_for_path(base_table: str, path: list[dict[str, Any]]) -> list[str]:
+    tables = [base_table]
+    for edge in path:
+        tables.append(str(edge.get("to_table") or ""))
+    return tables
+
 
 def _build_fk_relationship_graph(knowledge_base: dict) -> dict:
     """Build a graph of FK relationships between tables for join path computation."""

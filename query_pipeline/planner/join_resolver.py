@@ -1340,6 +1340,14 @@ def _apply_join_lookup_contract(
         or intent.get("source_scope_phrase")
         or ""
     ).strip()
+    if source_filter_phrase:
+        source_table, source_table_status = _resolve_join_table(
+            source_filter_phrase,
+            knowledge_base,
+            retrieved_tables,
+        )
+        if source_table_status == "resolved" and source_table in candidate_tables:
+            source_filter_phrase = ""
     if source_filter_phrase and not selected_filters:
         implicit_filter, implicit_status = _build_sample_value_filter(
             value_phrase=source_filter_phrase,

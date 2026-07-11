@@ -402,16 +402,23 @@ class AppService:
         query_context = _safe_dict(self.question_service.get_last_query_context() or query_context)
         route = route or str(query_context.get("route_used") or query_context.get("route") or "")
         if generated_sql:
-            is_valid, reason = self.question_service.validate_sql(
-                generated_sql,
-                knowledge_base or query_context.get("selected_knowledge_base") or {},
-            )
+            validation_kb = knowledge_base or query_context.get("selected_knowledge_base") or {}
+            selected_join_path = query_context.get("selected_join_path")
+            if selected_join_path:
+                is_valid, reason = self.question_service.validate_sql(
+                    generated_sql,
+                    validation_kb,
+                    selected_join_path=selected_join_path,
+                )
+            else:
+                is_valid, reason = self.question_service.validate_sql(generated_sql, validation_kb)
             validation_result = {"is_valid": is_valid, "reason": reason}
         elif error or message:
             validation_result = {"is_valid": False, "reason": error or message}
 
         if success and generated_sql:
             self.result_service.last_sql = generated_sql
+            self.result_service.last_selected_join_path = query_context.get("selected_join_path")
             self.result_service.set_last_question(question)
 
         return self._build_question_result(
@@ -482,6 +489,11 @@ class AppService:
             engine=engine,
             knowledge_base=knowledge_base,
             revalidate=revalidate,
+            selected_join_path=(
+                self.result_service.get_last_selected_join_path()
+                if sql == self.result_service.get_last_sql()
+                else None
+            ),
         )
         
         return success, message, rows
