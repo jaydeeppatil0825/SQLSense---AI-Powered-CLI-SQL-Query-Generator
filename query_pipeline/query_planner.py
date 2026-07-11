@@ -80,6 +80,15 @@ from query_pipeline.planner.ranking_resolver import (
     _resolve_limit_for_contract,
     _resolve_order_by_for_contract,
 )
+from query_pipeline.planner.text_utils import (
+    _content_terms,
+    _humanize,
+    _normalize,
+    _normalize_identifier,
+    _safe_float,
+    _singularize_token,
+    _tokenize,
+)
 from query_pipeline.planner.role_resolver import (
     _candidate_is_numeric_metric,
     _exact_table_column_candidates,
@@ -105,60 +114,6 @@ _UNSAFE_QUERY_RE = re.compile(
     r"\b(insert|update|delete|drop|alter|truncate|create|grant|revoke)\b",
     re.IGNORECASE,
 )
-
-
-_QUESTION_STOP_WORDS = {
-    "show",
-    "list",
-    "display",
-    "get",
-    "fetch",
-    "what",
-    "which",
-    "where",
-    "when",
-    "how",
-    "many",
-    "current",
-    "latest",
-    "recent",
-    "all",
-    "records", 
-    "record",
-    "data",
-    "table",
-    
-}
-
-
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text or "").strip().lower())
-
-
-def _normalize_identifier(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", _normalize(text)).strip("_")
-
-
-def _humanize(text: str) -> str:
-    return _normalize_identifier(text).replace("_", " ").strip()
-
-
-def _singularize_token(token: str) -> str:
-    if token.endswith("ies") and len(token) > 3:
-        return token[:-3] + "y"
-    if token.endswith("ses") and len(token) > 3:
-        return token[:-2]
-    if token.endswith("s") and not token.endswith(("ss", "us")) and len(token) > 1:
-        return token[:-1]
-    return token
-
-
-def _tokenize(text: str) -> list[str]:
-    return [token for token in re.split(r"[^a-z0-9]+", _normalize(text)) if token]
-
-
-def _content_terms(question: str) -> list[str]:
-    return [token for token in _tokenize(question) if token not in _QUESTION_STOP_WORDS]
 
 
 def _aggregate_function_hint(question: str) -> str | None:
@@ -1198,13 +1153,6 @@ def _build_query_context_from_retrieved_context(
     if joined_aggregate_result is not normalized_result:
         return joined_aggregate_result
     return _apply_join_lookup_contract(normalized_result, knowledge_base)
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _resolve_metric_with_modifier(

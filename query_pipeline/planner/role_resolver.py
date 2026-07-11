@@ -13,6 +13,11 @@ from kb_pipeline.schema_facts import (
     column_business_terms,
     resolved_semantic_type,
 )
+from query_pipeline.planner.schema_utils import (
+    _candidate_semantic_type,
+    _is_numeric_sql_type,
+    _is_textual_sql_type,
+)
 
 
 def _planner():
@@ -544,46 +549,6 @@ def _resolve_role_candidate(
     selected = result.get("selected") or {}
     candidate = dict(selected.get("candidate") or {})
     return [candidate], "resolved"
-
-
-def _candidate_semantic_type(entry: dict[str, Any]) -> str:
-    return str(
-        entry.get("semantic_type")
-        or entry.get("core_semantic_type")
-        or ""
-    ).strip().lower()
-
-
-def _is_numeric_sql_type(data_type: str) -> bool:
-    normalized = str(data_type or "").strip().lower()
-    return any(
-        token in normalized
-        for token in (
-            "decimal",
-            "numeric",
-            "number",
-            "int",
-            "float",
-            "double",
-            "real",
-            "money",
-        )
-    )
-
-
-def _is_textual_sql_type(data_type: str) -> bool:
-    normalized = str(data_type or "").strip().lower()
-    return any(
-        token in normalized
-        for token in (
-            "char",
-            "text",
-            "date",
-            "time",
-            "bool",
-            "json",
-        )
-    )
 
 
 def _candidate_is_numeric_metric(entry: dict[str, Any]) -> bool:
