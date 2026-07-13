@@ -12,6 +12,7 @@ def execute_query(
     engine,
     knowledge_base: dict | None = None,
     selected_join_path: dict | None = None,
+    query_context: dict | None = None,
 ) -> list[dict]:
     """Validate and execute a read-only SELECT query using a SQLAlchemy engine."""
     is_valid, reason = validate_sql(sql)
@@ -28,6 +29,7 @@ def execute_query(
             sql,
             knowledge_base,
             selected_join_path=selected_join_path,
+            query_context=query_context,
         )
         if not struct_ok:
             raise ValueError(f"SQL structure invalid: {struct_reason}")

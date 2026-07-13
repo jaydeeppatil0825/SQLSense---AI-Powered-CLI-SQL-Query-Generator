@@ -6,6 +6,7 @@ Application service as main CLI orchestrator.
 This service coordinates the lower-level services behind the CLI.
 """
 
+from copy import deepcopy
 from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.engine import Engine
 
@@ -409,6 +410,7 @@ class AppService:
                     generated_sql,
                     validation_kb,
                     selected_join_path=selected_join_path,
+                    query_context=query_context,
                 )
             else:
                 is_valid, reason = self.question_service.validate_sql(generated_sql, validation_kb)
@@ -419,6 +421,7 @@ class AppService:
         if success and generated_sql:
             self.result_service.last_sql = generated_sql
             self.result_service.last_selected_join_path = query_context.get("selected_join_path")
+            self.result_service.last_query_context = deepcopy(query_context)
             self.result_service.set_last_question(question)
 
         return self._build_question_result(
@@ -483,6 +486,7 @@ class AppService:
             return False, "Database not connected", None
         
         knowledge_base = self.database_service.get_knowledge_base()
+        exact_stored_sql = sql == self.result_service.get_last_sql()
         
         success, message, rows = self.result_service.execute_sql(
             sql=sql,
@@ -491,7 +495,12 @@ class AppService:
             revalidate=revalidate,
             selected_join_path=(
                 self.result_service.get_last_selected_join_path()
-                if sql == self.result_service.get_last_sql()
+                if exact_stored_sql
+                else None
+            ),
+            query_context=(
+                self.result_service.get_last_query_context()
+                if exact_stored_sql
                 else None
             ),
         )

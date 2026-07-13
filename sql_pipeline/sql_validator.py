@@ -1011,6 +1011,155 @@ def _validate_aggregate_clause_placement(sql: str) -> tuple[bool, str]:
     return True, "Aggregate predicates are in valid SQL clauses."
 
 
+def _validate_two_edge_joined_aggregate_contract(
+    sql: str,
+    knowledge_base: dict[str, Any],
+    selected_join_path: dict[str, Any],
+    query_context: dict[str, Any] | None,
+    referenced_tables: list[str],
+) -> tuple[bool, str]:
+    context = query_context if isinstance(query_context, dict) else {}
+    if context.get("query_shape") != "joined_aggregate":
+        return False, "Multi-hop joined aggregate requires matching planner context."
+    if context.get("selected_join_path") != selected_join_path:
+        return False, "Planner selected_join_path does not match validator input."
+    grain = context.get("phase8a_grain_analysis")
+    if not isinstance(grain, dict) or grain.get("grain_preserved") is not True:
+        return False, "Multi-hop joined aggregate requires preserved-grain Phase 8A evidence."
+
+    base_table = str(selected_join_path.get("base_table") or "")
+    joined_tables = [str(value) for value in (selected_join_path.get("joined_tables") or [])]
+    edges = [edge for edge in (selected_join_path.get("edges") or []) if isinstance(edge, dict)]
+    path_tables = [base_table, *joined_tables]
+    if len(path_tables) != 3 or len(set(path_tables)) != 3 or len(edges) != 2 or path_tables != referenced_tables:
+        return False, "Multi-hop joined aggregate path must contain exactly three ordered unique tables."
+    if any(table not in knowledge_base for table in path_tables):
+        return False, "Multi-hop joined aggregate references an unknown table."
+
+    aggregate_function = str(context.get("aggregate_function") or "").strip().lower()
+    if aggregate_function not in {"count", "sum", "avg", "min", "max"}:
+        return False, "Joined aggregate function is missing or unsupported."
+    if re.search(r"\bCOUNT\s*\(\s*DISTINCT\b", sql, re.IGNORECASE):
+        return False, "COUNT DISTINCT is not allowed for deterministic joined aggregates."
+
+    metric_column = ""
+    if aggregate_function == "count":
+        aggregate_expression = "COUNT(*)"
+        aggregate_alias = f"count__{base_table}__rows"
+    else:
+        metric = context.get("selected_metric")
+        if not isinstance(metric, dict):
+            return False, "Planner-selected metric evidence is missing."
+        metric_table = str(metric.get("table") or "")
+        metric_column = str(metric.get("column") or "")
+        if metric_table != base_table or metric_column not in _table_columns(knowledge_base, base_table):
+            return False, "Planner-selected metric does not match preserved base grain."
+        aggregate_expression = f"{aggregate_function.upper()}({base_table}.{metric_column})"
+        aggregate_alias = f"{aggregate_function}__{base_table}__{metric_column}"
+
+    dimensions = [entry for entry in (context.get("selected_dimensions") or []) if isinstance(entry, dict)]
+    if len(dimensions) != 1:
+        return False, "Planner-selected dimension evidence is missing or ambiguous."
+    dimension_table = str(dimensions[0].get("table") or "")
+    dimension_column = str(dimensions[0].get("column") or "")
+    if dimension_table not in path_tables or dimension_column not in _table_columns(knowledge_base, dimension_table):
+        return False, "Planner-selected dimension is outside the selected path."
+    dimension_expression = f"{dimension_table}.{dimension_column}"
+    dimension_alias = f"{dimension_table}__{dimension_column}"
+
+    outputs = [entry for entry in (context.get("selected_output_columns") or []) if isinstance(entry, dict)]
+    if len(outputs) != 2:
+        return False, "Planner-selected output contract must contain one dimension and one aggregate."
+    dimension_output, aggregate_output = outputs
+    if (
+        dimension_output.get("kind") != "dimension"
+        or str(dimension_output.get("expression") or "") != dimension_expression
+        or str(dimension_output.get("alias") or "") != dimension_alias
+        or aggregate_output.get("kind") != "aggregate"
+        or str(aggregate_output.get("table") or "") != base_table
+        or str(aggregate_output.get("column") or "") != metric_column
+        or str(aggregate_output.get("aggregate_function") or "") != aggregate_function
+        or str(aggregate_output.get("expression") or "") != aggregate_expression
+        or str(aggregate_output.get("alias") or "") != aggregate_alias
+    ):
+        return False, "Planner-selected output contract does not match SQL aggregate evidence."
+
+    select_match = re.search(r"\bSELECT\s+(.*?)\bFROM\b", sql, re.IGNORECASE | re.DOTALL)
+    if not select_match:
+        return False, "SELECT list is missing."
+    select_expressions = _split_select_expressions(select_match.group(1))
+    expected_select = [
+        f"{dimension_expression} AS {dimension_alias}",
+        f"{aggregate_expression} AS {aggregate_alias}",
+    ]
+    if [_normalize_expression(item) for item in select_expressions] != [
+        _normalize_expression(item) for item in expected_select
+    ]:
+        return False, "SELECT projection does not match planner-selected joined aggregate outputs."
+
+    group_match = re.search(
+        r"\bGROUP\s+BY\s+(.*?)(?=\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|\bUNION\b|;|$)",
+        sql,
+        re.IGNORECASE | re.DOTALL,
+    )
+    grouped = [_normalize_expression(item) for item in _split_select_expressions(group_match.group(1) if group_match else "")]
+    if grouped != [_normalize_expression(dimension_expression)]:
+        return False, "GROUP BY must match the planner-selected joined aggregate dimension."
+
+    where_match = re.search(
+        r"\bWHERE\s+(.*?)(?=\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|;|$)",
+        sql,
+        re.IGNORECASE | re.DOTALL,
+    )
+    expected_filter_columns = {
+        f"{entry.get('table')}.{entry.get('column')}"
+        for entry in (context.get("selected_filters") or [])
+        if isinstance(entry, dict) and entry.get("table") and entry.get("column")
+    }
+    if where_match:
+        actual_filter_columns = {
+            f"{table}.{column}"
+            for table, column in re.findall(
+                r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+                _strip_string_literals(where_match.group(1)),
+            )
+        }
+        if actual_filter_columns != expected_filter_columns or not actual_filter_columns <= {
+            f"{table}.{column}"
+            for table in path_tables
+            for column in _table_columns(knowledge_base, table)
+        }:
+            return False, "WHERE filters do not match planner-selected joined aggregate filters."
+    elif expected_filter_columns:
+        return False, "Planner-selected joined aggregate filters are missing from SQL."
+
+    if re.search(r"\bHAVING\b", sql, re.IGNORECASE) and not context.get("selected_having"):
+        return False, "HAVING is not approved by the planner contract."
+    order_match = re.search(r"\bORDER\s+BY\s+(.*?)(?=\bLIMIT\b|\bUNION\b|;|$)", sql, re.IGNORECASE | re.DOTALL)
+    selected_order = context.get("selected_order_by")
+    if order_match:
+        if not isinstance(selected_order, dict):
+            return False, "ORDER BY is not approved by the planner contract."
+        expected_order = f"{aggregate_alias} {str(selected_order.get('direction') or '').upper()}"
+        if _normalize_expression(order_match.group(1)) != _normalize_expression(expected_order):
+            return False, "ORDER BY does not match planner-selected aggregate ordering."
+    limit_match = re.search(r"\bLIMIT\s+(\d+)\s*;?\s*$", sql, re.IGNORECASE)
+    if limit_match and int(limit_match.group(1)) != context.get("limit"):
+        return False, "LIMIT does not match planner-selected limit."
+    if not limit_match and context.get("limit") is not None:
+        return False, "Planner-selected limit is missing from SQL."
+
+    return True, "Two-edge joined aggregate matches planner evidence."
+
+
+def _table_columns(knowledge_base: dict[str, Any], table_name: str) -> set[str]:
+    return {
+        str(column.get("name") or "")
+        for column in knowledge_base.get(table_name, {}).get("columns", []) or []
+        if str(column.get("name") or "")
+    }
+
+
 def _validate_clause_order_and_limit(sql: str) -> tuple[bool, str]:
     masked = _mask_quoted_identifier_keywords(_strip_string_literals(sql))
     clause_patterns = [
@@ -1392,6 +1541,7 @@ def validate_sql_structure(
     sql: str,
     knowledge_base: dict,
     selected_join_path: dict[str, Any] | None = None,
+    query_context: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """
     Validate that an AI-generated SQL string has a correct executable structure.
@@ -1490,6 +1640,20 @@ def validate_sql_structure(
         )
         if not relationship_ok:
             return False, relationship_reason
+        if (
+            isinstance(selected_join_path, dict)
+            and len([edge for edge in (selected_join_path.get("edges") or []) if isinstance(edge, dict)]) == 2
+            and re.search(r"\bGROUP\s+BY\b", stripped, re.IGNORECASE)
+        ):
+            aggregate_ok, aggregate_reason = _validate_two_edge_joined_aggregate_contract(
+                stripped,
+                knowledge_base,
+                selected_join_path,
+                query_context,
+                referenced_tables,
+            )
+            if not aggregate_ok:
+                return False, aggregate_reason
 
         if re.search(r"\bSELECT\s+(?:\w+\.)?\*", stripped, re.IGNORECASE):
             for table_name in referenced_tables:

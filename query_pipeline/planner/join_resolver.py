@@ -19,6 +19,7 @@ from query_pipeline.planner.filter_resolver import (
 )
 from query_pipeline.planner.role_resolver import (
     _candidate_is_numeric_metric,
+    _exact_table_column_candidates,
     _graph_selected_evidence_entry,
     _rank_role_candidates,
     _resolve_count_base_table,
@@ -29,6 +30,8 @@ from query_pipeline.planner.role_resolver import (
     _selected_evidence_entry,
     _source_selected_evidence_entry,
 )
+from query_pipeline.planner.phase7_bfs_join_resolver import resolve_safe_multi_hop_path
+from query_pipeline.planner.phase8a_grain_analyzer import analyze_selected_path_grain
 
 
 def _planner():
@@ -539,6 +542,11 @@ def _apply_joined_aggregate_contract(
         return context
 
     retrieved = context.get("retrieved_context") if isinstance(context.get("retrieved_context"), dict) else {}
+    retrieved_tables = [
+        dict(entry)
+        for entry in (retrieved.get("matched_tables") or context.get("matched_tables") or [])
+        if isinstance(entry, dict)
+    ]
     metric_candidates = [
         dict(entry)
         for entry in (retrieved.get("measure_candidates") or context.get("metric_candidates") or [])
@@ -564,6 +572,23 @@ def _apply_joined_aggregate_contract(
         dimension_table_hint = str(
             (dimension_hint_result.get("selected") or {}).get("candidate", {}).get("table") or ""
         ).strip()
+    elif not dimension_candidates:
+        hinted_table, hinted_status = _resolve_join_table(dimension_phrase, knowledge_base, retrieved_tables)
+        if hinted_status == "resolved" and hinted_table:
+            table_tokens = {_singularize_token(token) for token in _tokenize(hinted_table)}
+            residual_phrase = " ".join(
+                token for token in _tokenize(dimension_phrase)
+                if _singularize_token(token) not in table_tokens
+            ).strip()
+            exact_dimensions = _exact_table_column_candidates(hinted_table, residual_phrase, knowledge_base)
+            if len(exact_dimensions) == 1:
+                dimension_candidates = exact_dimensions
+                dimension_hint_result = _rank_role_candidates(
+                    dimension_phrase,
+                    dimension_candidates,
+                    role="dimension",
+                )
+                dimension_table_hint = hinted_table
     metric: dict[str, Any] | None = None
     metric_evidence_result: dict[str, Any] = {"status": "not_required", "selected": None, "ranked": []}
     modifier_filter_phrase: str | None = None
@@ -578,6 +603,33 @@ def _apply_joined_aggregate_contract(
             )
             if narrowed_metric_result.get("status") == "resolved":
                 metric_evidence_result = narrowed_metric_result
+        original_tier = str((metric_evidence_result.get("selected") or {}).get("tier") or "")
+        if (
+            metric_evidence_result.get("status") == "resolved"
+            and original_tier not in {
+            "exact_normalized_column",
+            "owner_qualified_exact",
+            "kb_glossary_semantic",
+            }
+            and not (metric_tokens and metric_tokens[0] in _STATUS_VALUE_TOKENS)
+        ):
+            schema_metric, schema_metric_status = _resolve_owned_monetary_metric_from_schema(
+                metric_phrase,
+                knowledge_base,
+            )
+            if schema_metric_status == "resolved" and schema_metric is not None:
+                metric_evidence_result = {
+                    "status": "resolved",
+                    "selected": {
+                        "candidate": dict(schema_metric),
+                        "tier": "owner_qualified_exact",
+                        "score": _SCORING_TIERS["owner_qualified_exact"],
+                        "candidate_score": _safe_float(schema_metric.get("score")),
+                        "reasons": ["owner-qualified metric phrase resolved from schema/profile evidence"],
+                    },
+                    "ranked": list(metric_evidence_result.get("ranked") or []),
+                    "tie_reason": "",
+                }
         modifier_metric = None
         modifier_phrase = None
         modifier_status = "missing"
@@ -740,6 +792,7 @@ def _apply_joined_aggregate_contract(
     base_table = str((metric or {}).get("table") or "").strip()
     source_evidence_status = "not_required"
     deferred_source_filter_phrase: str | None = None
+    explicit_base: str | None = None
     if source_phrase:
         if aggregate_function == "count":
             explicit_base, base_status = _resolve_count_base_table(
@@ -772,6 +825,8 @@ def _apply_joined_aggregate_contract(
         return context
 
     allowed_tables = {base_table, dimension_table}
+    if deferred_source_filter_phrase and explicit_base:
+        allowed_tables.add(explicit_base)
     selected_filters, filter_reason = _joined_aggregate_filter_contract(
         intent,
         filter_candidates,
@@ -821,7 +876,7 @@ def _apply_joined_aggregate_contract(
                 value_phrase=implicit_filter_phrase,
                 knowledge_base=knowledge_base,
                 allowed_tables=allowed_tables,
-                owner_table=base_table,
+                owner_table=None,
                 source=implicit_source,
             )
         if implicit_status != "resolved" or implicit_filter is None:
@@ -838,17 +893,62 @@ def _apply_joined_aggregate_contract(
 
     graph = build_relationship_graph(knowledge_base, infer_relationships=False)
     graph_edges = find_safe_direct_join_relationships(graph, base_table, dimension_table)
+    grain_analysis: dict[str, Any] | None = None
     if not graph_edges:
-        return _joined_aggregate_failure_context(
-            context,
-            blocked_node="safe_join_path",
-            reason="no safe direct Relationship Graph edge exists between metric and dimension tables",
-            resolved_nodes={
-                "unsafe_check", "table_scope", "query_shape", "aggregate", "metric", "dimension",
-                "join_need", "relationship_graph_lookup",
-            },
+        bfs_result = resolve_safe_multi_hop_path(
+            base_table=base_table,
+            target_table=dimension_table,
+            relationship_graph=graph,
+            schema=knowledge_base,
+            max_depth=2,
         )
-    if len(graph_edges) != 1:
+        if (
+            bfs_result.get("status") != "unique_safe_path"
+            or int(bfs_result.get("edge_count") or 0) != 2
+            or len(bfs_result.get("tables") or []) != 3
+        ):
+            return _joined_aggregate_failure_context(
+                context,
+                blocked_node="safe_join_path",
+                reason=f"multi-hop joined aggregate path is {bfs_result.get('status')}: {bfs_result.get('reason')}",
+                resolved_nodes={
+                    "unsafe_check", "table_scope", "query_shape", "aggregate", "metric", "dimension",
+                    "join_need", "relationship_graph_lookup",
+                },
+            )
+        candidate_join_path = {
+            "base_table": base_table,
+            "joined_tables": list(bfs_result.get("tables") or [])[1:],
+            "edges": [dict(edge) for edge in (bfs_result.get("path") or [])],
+            "path_source": "relationship_graph",
+            "ambiguity_status": "resolved",
+        }
+        grain_analysis = analyze_selected_path_grain(
+            metric_base_table=base_table,
+            selected_join_path=candidate_join_path,
+            relationship_graph=graph,
+            schema=knowledge_base,
+            aggregate_function=aggregate_function,
+            count_base_table=base_table if aggregate_function == "count" else None,
+        )
+        if not grain_analysis.get("grain_preserved"):
+            return _joined_aggregate_failure_context(
+                context,
+                blocked_node="safe_join_path",
+                reason=f"multi-hop joined aggregate grain is unsafe: {grain_analysis.get('status')}: {grain_analysis.get('reason')}",
+                resolved_nodes={
+                    "unsafe_check", "table_scope", "query_shape", "aggregate", "metric", "dimension",
+                    "join_need", "relationship_graph_lookup",
+                },
+            )
+        path_edges = candidate_join_path["edges"]
+        joined_tables = candidate_join_path["joined_tables"]
+        route_reason = "joined aggregate path is grain-safe across one safe two-edge Relationship Graph path"
+    else:
+        path_edges = [dict(edge) for edge in graph_edges]
+        joined_tables = [dimension_table]
+        route_reason = "joined aggregate can be generated from one safe direct Relationship Graph edge"
+    if graph_edges and len(graph_edges) != 1:
         return _joined_aggregate_failure_context(
             context,
             blocked_node="ambiguity_check",
@@ -858,7 +958,21 @@ def _apply_joined_aggregate_contract(
                 "join_need", "relationship_graph_lookup", "safe_join_path",
             },
         )
-    edge = dict(graph_edges[0])
+    if graph_edges:
+        path_edges = [dict(graph_edges[0])]
+
+    path_tables = {base_table, *joined_tables}
+    filter_tables = {str(entry.get("table") or "") for entry in selected_filters}
+    if not filter_tables <= path_tables:
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="where",
+            reason="joined aggregate filters must belong to the selected join path",
+            resolved_nodes={
+                "unsafe_check", "table_scope", "query_shape", "aggregate", "metric", "dimension",
+                "join_need", "relationship_graph_lookup", "safe_join_path", "ambiguity_check",
+            },
+        )
 
     structured_having = [
         dict(entry) for entry in (intent.get("structured_having") or []) if isinstance(entry, dict)
@@ -928,8 +1042,8 @@ def _apply_joined_aggregate_contract(
 
     selected_join_path = {
         "base_table": base_table,
-        "joined_tables": [dimension_table],
-        "edges": [edge],
+        "joined_tables": joined_tables,
+        "edges": path_edges,
         "path_source": "relationship_graph",
         "ambiguity_status": "resolved",
     }
@@ -982,8 +1096,10 @@ def _apply_joined_aggregate_contract(
                 "tie_reason": "",
             }
         ),
-        "relationship_graph": _graph_selected_evidence_entry(edge),
+        "relationship_graph": _graph_selected_evidence_entry(path_edges[0]),
     }
+    if grain_analysis is not None:
+        selected_evidence["relationship_graph"]["grain_analysis"] = dict(grain_analysis)
     planned_confidence = _safe_float(context.get("confidence"), 0.0)
     planned_warnings = list(context.get("warnings") or [])
     if _has_strong_joined_evidence(selected_evidence, aggregate_function=aggregate_function):
@@ -1050,17 +1166,18 @@ def _apply_joined_aggregate_contract(
         decision_path.append({"node": node_name, "status": status, "reason": reason})
 
     selected_tables = [
-        {"table": base_table, "confidence": 1.0, "source": "joined_aggregate_contract"},
-        {"table": dimension_table, "confidence": 1.0, "source": "joined_aggregate_contract"},
+        {"table": table_name, "confidence": 1.0, "source": "joined_aggregate_contract"}
+        for table_name in [base_table, *joined_tables]
     ]
     selected_columns = [dimension]
     if metric is not None:
         selected_columns.insert(0, metric)
     selected_columns.extend(selected_filters)
-    required_join = (
+    required_joins = [
         f"{edge['from_table']}.{edge['from_column']} = "
         f"{edge['to_table']}.{edge['to_column']}"
-    )
+        for edge in path_edges
+    ]
     planned = dict(context)
     planned_intent = dict(intent)
     planned_intent["aggregate_function"] = aggregate_function
@@ -1076,15 +1193,15 @@ def _apply_joined_aggregate_contract(
             "query_shape": "joined_aggregate",
             "route": "deterministic_sql_required",
             "route_recommendation": "deterministic_sql_required",
-            "route_reason": "joined aggregate can be generated from one safe direct Relationship Graph edge",
-            "planner_reason": "joined aggregate can be generated from one safe direct Relationship Graph edge",
+            "route_reason": route_reason,
+            "planner_reason": route_reason,
             "can_plan": True,
             "aggregate_function": aggregate_function,
             "selected_tables": selected_tables,
-            "selected_table_names": [base_table, dimension_table],
+            "selected_table_names": [base_table, *joined_tables],
             "selected_knowledge_base": {
                 table_name: deepcopy(knowledge_base[table_name])
-                for table_name in (base_table, dimension_table)
+                for table_name in [base_table, *joined_tables]
             },
             "selected_columns": selected_columns,
             "selected_output_columns": selected_output_columns,
@@ -1099,7 +1216,8 @@ def _apply_joined_aggregate_contract(
             "selected_relationship_path": selected_join_path,
             "selected_evidence": selected_evidence,
             "join_paths": [],
-            "required_joins": [required_join],
+            "required_joins": required_joins,
+            "phase8a_grain_analysis": grain_analysis,
             "limit": limit,
             "confidence": round(planned_confidence, 2),
             "warnings": planned_warnings,
@@ -1109,6 +1227,7 @@ def _apply_joined_aggregate_contract(
             "clause_plan": {
                 "clause_shape": clause_shape,
                 "selected_join_path": selected_join_path,
+                "phase8a_grain_analysis": grain_analysis,
                 "selected_order_by": dict(selected_order_by or {}),
                 "limit": limit,
                 "requires": {
@@ -1141,8 +1260,9 @@ def _apply_joined_aggregate_contract(
         "having": selected_having,
         "selected_order_by": dict(selected_order_by or {}),
         "selected_join_path": selected_join_path,
+        "phase8a_grain_analysis": grain_analysis,
         "selected_evidence": selected_evidence,
-        "required_joins": [required_join],
+        "required_joins": required_joins,
         "limit": limit,
         "clause_plan": dict(planned["clause_plan"]),
         "route_recommendation": "deterministic_sql_required",
@@ -1347,7 +1467,10 @@ def _apply_join_lookup_contract(
             retrieved_tables,
         )
         if source_table_status == "resolved" and source_table in candidate_tables:
-            source_filter_phrase = ""
+            phrase_tokens = {_singularize_token(token) for token in _tokenize(source_filter_phrase)}
+            table_tokens = {_singularize_token(token) for token in _tokenize(source_table)}
+            if phrase_tokens and phrase_tokens <= table_tokens:
+                source_filter_phrase = ""
     if source_filter_phrase and not selected_filters:
         implicit_filter, implicit_status = _build_sample_value_filter(
             value_phrase=source_filter_phrase,
@@ -1521,6 +1644,7 @@ def _apply_join_lookup_contract(
             "warnings": planned_warnings,
             "missing_evidence": [],
             "ambiguities": [],
+            "ambiguity_details": [],
             "clause_plan": {
                 "clause_shape": "joined_lookup",
                 "selected_join_path": selected_join_path,

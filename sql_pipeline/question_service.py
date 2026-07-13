@@ -164,6 +164,33 @@ def _attach_generation_feedback(query_context: dict[str, Any], sql: str) -> None
     query_context["warnings"] = warnings
 
 
+def _requires_context_bound_validation(query_context: dict[str, Any] | None) -> bool:
+    if not isinstance(query_context, dict):
+        return False
+    selected_path = query_context.get("selected_join_path")
+    edges = selected_path.get("edges") if isinstance(selected_path, dict) else []
+    return (
+        query_context.get("query_shape") == "joined_aggregate"
+        and len([edge for edge in (edges or []) if isinstance(edge, dict)]) == 2
+    )
+
+
+def _validate_sql_structure_for_context(
+    sql: str,
+    knowledge_base: Dict[str, Any],
+    query_context: dict[str, Any] | None,
+) -> Tuple[bool, str]:
+    selected_join_path = (
+        query_context.get("selected_join_path")
+        if isinstance(query_context, dict)
+        else None
+    )
+    kwargs: dict[str, Any] = {"selected_join_path": selected_join_path}
+    if _requires_context_bound_validation(query_context):
+        kwargs["query_context"] = query_context
+    return validate_sql_structure(sql, knowledge_base, **kwargs)
+
+
 def _is_business_question(query_context: dict[str, Any]) -> bool:
     plan = query_context.get("plan") or {}
     if plan.get("intent") in {"total", "average", "top_n", "trend", "comparison"}:
@@ -1699,10 +1726,10 @@ class QuestionService:
             )
             if deterministic_result.status == "generated" and deterministic_result.sql:
                 safety_ok, safety_reason = validate_sql(deterministic_result.sql)
-                struct_ok, struct_reason = validate_sql_structure(
+                struct_ok, struct_reason = _validate_sql_structure_for_context(
                     deterministic_result.sql,
                     knowledge_base,
-                    selected_join_path=query_context.get("selected_join_path"),
+                    query_context,
                 )
                 if safety_ok and struct_ok:
                     clause_shape = str(
@@ -1818,6 +1845,7 @@ class QuestionService:
         sql: str,
         knowledge_base: Optional[Dict[str, Any]] = None,
         selected_join_path: Optional[Dict[str, Any]] = None,
+        query_context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str]:
         """
         Validate SQL for safety and structure.
@@ -1836,11 +1864,18 @@ class QuestionService:
         
         # Validate structure if knowledge base is available
         if knowledge_base:
-            struct_ok, struct_reason = validate_sql_structure(
-                sql,
-                knowledge_base,
-                selected_join_path=selected_join_path,
-            )
+            if query_context is not None:
+                struct_ok, struct_reason = _validate_sql_structure_for_context(
+                    sql,
+                    knowledge_base,
+                    query_context,
+                )
+            else:
+                struct_ok, struct_reason = validate_sql_structure(
+                    sql,
+                    knowledge_base,
+                    selected_join_path=selected_join_path,
+                )
             if not struct_ok:
                 return False, struct_reason
         

@@ -121,21 +121,66 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
 
     if contract_shape == "joined_aggregate":
         selected_path = context.get("selected_join_path")
+        joined_tables = list(selected_path.get("joined_tables") or []) if isinstance(selected_path, dict) else []
+        edges = list(selected_path.get("edges") or []) if isinstance(selected_path, dict) else []
+        path_table_count = 1 + len(joined_tables)
         selected_dimensions = [
             entry for entry in (context.get("selected_dimensions") or []) if isinstance(entry, dict)
         ]
         if (
-            len(selected_tables) != 2
-            or not isinstance(selected_path, dict)
-            or len(list(selected_path.get("joined_tables") or [])) != 1
-            or len(list(selected_path.get("edges") or [])) != 1
+            not isinstance(selected_path, dict)
+            or len(joined_tables) not in {1, 2}
+            or len(edges) != len(joined_tables)
+            or (selected_tables and len(selected_tables) != path_table_count)
         ):
             return DeterministicCapabilityResult(
                 status="cannot_plan_safely",
                 query_shape="joined_aggregate",
                 supported_now=True,
                 blocked_by=["selected_join_path_missing"],
-                reason="joined aggregate requires exactly two tables and one planner-selected graph edge",
+                reason="joined aggregate requires one or two planner-selected graph edges",
+            )
+        if len(edges) == 2 and not (
+            isinstance(context.get("phase8a_grain_analysis"), dict)
+            and context["phase8a_grain_analysis"].get("grain_preserved") is True
+        ):
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="joined_aggregate",
+                supported_now=True,
+                blocked_by=["phase8a_grain_analysis_missing"],
+                reason="two-edge joined aggregate requires preserved-grain Phase 8A evidence",
+            )
+        if (
+            len(edges) == 1
+            and len(selected_tables) not in {0, 2}
+        ):
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="joined_aggregate",
+                supported_now=True,
+                blocked_by=["selected_join_path_missing"],
+                reason="joined aggregate requires exactly two tables for a direct graph edge",
+            )
+        if (
+            len(edges) == 2
+            and len(selected_tables) not in {0, 3}
+        ):
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="joined_aggregate",
+                supported_now=True,
+                blocked_by=["selected_join_path_missing"],
+                reason="two-edge joined aggregate requires exactly three selected tables",
+            )
+        path_tables = [str(selected_path.get("base_table") or ""), *[str(value) for value in joined_tables]]
+        if not path_tables[0] or len(set(path_tables)) != path_table_count:
+            return DeterministicCapabilityResult(
+                status="cannot_plan_safely",
+                query_shape="joined_aggregate",
+                supported_now=True,
+                blocked_by=["selected_join_path_missing"],
+                reason="joined aggregate path tables must be unique",
             )
         if aggregate_function not in {"count", "sum", "avg", "min", "max"}:
             return DeterministicCapabilityResult(
@@ -1181,13 +1226,13 @@ def _resolve_join_filter_clauses(
     knowledge_base: dict[str, Any],
     allowed_tables: set[str],
 ) -> tuple[list[str], list[str], list[str], str]:
-    selected_filters = [
+    selected_filters = _dedupe_filters([
         entry for entry in (query_context.get("selected_filters") or []) if isinstance(entry, dict)
-    ]
+    ])
     intent = query_context.get("intent") if isinstance(query_context.get("intent"), dict) else {}
-    structured_filters = [
+    structured_filters = _dedupe_filters([
         entry for entry in (intent.get("structured_filters") or []) if isinstance(entry, dict)
-    ]
+    ])
     if not selected_filters:
         return [], [], [], ""
     if structured_filters and len(selected_filters) != len(structured_filters):
@@ -1394,22 +1439,22 @@ def _build_joined_aggregate_plan(
     base_table = str(selected_path.get("base_table") or "").strip()
     joined_tables = [str(value).strip() for value in (selected_path.get("joined_tables") or [])]
     edges = [dict(edge) for edge in (selected_path.get("edges") or []) if isinstance(edge, dict)]
-    if len(joined_tables) != 1 or len(edges) != 1:
+    path_tables = [base_table, *joined_tables]
+    if (
+        len(joined_tables) not in {1, 2}
+        or len(edges) != len(joined_tables)
+        or len(set(path_tables)) != len(path_tables)
+    ):
         return DeterministicSqlPlan(
             query_shape="joined_aggregate",
             status="cannot_plan_safely",
             supported_now=True,
             missing_evidence=["selected_join_path_invalid"],
-            route_reason="joined aggregate requires one joined table and one direct graph edge",
+            route_reason="joined aggregate requires one direct edge or one approved two-edge path",
         )
-    joined_table = joined_tables[0]
-    edge = edges[0]
     if (
         selected_path.get("path_source") != "relationship_graph"
         or selected_path.get("ambiguity_status") != "resolved"
-        or edge.get("safe_for_planner") is not True
-        or {str(edge.get("from_table") or ""), str(edge.get("to_table") or "")}
-        != {base_table, joined_table}
     ):
         return DeterministicSqlPlan(
             query_shape="joined_aggregate",
@@ -1418,6 +1463,16 @@ def _build_joined_aggregate_plan(
             missing_evidence=["selected_join_path_not_authorized"],
             route_reason="selected joined aggregate path is not authorized by Relationship Graph",
         )
+    if len(edges) == 2:
+        grain = query_context.get("phase8a_grain_analysis")
+        if not isinstance(grain, dict) or grain.get("grain_preserved") is not True:
+            return DeterministicSqlPlan(
+                query_shape="joined_aggregate",
+                status="cannot_plan_safely",
+                supported_now=True,
+                missing_evidence=["phase8a_grain_analysis_missing"],
+                route_reason="two-edge joined aggregate requires preserved-grain Phase 8A evidence",
+            )
 
     schema_columns = {
         table_name: {
@@ -1425,19 +1480,33 @@ def _build_joined_aggregate_plan(
             for column in knowledge_base.get(table_name, {}).get("columns", []) or []
             if str(column.get("name") or "")
         }
-        for table_name in (base_table, joined_table)
+        for table_name in path_tables
     }
-    for table_name, column_name in (
-        (str(edge.get("from_table") or ""), str(edge.get("from_column") or "")),
-        (str(edge.get("to_table") or ""), str(edge.get("to_column") or "")),
-    ):
-        if column_name not in schema_columns.get(table_name, set()):
+    path_reason = _validate_joined_lookup_path(path_tables, edges, knowledge_base)
+    if path_reason:
+        return DeterministicSqlPlan(
+            query_shape="joined_aggregate",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=[path_reason],
+            route_reason=path_reason,
+        )
+    if not all(edge.get("safe_for_planner") is True for edge in edges):
+        return DeterministicSqlPlan(
+            query_shape="joined_aggregate",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=["selected_join_path_not_authorized"],
+            route_reason="selected joined aggregate path is not authorized by Relationship Graph",
+        )
+    for index, edge in enumerate(edges):
+        if str(edge.get("from_table") or "") != path_tables[index] or str(edge.get("to_table") or "") != path_tables[index + 1]:
             return DeterministicSqlPlan(
                 query_shape="joined_aggregate",
                 status="cannot_plan_safely",
                 supported_now=True,
-                missing_evidence=["join_edge_not_in_schema"],
-                route_reason="selected joined aggregate edge references an unknown schema column",
+                missing_evidence=["selected_join_path_order_invalid"],
+                route_reason="selected joined aggregate path edges are disconnected or reordered",
             )
 
     aggregate_function = _planner_aggregate_function(
@@ -1493,7 +1562,7 @@ def _build_joined_aggregate_plan(
         )
     dimension_table = str(selected_dimensions[0].get("table") or "").strip()
     dimension_column = str(selected_dimensions[0].get("column") or "").strip()
-    if dimension_table != joined_table or dimension_column not in schema_columns.get(joined_table, set()):
+    if dimension_table not in set(path_tables) or dimension_column not in schema_columns.get(dimension_table, set()):
         return DeterministicSqlPlan(
             query_shape="joined_aggregate",
             status="cannot_plan_safely",
@@ -1541,7 +1610,7 @@ def _build_joined_aggregate_plan(
     where_clauses, where_conjunctions, filter_columns, filter_reason = _resolve_join_filter_clauses(
         query_context,
         knowledge_base,
-        {base_table, joined_table},
+        set(path_tables),
     )
     if filter_reason:
         return DeterministicSqlPlan(
@@ -1619,8 +1688,8 @@ def _build_joined_aggregate_plan(
         status="ready",
         supported_now=True,
         base_table=base_table,
-        joins=[{"table": joined_table, "edge": edge}],
-        required_joins=[edge],
+        joins=[{"table": edge["to_table"], "edge": edge} for edge in edges],
+        required_joins=edges,
         selected_join_path=dict(selected_path),
         selected_output_columns=outputs,
         select_items=[
@@ -1724,15 +1793,15 @@ def _resolve_filter_clauses(
     table_name: str,
     table_data: dict[str, Any],
 ) -> tuple[list[str], list[str], list[str], str]:
-    selected_filters = [
+    selected_filters = _dedupe_filters([
         entry for entry in (query_context.get("selected_filters") or [])
         if isinstance(entry, dict)
-    ]
+    ])
     intent = query_context.get("intent") if isinstance(query_context.get("intent"), dict) else {}
-    structured_filters = [
+    structured_filters = _dedupe_filters([
         entry for entry in (intent.get("structured_filters") or [])
         if isinstance(entry, dict)
-    ]
+    ])
     if not selected_filters:
         return [], [], [], "selected_filter_missing"
     if structured_filters and len(selected_filters) != len(structured_filters):
@@ -1778,6 +1847,23 @@ def _resolve_filter_clauses(
         where_conjunctions.append(normalized_conjunction)
         filter_columns.append(column_name)
     return where_clauses, where_conjunctions, filter_columns, ""
+
+
+def _dedupe_filters(filters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for entry in filters:
+        key = (
+            str(entry.get("table") or ""),
+            str(entry.get("column") or entry.get("column_name") or ""),
+            str(entry.get("operator") or "").lower(),
+            str(entry.get("value") or entry.get("values") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
 
 
 def _filter_predicate(

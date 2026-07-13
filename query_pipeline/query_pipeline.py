@@ -13,6 +13,7 @@ It must not generate SQL directly or call SQL runtime orchestration.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import date
 import os
 from typing import Any, Dict, Optional
 
@@ -92,7 +93,7 @@ class QueryPipeline:
         del ai_backend
 
         normalized_question, _ = normalize_question(question)
-        intent = build_intent(normalized_question)
+        intent = build_intent(normalized_question, today=_fixed_today_from_env())
         retrieved_context = retrieve_context(
             normalized_question,
             intent,
@@ -270,3 +271,10 @@ class QueryPipeline:
         if route_reason:
             return f"Planner could not route the question safely: {route_reason}"
         return "Planner could not route the question safely."
+
+
+def _fixed_today_from_env() -> date | None:
+    try:
+        return date.fromisoformat(os.getenv("SQLSENSE_FIXED_TODAY", "").strip())
+    except ValueError:
+        return None

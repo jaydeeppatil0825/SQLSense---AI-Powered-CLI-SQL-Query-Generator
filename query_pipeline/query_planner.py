@@ -1545,6 +1545,8 @@ def _normalize_planner_output(
         entry for entry in (structured_intent.get("structured_filters") or [])
         if isinstance(entry, dict)
     ]
+    lookup_request = dict(structured_intent.get("join_lookup_request") or {})
+    lookup_requested = bool(lookup_request.get("requested"))
     has_explicit_filter_request = bool(
         structured_filter_entries
         or structured_intent.get("requested_filters")
@@ -1556,10 +1558,12 @@ def _normalize_planner_output(
         or [entry for entry in (plan.get("filters") or []) if entry.get("filter_kind") != "date_interval"]
     )
     if (
-        query_shape in {"single_table_list", "filtered_query", "grouped_aggregate", "ranking_query"}
+        query_shape in {"single_table_list", "filtered_query", "grouped_aggregate", "ranking_query", "joined_lookup"}
         and primary_table
         and implicit_filter_phrase
         and not has_explicit_non_interval_filter_request
+        and not lookup_requested
+        and not structured_intent.get("requested_output_fields")
         and (
             str(structured_intent.get("intent_type") or "").strip().lower() in {"list", "filter"}
             or grouped_mode_hint
@@ -1579,8 +1583,9 @@ def _normalize_planner_output(
             ]
             existing_filters.append(implicit_filter)
             plan["filters"] = existing_filters
-            if query_shape in {"single_table_list", "filtered_query"}:
+            if query_shape in {"single_table_list", "filtered_query", "joined_lookup"}:
                 query_shape = "filtered_query"
+                row_single_table = True
     requested_dimensions = [
         str(value).strip()
         for value in (structured_intent.get("requested_dimensions") or [])
@@ -1683,8 +1688,6 @@ def _normalize_planner_output(
         query_shape == "ranking_query" and ranking_mode != "grouped_aggregate"
     )
     dimension_fit = not requested_dimensions or dimension_status == "resolved"
-    lookup_request = dict(structured_intent.get("join_lookup_request") or {})
-    lookup_requested = bool(lookup_request.get("requested"))
     metric_evidence_for_scope = (
         effective_measure_candidates
         if (

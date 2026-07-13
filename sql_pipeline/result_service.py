@@ -26,6 +26,7 @@ class ResultService:
         self.last_columns: Optional[List[str]] = None
         self.last_question: Optional[str] = None
         self.last_selected_join_path: Optional[Dict[str, Any]] = None
+        self.last_query_context: Optional[Dict[str, Any]] = None
     
     def execute_sql(
         self,
@@ -34,6 +35,7 @@ class ResultService:
         knowledge_base: Optional[Dict[str, Any]] = None,
         revalidate: bool = True,
         selected_join_path: Optional[Dict[str, Any]] = None,
+        query_context: Optional[Dict[str, Any]] = None,
     ) -> tuple[bool, str, Optional[List[Dict[str, Any]]]]:
         """
         Execute SQL query.
@@ -61,6 +63,7 @@ class ResultService:
                 engine,
                 knowledge_base=knowledge_base,
                 selected_join_path=selected_join_path,
+                query_context=query_context,
             )
             logger.info(f"Query executed successfully, {len(rows)} rows returned")
             
@@ -82,6 +85,10 @@ class ResultService:
     def get_last_selected_join_path(self) -> Optional[Dict[str, Any]]:
         """Get planner join path stored with the last generated SQL."""
         return self.last_selected_join_path
+
+    def get_last_query_context(self) -> Optional[Dict[str, Any]]:
+        """Get planner context stored with the last generated SQL."""
+        return self.last_query_context
     
     def get_last_rows(self) -> Optional[List[Dict[str, Any]]]:
         """Get last query results."""
@@ -111,3 +118,4 @@ class ResultService:
         self.last_columns = None
         self.last_question = None
         self.last_selected_join_path = None
+        self.last_query_context = None

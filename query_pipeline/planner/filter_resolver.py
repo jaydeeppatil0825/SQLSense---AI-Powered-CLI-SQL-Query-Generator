@@ -549,6 +549,41 @@ def _joined_aggregate_filter_contract(
             selected.append(selected_filter)
             continue
         field_phrase = str(clause.get("field_phrase") or clause.get("field") or "").strip()
+        table_name = str(clause.get("table") or "").strip()
+        column_name = str(clause.get("column") or "").strip()
+        if table_name and column_name:
+            table_data = knowledge_base.get(table_name) if isinstance(knowledge_base, dict) else {}
+            known_columns = {
+                str(column.get("name") or "").strip()
+                for column in (table_data or {}).get("columns", []) or []
+                if isinstance(column, dict)
+            }
+            if table_name in allowed_tables and column_name in known_columns:
+                selected_clause = dict(clause)
+                table_columns = (table_data or {}).get("columns", []) or []
+                matched_column = next(
+                    (
+                        column for column in table_columns
+                        if isinstance(column, dict)
+                        and str(column.get("name") or "").strip() == column_name
+                    ),
+                    None,
+                )
+                if matched_column is not None:
+                    value_phrase = str(
+                        clause.get("value_phrase")
+                        or clause.get("value")
+                        or clause.get("raw_phrase")
+                        or ""
+                    ).strip()
+                    for sample in column_sample_values(matched_column):
+                        if _sample_value_matches(value_phrase, sample):
+                            selected_clause["value"] = sample
+                            selected_clause["values"] = [sample]
+                            break
+                selected.append(selected_clause)
+                continue
+            return [], "joined WHERE field evidence is missing"
         resolved, status = _planner()._resolve_role_candidate(
             field_phrase,
             filter_candidates,

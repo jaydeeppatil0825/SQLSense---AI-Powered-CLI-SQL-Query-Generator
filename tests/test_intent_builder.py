@@ -188,11 +188,90 @@ def test_with_status_filter_uses_generic_status_phrase_only():
     ]
 
 
-def test_with_details_remains_join_detail_not_filter():
-    intent = build_intent("show orders with customer details", ai_backend="local")
+@pytest.mark.parametrize(
+    ("question", "base", "related"),
+    [
+        ("show order items with customer details", "order items", "customer"),
+        ("show me order items and their customer details", "order items", "customer"),
+        ("list order item records with customer info", "order item", "customer"),
+        ("show payments along with customer details", "payments", "customer"),
+        ("show customers together with payment information", "customers", "payment"),
+        ("show all orders with customer information", "orders", "customer"),
+    ],
+)
+def test_multi_entity_lookup_phrases_are_join_intent_not_filters(question, base, related):
+    intent = build_intent(question, ai_backend="local")
+    request = intent["join_lookup_request"]
+
+    assert intent["intent_type"] == "list"
+    assert intent["structured_filters"] == []
+    assert intent["requested_filters"] == []
+    assert intent["requested_metrics"] == []
+    assert intent["requested_dimensions"] == []
+    assert request["requested"] is True
+    assert request["projection_mode"] == "broad_related"
+    assert request["base_entity_phrase"] == base
+    assert request["related_request_phrase"] == related
+    assert request["requested_output_fields"] == []
+
+
+def test_single_table_list_does_not_become_join_lookup():
+    intent = build_intent("show all orders", ai_backend="local")
+
+    assert intent["intent_type"] == "list"
+    assert intent["join_lookup_request"]["requested"] is False
+
+
+@pytest.mark.parametrize(
+    "connector",
+    [
+        "with",
+        "along with",
+        "together with",
+        "and their",
+        "including",
+        "plus",
+        "linked to",
+        "related to",
+        "associated with",
+        "belonging to",
+        "connected to",
+        "combined with",
+    ],
+)
+def test_join_lookup_relationship_connectors_share_intent_contract(connector):
+    intent = build_intent(f"show orders {connector} customer details", ai_backend="local")
+    request = intent["join_lookup_request"]
+
+    assert intent["intent_type"] == "list"
+    assert intent["structured_filters"] == []
+    assert request["requested"] is True
+    assert request["base_entity_phrase"] == "orders"
+    assert request["related_request_phrase"] == "customer"
+    assert request["projection_mode"] == "broad_related"
+
+
+@pytest.mark.parametrize(
+    "filler",
+    ["details", "information", "info", "records", "data", "profile", "overview", "fields", "attributes"],
+)
+def test_join_lookup_descriptive_fillers_do_not_become_columns_or_filters(filler):
+    intent = build_intent(f"show orders with customer {filler}", ai_backend="local")
+    request = intent["join_lookup_request"]
 
     assert intent["structured_filters"] == []
-    assert intent["join_lookup_request"]["requested"] is True
+    assert intent["requested_filters"] == []
+    assert request["related_request_phrase"] == "customer"
+    assert request["requested_output_fields"] == []
+    assert request["projection_mode"] == "broad_related"
+
+
+def test_aggregate_question_does_not_become_join_lookup():
+    intent = build_intent("show total order amount by customer city", ai_backend="local")
+
+    assert intent["aggregate_function"] == "sum"
+    assert intent["intent_type"] == "grouped_summary"
+    assert intent["join_lookup_request"]["requested"] is False
 
 
 def test_show_count_of_bills_uses_count_contract():

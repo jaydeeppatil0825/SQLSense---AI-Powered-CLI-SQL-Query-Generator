@@ -371,6 +371,19 @@ def test_metric_modifier_becomes_sample_backed_base_filter():
     assert "WHERE service_orders.order_status = 'Delivered'" in result.sql
 
 
+def test_metric_modifier_can_resolve_related_table_filter():
+    kb = _knowledge_base()
+    context = _context("show active item sales by product category", kb=kb)
+    result = generate_deterministic_sql(query_context=context, knowledge_base=kb)
+
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["selected_metric"]["table"] == "order_items"
+    assert context["selected_metric"]["column"] == "line_total"
+    assert context["selected_filters"][0]["table"] == "products"
+    assert context["selected_filters"][0]["column"] == "product_status"
+    assert "WHERE products.product_status = 'Active'" in result.sql
+
+
 def test_source_scope_value_owner_becomes_related_filter():
     kb = _knowledge_base()
     context = _context("total quantity by product category for active products", kb=kb)

@@ -146,11 +146,19 @@ def test_fielded_month_interval_resolves_on_multi_date_scope():
 def test_interval_text_is_removed_from_grouping_and_ranking_roles():
     grouped = build_intent("show total payment amount by payment status in February 2026", today=FIXED_TODAY)
     ranking = build_intent("top 3 customers by total order amount in 2026", today=FIXED_TODAY)
+    fielded_relative = build_intent(
+        "show total payment amount by customer city for payment date last month",
+        today=FIXED_TODAY,
+    )
 
     assert grouped["requested_dimensions"] == ["payment status"]
     assert grouped["metric_phrase"] == "payment amount"
     assert ranking["metric_phrase"] == "total order amount"
     assert ranking["requested_sort"]["terms"] == "total order amount"
+    assert fielded_relative["requested_dimensions"] == ["customer city"]
+    assert fielded_relative["metric_phrase"] == "payment amount"
+    assert fielded_relative["structured_intervals"][0]["date_column_phrase"] == "payment date"
+    assert fielded_relative["structured_intervals"][0]["values"] == ["2026-06-01", "2026-06-30"]
 
 
 def test_joined_interval_does_not_pollute_dimension_or_source_scope():

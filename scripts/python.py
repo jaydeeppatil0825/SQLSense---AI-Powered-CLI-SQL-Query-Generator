@@ -53,6 +53,7 @@ DEFAULT_DATABASE = "sqlsense_business_benchmark_lab"
 DATABASE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 EXPECTED_ROUTE = "deterministic_sql_required"
 BLOCKED_ROUTES = {"cannot_plan_safely", "blocked_unsafe"}
+BENCHMARK_FIXED_TODAY = "2026-07-10"
 
 
 @dataclass(frozen=True)
@@ -446,15 +447,15 @@ CASES: tuple[VerificationCase, ...] = (
         expected_sql_or_behavior='NO SQL. customer_segment is text/category, not a numeric metric.',
         note='Metric guard',
     ),
-    blocked(
+    safe(
         'T64', 'I_SAFETY', 'show payments with customer details',
-        expected_sql_or_behavior='NO SQL in Phase 5/6. payments -> customers requires payments -> orders -> customers multi-hop, which is future Phase 7.',
-        note='No direct graph path',
+        expected_sql_or_behavior='SELECT payments.payment_id AS payments__payment_id, payments.order_id AS payments__order_id, payments.payment_date AS payments__payment_date, payments.payment_method AS payments__payment_method, payments.payment_status AS payments__payment_status, payments.payment_amount AS payments__payment_amount, orders.order_id AS orders__order_id, orders.customer_id AS orders__customer_id, orders.order_date AS orders__order_date, orders.shipped_date AS orders__shipped_date, orders.order_status AS orders__order_status, orders.order_amount AS orders__order_amount, customers.customer_id AS customers__customer_id, customers.customer_name AS customers__customer_name, customers.customer_city AS customers__customer_city, customers.customer_segment AS customers__customer_segment, customers.customer_status AS customers__customer_status, customers.signup_date AS customers__signup_date FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id LIMIT 50;',
+        note='Phase 7 two-edge joined lookup',
     ),
-    blocked(
+    safe(
         'T65', 'I_SAFETY', 'show total payment amount by customer city',
-        expected_sql_or_behavior='NO SQL in Phase 6. payments -> orders -> customers is multi-hop and must wait for Phase 7.',
-        note='Multi-hop blocked',
+        expected_sql_or_behavior='SELECT customers.customer_city, SUM(payments.payment_amount) AS total_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id GROUP BY customers.customer_city;',
+        note='Phase 8 safe two-edge joined aggregate',
     ),
     blocked(
         'T66', 'I_SAFETY', 'show total amount by customer city',
@@ -470,6 +471,76 @@ CASES: tuple[VerificationCase, ...] = (
         'T68', 'I_SAFETY', 'show status by amount',
         expected_sql_or_behavior="NO SQL. 'status' and 'amount' are too generic without owner/metric/dimension clarity.",
         note='Fail-closed ambiguity',
+    ),
+    safe(
+        'T69', 'J_PHASE8G_MULTI_HOP_AGG', 'average payment amount by customer status',
+        expected_sql_or_behavior='SELECT customers.customer_status, AVG(payments.payment_amount) AS average_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id GROUP BY customers.customer_status;',
+        note='Phase 8 AVG',
+    ),
+    safe(
+        'T70', 'J_PHASE8G_MULTI_HOP_AGG', 'minimum payment amount by customer city',
+        expected_sql_or_behavior='SELECT customers.customer_city, MIN(payments.payment_amount) AS minimum_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id GROUP BY customers.customer_city;',
+        note='Phase 8 MIN',
+    ),
+    safe(
+        'T71', 'J_PHASE8G_MULTI_HOP_AGG', 'maximum payment amount by customer segment',
+        expected_sql_or_behavior='SELECT customers.customer_segment, MAX(payments.payment_amount) AS maximum_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id GROUP BY customers.customer_segment;',
+        note='Phase 8 MAX',
+    ),
+    safe(
+        'T72', 'J_PHASE8G_MULTI_HOP_AGG', 'count payments by customer city',
+        expected_sql_or_behavior='SELECT customers.customer_city, COUNT(*) AS payment_count FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id GROUP BY customers.customer_city;',
+        note='Phase 8 safe COUNT base',
+    ),
+    safe(
+        'T73', 'J_PHASE8G_MULTI_HOP_AGG', 'show total paid payment amount by customer city',
+        expected_sql_or_behavior="SELECT customers.customer_city, SUM(payments.payment_amount) AS total_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE payments.payment_status = 'Paid' GROUP BY customers.customer_city;",
+        note='Phase 8 metric-table filter',
+    ),
+    safe(
+        'T74', 'J_PHASE8G_MULTI_HOP_AGG', 'show total payment amount by customer city for delivered orders',
+        expected_sql_or_behavior="SELECT customers.customer_city, SUM(payments.payment_amount) AS total_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE orders.order_status = 'Delivered' GROUP BY customers.customer_city;",
+        note='Phase 8 intermediate-table filter',
+    ),
+    safe(
+        'T75', 'J_PHASE8G_MULTI_HOP_AGG', 'show total payment amount by customer city for active customers',
+        expected_sql_or_behavior="SELECT customers.customer_city, SUM(payments.payment_amount) AS total_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE customers.customer_status = 'Active' GROUP BY customers.customer_city;",
+        note='Phase 8 dimension-table filter',
+    ),
+    safe(
+        'T76', 'J_PHASE8G_MULTI_HOP_AGG', 'show customer cities with total payment amount greater than 50000',
+        expected_sql_or_behavior='SELECT customers.customer_city, SUM(payments.payment_amount) AS total_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id GROUP BY customers.customer_city HAVING SUM(payments.payment_amount) > 50000;',
+        note='Phase 8 HAVING',
+    ),
+    safe(
+        'T77', 'J_PHASE8G_MULTI_HOP_AGG', 'top 5 customer cities by total payment amount',
+        expected_sql_or_behavior='SELECT customers.customer_city, SUM(payments.payment_amount) AS total_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id GROUP BY customers.customer_city ORDER BY total_payment_amount DESC LIMIT 5;',
+        note='Phase 8 ranking DESC',
+    ),
+    safe(
+        'T78', 'J_PHASE8G_MULTI_HOP_AGG', 'bottom 3 customer statuses by average payment amount',
+        expected_sql_or_behavior='SELECT customers.customer_status, AVG(payments.payment_amount) AS average_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id GROUP BY customers.customer_status ORDER BY average_payment_amount ASC LIMIT 3;',
+        note='Phase 8 ranking ASC',
+    ),
+    safe(
+        'T79', 'J_PHASE8G_MULTI_HOP_AGG', 'show total payment amount by customer city for payment date last month',
+        expected_sql_or_behavior="SELECT customers.customer_city, SUM(payments.payment_amount) AS total_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE payments.payment_date BETWEEN '2026-06-01' AND '2026-06-30' GROUP BY customers.customer_city;",
+        note='Phase 8 last-month interval',
+    ),
+    safe(
+        'T80', 'J_PHASE8G_MULTI_HOP_AGG', 'show total payment amount by customer city for payment date in 2026',
+        expected_sql_or_behavior="SELECT customers.customer_city, SUM(payments.payment_amount) AS total_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE payments.payment_date BETWEEN '2026-01-01' AND '2026-12-31' GROUP BY customers.customer_city;",
+        note='Phase 8 year interval',
+    ),
+    safe(
+        'T81', 'J_PHASE8G_MULTI_HOP_AGG', 'show total payment amount by customer city for payment date after 2026-02-10',
+        expected_sql_or_behavior="SELECT customers.customer_city, SUM(payments.payment_amount) AS total_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE payments.payment_date > '2026-02-10' GROUP BY customers.customer_city;",
+        note='Phase 8 after-date interval',
+    ),
+    safe(
+        'T82', 'J_PHASE8G_MULTI_HOP_AGG', 'show total payment amount by customer city for payment date between 2026-02-01 and 2026-03-31',
+        expected_sql_or_behavior="SELECT customers.customer_city, SUM(payments.payment_amount) AS total_payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE payments.payment_date BETWEEN '2026-02-01' AND '2026-03-31' GROUP BY customers.customer_city;",
+        note='Phase 8 between-date interval',
     ),
 )
 
@@ -887,6 +958,7 @@ def print_results(results: Sequence[CaseResult], *, verbose: bool) -> None:
 def main() -> int:
     args = parse_args()
     cases = selected_cases(args)
+    os.environ.setdefault("SQLSENSE_FIXED_TODAY", BENCHMARK_FIXED_TODAY)
 
     if args.questions_only:
         print_questions(cases)

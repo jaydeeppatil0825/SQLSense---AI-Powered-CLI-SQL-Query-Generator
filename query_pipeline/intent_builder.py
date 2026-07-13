@@ -41,8 +41,58 @@ _ALLOWED_BUSINESS_OPERATIONS = {
     "block",
 }
 
+_DISPLAY_VERBS = (
+    "show",
+    "list",
+    "display",
+    "get",
+    "fetch",
+    "give",
+    "provide",
+    "return",
+    "view",
+    # Existing accepted wording.
+    "see",
+    "find",
+    "tell",
+)
+_RELATIONSHIP_CONNECTORS = (
+    "together with",
+    "associated with",
+    "belonging to",
+    "connected to",
+    "combined with",
+    "along with",
+    "and their",
+    "linked to",
+    "related to",
+    "including",
+    "with",
+    "plus",
+)
+_DESCRIPTIVE_FILLERS = (
+    "information",
+    "attributes",
+    "attribute",
+    "overview",
+    "details",
+    "detail",
+    "records",
+    "record",
+    "profile",
+    "fields",
+    "field",
+    "data",
+    "info",
+)
+
+
+def _phrase_group_pattern(phrases: tuple[str, ...]) -> str:
+    return "|".join(re.escape(phrase).replace(r"\ ", r"\s+") for phrase in phrases)
+
+
 _LEADING_ACTION_RE = re.compile(
-    r"^\s*(?:show|list|display|get|fetch|view|see|give|tell(?:\s+me)?|find)\b\s*",
+    rf"^\s*(?:{_phrase_group_pattern(_DISPLAY_VERBS)})(?:\s+me)?\b\s*",
     re.IGNORECASE,
 )
 _COUNT_RE = re.compile(
@@ -90,6 +140,14 @@ _WITH_RE = re.compile(
     r"\s+with\s+(.+?)(?=\s+(?:from|where|having|group(?:ed)?\s+by|sort(?:ed)?\s+by|order(?:ed)?\s+by|limit\s+\d+)\b|$)",
     re.IGNORECASE,
 )
+_JOIN_LOOKUP_CONNECTOR_RE = re.compile(
+    rf"\s+(?:{_phrase_group_pattern(_RELATIONSHIP_CONNECTORS)})\s+(.+)$",
+    re.IGNORECASE,
+)
+_JOIN_LOOKUP_DESCRIPTIVE_RE = re.compile(
+    rf"\s+(?:{_phrase_group_pattern(_DESCRIPTIVE_FILLERS)})$",
+    re.IGNORECASE,
+)
 _INTERVAL_BOUNDARY = r"(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|where|with|for|from|limit\s+\d+)\b|$)"
 _BETWEEN_RE = re.compile(r"\bbetween\s+(.+?)\s+and\s+(.+?)" + _INTERVAL_BOUNDARY, re.IGNORECASE)
 _BEFORE_RE = re.compile(r"\bbefore\s+(.+?)" + _INTERVAL_BOUNDARY, re.IGNORECASE)
@@ -108,7 +166,7 @@ _AGGREGATE_MAX_RE = re.compile(r"\b(?:maximum|max|highest)\b", re.IGNORECASE)
 _AGGREGATE_MIN_RE = re.compile(r"\b(?:minimum|min|lowest)\b", re.IGNORECASE)
 _UNSAFE_RE = re.compile(r"\b(delete|update|insert|drop|alter|truncate)\b", re.IGNORECASE)
 _STOPWORD_RE = re.compile(
-    r"^(?:show|list|display|get|fetch|view|see|give|tell|me|all|the|a|an|of|for|to|with|by|from|in|where|per|each|group|filter)$",
+    rf"^(?:{_phrase_group_pattern(_DISPLAY_VERBS)}|me|all|the|a|an|of|for|to|with|by|from|in|where|per|each|group|filter)$",
     re.IGNORECASE,
 )
 _GENERIC_METRIC_TERMS = {
@@ -1115,9 +1173,9 @@ def _extract_join_lookup_request(body: str) -> dict[str, Any]:
     if not cleaned:
         return _empty_join_lookup_request()
 
-    with_match = re.search(r"\s+with\s+(.+)$", cleaned, re.IGNORECASE)
+    with_match = _JOIN_LOOKUP_CONNECTOR_RE.search(cleaned)
     if with_match:
-        base_phrase = _cleanup_phrase(cleaned[: with_match.start()])
+        base_phrase = _join_lookup_entity_phrase(cleaned[: with_match.start()])
         related_phrase = _cleanup_phrase(with_match.group(1))
         related_phrase = _cleanup_phrase(
             re.split(r"\s+(?:for|where)\s+", related_phrase, maxsplit=1, flags=re.IGNORECASE)[0]
@@ -1136,13 +1194,9 @@ def _extract_join_lookup_request(body: str) -> dict[str, Any]:
         )
         if aggregate_condition:
             return _empty_join_lookup_request()
-        broad_related = bool(
-            re.match(r"^their\s+", related_phrase, re.IGNORECASE)
-            or re.search(r"\b(?:detail|details)$", related_phrase, re.IGNORECASE)
-        )
+        broad_related = bool(re.match(r"^their\s+", related_phrase, re.IGNORECASE) or _JOIN_LOOKUP_DESCRIPTIVE_RE.search(related_phrase))
         normalized_related = re.sub(r"^their\s+", "", related_phrase, flags=re.IGNORECASE)
-        normalized_related = re.sub(r"\s+(?:detail|details)$", "", normalized_related, flags=re.IGNORECASE)
-        normalized_related = _cleanup_phrase(normalized_related)
+        normalized_related = _join_lookup_entity_phrase(normalized_related)
         return {
             "requested": True,
             "base_entity_phrase": base_phrase,
@@ -1165,6 +1219,17 @@ def _extract_join_lookup_request(body: str) -> dict[str, Any]:
             "projection_mode": "explicit_fields_only",
         }
     return _empty_join_lookup_request()
+
+
+def _join_lookup_entity_phrase(phrase: str) -> str:
+    text = _cleanup_phrase(_JOIN_LOOKUP_DESCRIPTIVE_RE.sub("", str(phrase or "")))
+    text = re.sub(r"^\s*can\s+you\s+", "", text, flags=re.IGNORECASE)
+    text = _LEADING_ACTION_RE.sub("", text)
+    while True:
+        cleaned = re.sub(r"^\s*(?:me|all|the)\s+", "", text, flags=re.IGNORECASE)
+        if cleaned == text:
+            return _cleanup_phrase(text)
+        text = cleaned
 
 
 def _extract_requested_sort(question: str) -> dict[str, str]:
@@ -1560,8 +1625,17 @@ def _extract_interval_filters(question: str, *, today: date | None = None) -> li
         "this quarter": _quarter_range(current.year, ((current.month - 1) // 3) + 1),
         "last quarter": _last_quarter(current),
     }
+    if not fielded_added:
+        relative_pattern = "|".join(re.escape(phrase) for phrase in relative_ranges)
+        match = re.search(rf"\b([a-z0-9_ ]+?\s+date)\s+({relative_pattern})\b", question, re.IGNORECASE)
+        if match:
+            field_phrase = _date_field_phrase(match.group(1))
+            phrase = match.group(2).lower()
+            start, end = relative_ranges[phrase]
+            add(f"{field_phrase} {phrase}", "between", [start, end], phrase.replace(" ", "_"), field_phrase)
+            fielded_added = True
     for phrase, (start, end) in relative_ranges.items():
-        if phrase in normalized:
+        if not fielded_added and phrase in normalized:
             add(phrase, "between", [start, end], phrase.replace(" ", "_"))
 
     match = _RELATIVE_DAYS_RE.search(question)
