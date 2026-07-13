@@ -42,6 +42,15 @@ def _singularize_token(token: str) -> str:
     return _planner()._singularize_token(token)
 
 
+def _field_tokens(text: str) -> set[str]:
+    tokens = {_singularize_token(token) for token in _tokenize(text)}
+    if "number" in tokens:
+        tokens.add("no")
+    if "no" in tokens:
+        tokens.add("number")
+    return tokens
+
+
 def _content_terms(question: str) -> list[str]:
     return _planner()._content_terms(question)
 
@@ -568,8 +577,8 @@ def _candidate_is_numeric_metric(entry: dict[str, Any]) -> bool:
 def _candidate_is_dimension(entry: dict[str, Any], phrase: str) -> bool:
     semantic_type = _candidate_semantic_type(entry)
     data_type = str(entry.get("data_type") or entry.get("type") or "").strip().lower()
-    column_tokens = {_singularize_token(token) for token in _tokenize(str(entry.get("column") or ""))}
-    phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
+    column_tokens = _field_tokens(str(entry.get("column") or ""))
+    phrase_tokens = _field_tokens(phrase)
     exact_column_request = bool(phrase_tokens and phrase_tokens == column_tokens)
     if bool(entry.get("is_measure")) and _candidate_is_numeric_metric(entry) and not exact_column_request:
         return False
@@ -588,10 +597,10 @@ def _role_candidate_scoring_entry(
     *,
     role: str = "generic",
 ) -> dict[str, Any] | None:
-    phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
+    phrase_tokens = _field_tokens(phrase)
     table_name = str(entry.get("table") or "").strip()
     column_name = str(entry.get("column") or "").strip()
-    column_tokens = {_singularize_token(token) for token in _tokenize(column_name)}
+    column_tokens = _field_tokens(column_name)
     table_tokens = {_singularize_token(token) for token in _tokenize(table_name)}
     qualified_tokens = table_tokens | column_tokens
     if not phrase_tokens or not column_tokens:
@@ -782,7 +791,7 @@ def _exact_table_column_candidates(
     matches: list[dict[str, Any]] = []
     for column in table_data.get("columns", []) or []:
         column_name = str(column.get("name") or "").strip()
-        if not column_name or _humanize(column_name) != _humanize(field_phrase):
+        if not column_name or _field_tokens(column_name) != _field_tokens(field_phrase):
             continue
         matches.append(
             {

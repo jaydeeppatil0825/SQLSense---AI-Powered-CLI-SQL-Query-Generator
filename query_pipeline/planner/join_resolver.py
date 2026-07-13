@@ -16,6 +16,7 @@ from query_pipeline.planner.filter_resolver import (
     _joined_aggregate_filter_contract,
     _resolve_interval_filters_for_scope,
     _source_scope_as_filter,
+    _source_scope_as_filters,
 )
 from query_pipeline.planner.role_resolver import (
     _candidate_is_numeric_metric,
@@ -52,12 +53,45 @@ def _tokenize(text: str) -> list[str]:
     return _planner()._tokenize(text)
 
 
+def _field_tokens(text: str) -> set[str]:
+    tokens = {_singularize_token(token) for token in _tokenize(text)}
+    if "number" in tokens:
+        tokens.add("no")
+    if "no" in tokens:
+        tokens.add("number")
+    return tokens
+
+
 def _singularize_token(token: str) -> str:
     return _planner()._singularize_token(token)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     return _planner()._safe_float(value, default)
+
+
+def _metric_modifier_value_phrase(prefix: str, base_table: str) -> str:
+    phrase = re.sub(
+        r"^\s*(?:total|sum|average|avg|mean|maximum|max|minimum|min)\s+",
+        "",
+        str(prefix or ""),
+        flags=re.IGNORECASE,
+    ).strip()
+    if not phrase:
+        return ""
+    table_phrase = _humanize(base_table)
+    if _field_tokens(phrase) and _field_tokens(phrase) <= _field_tokens(table_phrase):
+        return ""
+    return phrase
+
+
+def _metric_resolution_phrase(metric_phrase: str) -> str:
+    return re.sub(
+        r"^\s*(?:total|sum|average|avg|mean|maximum|max|minimum|min)\s+",
+        "",
+        str(metric_phrase or ""),
+        flags=re.IGNORECASE,
+    ).strip() or str(metric_phrase or "").strip()
 
 
 def _remove_weak_context_warning(warnings: list[Any]) -> list[Any]:
@@ -182,7 +216,7 @@ def _resolve_join_table(
     ranked = [item for item in ranked if item[0] > 0]
     if not ranked:
         return None, "missing"
-    if len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) < 0.08:
+    if len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) < 0.08 and ranked[0][0] < 1.0:
         return None, "ambiguous"
     return ranked[0][1], "resolved"
 
@@ -193,19 +227,20 @@ def _column_phrase_score(
     column: dict[str, Any],
     retrieved_candidates: list[dict[str, Any]],
 ) -> float:
-    phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
+    phrase_tokens = _field_tokens(phrase)
     column_name = str(column.get("name") or "")
-    column_tokens = {_singularize_token(token) for token in _tokenize(column_name)}
+    column_tokens = _field_tokens(column_name)
     qualified_tokens = {
         _singularize_token(token) for token in _tokenize(f"{table_name} {column_name}")
     }
+    qualified_tokens.update(_field_tokens(f"{table_name} {column_name}"))
     if not phrase_tokens or not column_tokens:
         return 0.0
     score = 0.0
-    if phrase_tokens == qualified_tokens:
+    if phrase_tokens == column_tokens:
         score = 1.0
-    elif phrase_tokens == column_tokens:
-        score = 0.9
+    elif phrase_tokens == qualified_tokens:
+        score = 0.96
     elif phrase_tokens <= qualified_tokens:
         score = 0.78
     elif phrase_tokens & qualified_tokens:
@@ -250,7 +285,7 @@ def _resolve_join_output_field(
     ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
     if not ranked or ranked[0][0] < 0.7:
         return None, "missing"
-    if len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) < 0.08:
+    if len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) < 0.08 and ranked[0][0] < 1.0:
         return None, "ambiguous"
     score, table_name, column_name = ranked[0]
     return {
@@ -477,7 +512,12 @@ def _apply_joined_aggregate_contract(
     requested_metrics = [
         str(value).strip() for value in (intent.get("requested_metrics") or []) if str(value).strip()
     ]
-    ranking_candidate = intent_type == "ranking" and bool(intent.get("metric_phrase"))
+    ranking_mode = str((intent.get("ranking_diagnostics") or {}).get("mode_hint") or "").strip()
+    ranking_candidate = (
+        intent_type == "ranking"
+        and ranking_mode == "grouped_aggregate"
+        and bool(intent.get("metric_phrase"))
+    )
     grouped_candidate = bool(
         intent.get("needs_grouping")
         and (intent.get("needs_aggregation") or intent.get("aggregate_function"))
@@ -535,7 +575,8 @@ def _apply_joined_aggregate_contract(
     aggregate_function = str(intent.get("aggregate_function") or "").strip().lower()
     if not aggregate_function and ranking_candidate and _normalize(metric_phrase).startswith("total "):
         aggregate_function = "sum"
-    metric_tokens = [_singularize_token(token) for token in _tokenize(metric_phrase)]
+    metric_lookup_phrase = _metric_resolution_phrase(metric_phrase)
+    metric_tokens = [_singularize_token(token) for token in _tokenize(metric_lookup_phrase)]
     if not aggregate_function and grouped_candidate and metric_tokens and metric_tokens[0] in _STATUS_VALUE_TOKENS:
         aggregate_function = "sum"
     if aggregate_function not in {"count", "sum", "avg", "min", "max"}:
@@ -593,10 +634,10 @@ def _apply_joined_aggregate_contract(
     metric_evidence_result: dict[str, Any] = {"status": "not_required", "selected": None, "ranked": []}
     modifier_filter_phrase: str | None = None
     if aggregate_function != "count":
-        metric_evidence_result = _rank_role_candidates(metric_phrase, metric_candidates, role="metric")
+        metric_evidence_result = _rank_role_candidates(metric_lookup_phrase, metric_candidates, role="metric")
         if metric_evidence_result.get("status") == "ambiguous" and dimension_table_hint:
             narrowed_metric_result = _rank_role_candidates(
-                metric_phrase,
+                metric_lookup_phrase,
                 metric_candidates,
                 role="metric",
                 allowed_tables={dimension_table_hint},
@@ -614,7 +655,7 @@ def _apply_joined_aggregate_contract(
             and not (metric_tokens and metric_tokens[0] in _STATUS_VALUE_TOKENS)
         ):
             schema_metric, schema_metric_status = _resolve_owned_monetary_metric_from_schema(
-                metric_phrase,
+                metric_lookup_phrase,
                 knowledge_base,
             )
             if schema_metric_status == "resolved" and schema_metric is not None:
@@ -640,7 +681,7 @@ def _apply_joined_aggregate_contract(
             or original_tier not in {"exact_normalized_column", "owner_qualified_exact", "kb_glossary_semantic"}
         )
         if should_try_modifier:
-            tokens = _tokenize(metric_phrase)
+            tokens = _tokenize(metric_lookup_phrase)
             for split_at in range(1, len(tokens)):
                 candidate_modifier_phrase = " ".join(tokens[:split_at]).strip()
                 residual_phrase = " ".join(tokens[split_at:]).strip()
@@ -659,11 +700,24 @@ def _apply_joined_aggregate_contract(
         if modifier_status == "resolved" and modifier_metric is not None:
             metric = modifier_metric
             metric_evidence_result = modifier_evidence_result
-            aggregate_words = {"total", "sum", "average", "avg", "mean", "maximum", "max", "minimum", "min"}
-            if _normalize(modifier_phrase or "") not in aggregate_words:
-                modifier_filter_phrase = modifier_phrase
+            modifier_filter_phrase = _metric_modifier_value_phrase(
+                modifier_phrase or "",
+                str(metric.get("table") or ""),
+            ) or None
         elif metric_evidence_result.get("status") == "resolved":
             metric = dict(metric_evidence_result.get("selected", {}).get("candidate") or {})
+            metric_column_phrase = _humanize(str(metric.get("column") or ""))
+            normalized_metric_phrase = _humanize(metric_lookup_phrase)
+            if (
+                metric_column_phrase
+                and normalized_metric_phrase.endswith(metric_column_phrase)
+                and normalized_metric_phrase != metric_column_phrase
+            ):
+                prefix = normalized_metric_phrase[: -len(metric_column_phrase)].strip()
+                modifier_filter_phrase = _metric_modifier_value_phrase(
+                    prefix,
+                    str(metric.get("table") or ""),
+                ) or None
         else:
             if modifier_status == "ambiguous":
                 metric_evidence_result = modifier_evidence_result
@@ -678,7 +732,7 @@ def _apply_joined_aggregate_contract(
                 )
             sales_metric = None
             sales_metric_status = "missing"
-            metric_tokens_for_sales = _tokenize(metric_phrase)
+            metric_tokens_for_sales = _tokenize(metric_lookup_phrase)
             if (
                 metric_tokens_for_sales
                 and _singularize_token(metric_tokens_for_sales[0]) in _STATUS_VALUE_TOKENS
@@ -752,6 +806,34 @@ def _apply_joined_aggregate_contract(
         resolved_dimensions = []
         dimension_status = str(dimension_evidence_result.get("status") or "missing")
     if dimension_status != "resolved" or len(resolved_dimensions) != 1:
+        metric_table = str((metric or {}).get("table") or "").strip()
+        exact_dimensions = (
+            _exact_table_column_candidates(metric_table, dimension_phrase, knowledge_base)
+            if metric_table
+            else []
+        )
+        if not exact_dimensions and aggregate_function == "count":
+            exact_dimensions = [
+                match
+                for table_name in sorted(knowledge_base)
+                for match in _exact_table_column_candidates(table_name, dimension_phrase, knowledge_base)
+            ]
+        if len(exact_dimensions) == 1:
+            resolved_dimensions = exact_dimensions
+            dimension_evidence_result = {
+                "status": "resolved",
+                "selected": {
+                    "candidate": dict(exact_dimensions[0]),
+                    "tier": "exact_normalized_column",
+                    "score": _SCORING_TIERS["exact_normalized_column"],
+                    "candidate_score": _safe_float(exact_dimensions[0].get("score")),
+                    "reasons": ["exact dimension phrase resolved from schema evidence"],
+                },
+                "ranked": [],
+                "tie_reason": "",
+            }
+            dimension_status = "resolved"
+    if dimension_status != "resolved" or len(resolved_dimensions) != 1:
         display_dimensions, display_status = _resolve_entity_display_dimension(
             dimension_phrase,
             dimension_candidates,
@@ -788,32 +870,37 @@ def _apply_joined_aggregate_contract(
 
     source_phrase = str(next(iter(intent.get("source_scope") or []), "")).strip()
     if aggregate_function == "count" and not source_phrase:
-        source_phrase = str(intent.get("target_entity_phrase") or "").strip()
+        source_phrase = metric_phrase or str(intent.get("target_entity_phrase") or "").strip()
     base_table = str((metric or {}).get("table") or "").strip()
     source_evidence_status = "not_required"
     deferred_source_filter_phrase: str | None = None
     explicit_base: str | None = None
     if source_phrase:
+        source_phrase_for_base = re.sub(r"^\s*count\s+", "", source_phrase, flags=re.IGNORECASE).strip()
         if aggregate_function == "count":
             explicit_base, base_status = _resolve_count_base_table(
-                source_phrase,
+                source_phrase_for_base,
                 dimension_table,
                 knowledge_base,
             )
         else:
-            explicit_base, base_status = _resolve_join_table(source_phrase, knowledge_base, [])
+            explicit_base, base_status = _resolve_join_table(source_phrase_for_base, knowledge_base, [])
         if base_status != "resolved" or explicit_base is None:
-            return _joined_aggregate_failure_context(
-                context,
-                blocked_node="table_scope",
-                reason=f"joined aggregate base table evidence is {base_status}",
-                resolved_nodes={"unsafe_check"},
-            )
-        if base_table and base_table != explicit_base:
+            if base_table:
+                deferred_source_filter_phrase = source_phrase
+                source_evidence_status = "not_required"
+            else:
+                return _joined_aggregate_failure_context(
+                    context,
+                    blocked_node="table_scope",
+                    reason=f"joined aggregate base table evidence is {base_status}",
+                    resolved_nodes={"unsafe_check"},
+                )
+        elif base_table and base_table != explicit_base:
             deferred_source_filter_phrase = source_phrase
         else:
             base_table = explicit_base
-        source_evidence_status = base_status
+            source_evidence_status = base_status
     if not base_table:
         return context if ranking_candidate else _joined_aggregate_failure_context(
             context,
@@ -824,7 +911,7 @@ def _apply_joined_aggregate_contract(
     if base_table == dimension_table:
         return context
 
-    allowed_tables = {base_table, dimension_table}
+    allowed_tables = set(knowledge_base)
     if deferred_source_filter_phrase and explicit_base:
         allowed_tables.add(explicit_base)
     selected_filters, filter_reason = _joined_aggregate_filter_contract(
@@ -839,7 +926,7 @@ def _apply_joined_aggregate_contract(
             str(intent.get("target_entity_phrase") or ""),
             base_table,
         ],
-        allow_preferred_owner_date=bool(ranking_candidate),
+        allow_preferred_owner_date=True,
     )
     if filter_reason:
         return _joined_aggregate_failure_context(
@@ -865,12 +952,23 @@ def _apply_joined_aggregate_contract(
     ):
         if not implicit_filter_phrase:
             continue
+        if implicit_source == "metric_modifier_value_filter":
+            implicit_filter_phrase = _metric_modifier_value_phrase(implicit_filter_phrase, base_table)
+            if not implicit_filter_phrase:
+                continue
         if implicit_source == "source_scope_value_filter":
             implicit_filter, implicit_status = _source_scope_as_filter(
                 implicit_filter_phrase,
                 knowledge_base,
                 allowed_tables,
             )
+            implicit_filters = [implicit_filter] if implicit_filter is not None else []
+            if implicit_status != "resolved":
+                implicit_filters, implicit_status = _source_scope_as_filters(
+                    implicit_filter_phrase,
+                    knowledge_base,
+                    allowed_tables,
+                )
         else:
             implicit_filter, implicit_status = _build_sample_value_filter(
                 value_phrase=implicit_filter_phrase,
@@ -879,7 +977,8 @@ def _apply_joined_aggregate_contract(
                 owner_table=None,
                 source=implicit_source,
             )
-        if implicit_status != "resolved" or implicit_filter is None:
+            implicit_filters = [implicit_filter] if implicit_filter is not None else []
+        if implicit_status != "resolved" or not implicit_filters:
             return _joined_aggregate_failure_context(
                 context,
                 blocked_node="where",
@@ -889,7 +988,7 @@ def _apply_joined_aggregate_contract(
                     "join_need", "relationship_graph_lookup", "safe_join_path", "ambiguity_check",
                 },
             )
-        selected_filters.append(implicit_filter)
+        selected_filters.extend(dict(entry) for entry in implicit_filters)
 
     graph = build_relationship_graph(knowledge_base, infer_relationships=False)
     graph_edges = find_safe_direct_join_relationships(graph, base_table, dimension_table)
@@ -1396,6 +1495,65 @@ def _apply_join_lookup_contract(
         candidate_tables.add(related_table)
 
     candidate_tables.discard("")
+    if projection_mode == "explicit_fields_only" and len(candidate_tables) == 1:
+        table_name = next(iter(candidate_tables))
+        output_columns = [
+            _qualified_output(str(field["table"]), str(field["column"]), "requested_output_field")
+            for field in resolved_fields
+        ]
+        raw_limit = intent.get("limit")
+        resolved_limit = 50 if raw_limit is None else raw_limit
+        if isinstance(resolved_limit, bool) or not isinstance(resolved_limit, int) or not 1 <= resolved_limit <= 1000:
+            return _join_failure_context(
+                context,
+                blocked_node="route",
+                reason="single-table explicit field LIMIT must be between 1 and 1000",
+                resolved_nodes=resolved_nodes,
+            )
+        planned = dict(context)
+        planned.update(
+            {
+                "query_shape": "single_table_list",
+                "route": "deterministic_sql_required",
+                "route_recommendation": "deterministic_sql_required",
+                "route_reason": "explicit requested fields resolved to one table",
+                "planner_reason": "explicit requested fields resolved to one table",
+                "can_plan": True,
+                "selected_tables": [
+                    {
+                        "table": table_name,
+                        "confidence": 1.0,
+                        "source": "explicit_fields_only",
+                        "selected_columns": [
+                            {"column": output["column"], "confidence": 1.0, "reason": output["source"]}
+                            for output in output_columns
+                        ],
+                    }
+                ],
+                "selected_table_names": [table_name],
+                "selected_knowledge_base": {table_name: deepcopy(knowledge_base[table_name])},
+                "selected_columns": list(output_columns),
+                "selected_output_columns": list(output_columns),
+                "selected_filters": [],
+                "selected_join_path": None,
+                "selected_relationship_path": None,
+                "join_paths": [],
+                "required_joins": [],
+                "limit": resolved_limit,
+                "confidence": max(_safe_float(context.get("confidence"), 0.0), 0.86),
+                "warnings": _remove_weak_context_warning(list(context.get("warnings") or [])),
+                "missing_evidence": [],
+                "ambiguities": [],
+                "ambiguity_details": [],
+            }
+        )
+        planned["plan"] = {
+            **dict(planned.get("plan") or {}),
+            "limit": resolved_limit,
+            "filters": [],
+            "selected_output_columns": list(output_columns),
+        }
+        return planned
     if len(candidate_tables) != 2:
         return _join_failure_context(
             context,

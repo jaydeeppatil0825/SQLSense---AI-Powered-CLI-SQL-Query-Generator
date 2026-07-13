@@ -28,6 +28,7 @@ from query_pipeline.planner.filter_resolver import (
     _joined_aggregate_filter_contract,
     _resolve_interval_filters_for_scope,
     _source_scope_as_filter,
+    _source_scope_as_filters,
     _structured_filter_entries,
 )
 from query_pipeline.planner.contract_builder import (
@@ -1195,33 +1196,52 @@ def _apply_multi_hop_join_lookup_contract(
     retrieved_columns = [dict(entry) for entry in (retrieved.get("matched_columns") or []) if isinstance(entry, dict)]
     base_phrase = str(lookup.get("base_entity_phrase") or intent.get("target_entity_phrase") or "").strip()
     base_table, base_status = _resolve_join_table(base_phrase, knowledge_base, retrieved_tables)
+    requested_fields = [str(value).strip() for value in (lookup.get("requested_output_fields") or []) if str(value).strip()]
+    resolved_fields: list[dict[str, Any]] = []
+    for phrase in requested_fields:
+        field, status = _resolve_join_output_field(phrase, knowledge_base, retrieved_columns)
+        if status == "resolved" and field:
+            resolved_fields.append(dict(field))
+    if (base_status != "resolved" or not base_table) and resolved_fields:
+        base_table = str(resolved_fields[0].get("table") or "")
+        base_status = "resolved" if base_table else "missing"
     if base_status != "resolved" or not base_table:
         return context
 
-    target_tables: set[str] = set()
+    field_tables = {str(field.get("table") or "") for field in resolved_fields if str(field.get("table") or "")}
+    target_tables: set[str] = set(field_tables - {base_table})
     related_phrase = str(lookup.get("related_request_phrase") or "").strip()
     if related_phrase:
         target_table, target_status = _resolve_join_table(related_phrase, knowledge_base, retrieved_tables)
         if target_status == "resolved" and target_table:
             target_tables.add(target_table)
-    for phrase in lookup.get("requested_output_fields") or []:
-        field, status = _resolve_join_output_field(str(phrase), knowledge_base, retrieved_columns)
-        if status == "resolved" and field and str(field.get("table") or "") != base_table:
-            target_tables.add(str(field.get("table") or ""))
 
     target_tables.discard(base_table)
-    if len(target_tables) != 1:
+    if not target_tables:
         return context
-    target_table = next(iter(target_tables))
 
     graph = build_relationship_graph(knowledge_base, infer_relationships=False)
-    result = resolve_safe_multi_hop_path(
-        base_table=base_table,
-        target_table=target_table,
-        relationship_graph=graph,
-        schema=knowledge_base,
-        max_depth=2,
-    )
+    path_results = []
+    last_failure = {"status": "no_safe_path", "reason": "explicit field tables do not resolve to one safe multi-hop path"}
+    for target_table in sorted(target_tables):
+        candidate = resolve_safe_multi_hop_path(
+            base_table=base_table,
+            target_table=target_table,
+            relationship_graph=graph,
+            schema=knowledge_base,
+            max_depth=2,
+        )
+        if candidate.get("status") != "unique_safe_path":
+            last_failure = candidate
+            continue
+        candidate_tables = set(candidate.get("tables") or [])
+        if field_tables and not field_tables <= candidate_tables:
+            continue
+        path_results.append(candidate)
+    result = path_results[0] if len(path_results) == 1 else {
+        "status": "ambiguous_path" if path_results else "no_safe_path",
+        "reason": "explicit field tables do not resolve to one safe multi-hop path" if path_results else str(last_failure.get("reason") or ""),
+    }
     if result["status"] != "unique_safe_path":
         planned = dict(context)
         planned.update(
@@ -1247,11 +1267,18 @@ def _apply_multi_hop_join_lookup_contract(
         "path_source": "relationship_graph",
         "ambiguity_status": "resolved",
     }
-    output_columns = [
-        output
-        for table_name in result["tables"]
-        for output in _all_table_outputs(table_name, knowledge_base, "multi_hop_joined_lookup_projection")
-    ]
+    output_columns = (
+        [
+            _qualified_output(str(field["table"]), str(field["column"]), "requested_output_field")
+            for field in resolved_fields
+        ]
+        if resolved_fields
+        else [
+            output
+            for table_name in result["tables"]
+            for output in _all_table_outputs(table_name, knowledge_base, "multi_hop_joined_lookup_projection")
+        ]
+    )
     selected_tables = [
         {
             "table": table_name,
@@ -1447,6 +1474,24 @@ def _normalize_planner_output(
                     )
         if metric_status == "resolved":
             effective_measure_candidates = resolved_metrics
+            if (
+                intent_type == "ranking"
+                and ranking_mode_hint == "grouped_aggregate"
+                and explicit_base
+                and len(resolved_metrics) == 1
+                and str(resolved_metrics[0].get("table") or "").strip() == explicit_base
+            ):
+                structured_intent = dict(structured_intent)
+                diagnostics = dict(structured_intent.get("ranking_diagnostics") or {})
+                diagnostics["mode_hint"] = "row"
+                structured_intent["ranking_diagnostics"] = diagnostics
+                structured_intent["aggregate_function"] = None
+                structured_intent["needs_grouping"] = False
+                structured_intent["requested_dimensions"] = []
+                structured_intent["grouping_phrase"] = ""
+                intent = structured_intent
+                ranking_mode_hint = "row"
+                ranking_mode = "row"
 
     standalone_aggregate_scope = bool(
         intent_type == "aggregate"
@@ -1570,18 +1615,18 @@ def _normalize_planner_output(
             or str(structured_intent.get("intent_type") or "").strip().lower() == "ranking"
         )
     ):
-        implicit_filter, implicit_filter_status = _source_scope_as_filter(
+        implicit_filters, implicit_filter_status = _source_scope_as_filters(
             implicit_filter_phrase,
             schema_for_resolution,
             {primary_table},
         )
-        if implicit_filter_status == "resolved" and implicit_filter is not None:
-            filter_candidates = _merge_candidate_columns([implicit_filter], filter_candidates)
-            selected_columns = _merge_candidate_columns(selected_columns, [implicit_filter])
+        if implicit_filter_status == "resolved" and implicit_filters:
+            filter_candidates = _merge_candidate_columns(implicit_filters, filter_candidates)
+            selected_columns = _merge_candidate_columns(selected_columns, implicit_filters)
             existing_filters = [
                 dict(entry) for entry in (plan.get("filters") or []) if isinstance(entry, dict)
             ]
-            existing_filters.append(implicit_filter)
+            existing_filters.extend(dict(entry) for entry in implicit_filters)
             plan["filters"] = existing_filters
             if query_shape in {"single_table_list", "filtered_query", "joined_lookup"}:
                 query_shape = "filtered_query"
@@ -1780,18 +1825,18 @@ def _normalize_planner_output(
             or str(structured_intent.get("intent_type") or "").strip().lower() == "ranking"
         )
     ):
-        implicit_filter, implicit_filter_status = _source_scope_as_filter(
+        implicit_filters, implicit_filter_status = _source_scope_as_filters(
             implicit_filter_phrase,
             schema_for_resolution,
             {selected_table_names[0]},
         )
-        if implicit_filter_status == "resolved" and implicit_filter is not None:
-            filter_candidates = _merge_candidate_columns([implicit_filter], filter_candidates)
-            selected_columns = _merge_candidate_columns(selected_columns, [implicit_filter])
+        if implicit_filter_status == "resolved" and implicit_filters:
+            filter_candidates = _merge_candidate_columns(implicit_filters, filter_candidates)
+            selected_columns = _merge_candidate_columns(selected_columns, implicit_filters)
             existing_filters = [
                 dict(entry) for entry in (plan.get("filters") or []) if isinstance(entry, dict)
             ]
-            existing_filters.append(implicit_filter)
+            existing_filters.extend(dict(entry) for entry in implicit_filters)
             plan["filters"] = existing_filters
             if query_shape in {"single_table_list", "filtered_query"}:
                 query_shape = "filtered_query"
@@ -1875,6 +1920,25 @@ def _normalize_planner_output(
     if grouped_dimension_required and len(selected_dimensions) != 1:
         blocking_ambiguities.add("dimension_selection")
         selected_dimensions = []
+    if (
+        grouped_dimension_required
+        and not selected_dimensions
+        and isinstance(selected_metric, dict)
+        and requested_dimensions
+    ):
+        metric_table = str(selected_metric.get("table") or "").strip()
+        exact_dimensions = _exact_table_column_candidates(
+            metric_table,
+            str(requested_dimensions[0]),
+            full_knowledge_base,
+        )
+        if len(exact_dimensions) == 1:
+            selected_dimensions = [dict(exact_dimensions[0])]
+            dimension_candidates = [dict(exact_dimensions[0])]
+            blocking_ambiguities.discard("dimension_selection")
+            if "dimension_selection" in ambiguities:
+                ambiguities = [value for value in ambiguities if value != "dimension_selection"]
+            missing_evidence_flags["missing_dimension"] = False
     selected_filters = [] if "filter_selection" in blocking_ambiguities else [
         dict(entry) for entry in (plan.get("filters") or [])
     ]
@@ -1957,16 +2021,16 @@ def _normalize_planner_output(
         and source_filter_primary_table
         and implicit_filter_phrase
     ):
-        implicit_filter, implicit_filter_status = _source_scope_as_filter(
+        implicit_filters, implicit_filter_status = _source_scope_as_filters(
             implicit_filter_phrase,
             schema_for_resolution,
             {source_filter_primary_table},
         )
-        if implicit_filter_status == "resolved" and implicit_filter is not None:
-            selected_filters = [dict(implicit_filter)]
-            plan["filters"] = [dict(implicit_filter)]
-            filter_candidates = _merge_candidate_columns([implicit_filter], filter_candidates)
-            selected_columns = _merge_candidate_columns(selected_columns, [implicit_filter])
+        if implicit_filter_status == "resolved" and implicit_filters:
+            selected_filters = [dict(entry) for entry in implicit_filters]
+            plan["filters"] = [dict(entry) for entry in implicit_filters]
+            filter_candidates = _merge_candidate_columns(implicit_filters, filter_candidates)
+            selected_columns = _merge_candidate_columns(selected_columns, implicit_filters)
             missing_evidence_flags["missing_filter_column"] = False
             blocking_ambiguities.discard("filter_selection")
     if (

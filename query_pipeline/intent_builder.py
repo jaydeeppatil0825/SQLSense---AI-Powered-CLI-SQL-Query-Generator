@@ -526,6 +526,16 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
     body_without_scope = _remove_source_scope(body_without_filters)
     aggregate_function = _detect_aggregate_function(body_without_filters)
     join_lookup_request = _extract_join_lookup_request(body_without_scope)
+    if (
+        aggregate_function
+        and join_lookup_request.get("projection_mode") == "explicit_fields_only"
+        and not re.match(
+            r"^\s*(?:total|sum|average|avg|mean|count|maximum|max|minimum|min)\b",
+            body_without_scope,
+            re.IGNORECASE,
+        )
+    ):
+        aggregate_function = None
 
     if _COUNT_RE.search(body):
         intent_type = "count"
@@ -1205,11 +1215,7 @@ def _extract_join_lookup_request(body: str) -> dict[str, Any]:
             "projection_mode": "broad_related" if broad_related else "base_plus_related_fields",
         }
 
-    parts = [
-        _cleanup_phrase(part)
-        for part in re.split(r"\s+and\s+", cleaned, flags=re.IGNORECASE)
-        if _cleanup_phrase(part)
-    ]
+    parts = _split_requested_output_fields(cleaned)
     if len(parts) >= 2:
         return {
             "requested": True,
@@ -1219,6 +1225,15 @@ def _extract_join_lookup_request(body: str) -> dict[str, Any]:
             "projection_mode": "explicit_fields_only",
         }
     return _empty_join_lookup_request()
+
+
+def _split_requested_output_fields(text: str) -> list[str]:
+    protected = re.sub(r",\s+and\s+", ", ", str(text or ""), flags=re.IGNORECASE)
+    return [
+        _cleanup_phrase(part)
+        for part in re.split(r"\s*,\s*|\s+and\s+", protected, flags=re.IGNORECASE)
+        if _cleanup_phrase(part)
+    ]
 
 
 def _join_lookup_entity_phrase(phrase: str) -> str:
@@ -1374,7 +1389,7 @@ def _extract_filter_text(question: str) -> str:
         match = pattern.search(question)
         if match:
             candidate = _cleanup_phrase(match.group(1))
-            if _parse_having_condition(candidate).get("aggregate_function"):
+            if _where_clause_is_having(question, match, candidate):
                 continue
             return candidate
     with_match = _WITH_RE.search(question)
@@ -1383,6 +1398,23 @@ def _extract_filter_text(question: str) -> str:
         if _with_phrase_is_row_filter(candidate):
             return candidate
     return ""
+
+
+def _where_clause_is_having(question: str, match: re.Match[str], candidate: str) -> bool:
+    if not _parse_having_condition(candidate).get("aggregate_function"):
+        return False
+    if re.match(
+        r"^\s*(?:sum|average|avg|mean|count|maximum|max|minimum|min)\b",
+        candidate,
+        re.IGNORECASE,
+    ):
+        return True
+    prefix = _cleanup_phrase(question[: match.start()])
+    return bool(
+        _detect_aggregate_function(prefix)
+        or _COUNT_RE.search(prefix)
+        or _has_explicit_grouping_marker(prefix)
+    )
 
 
 def _with_phrase_is_row_filter(phrase: str) -> bool:
@@ -1443,10 +1475,10 @@ def _extract_structured_filters(question: str, *, today: date | None = None) -> 
         (r"^(.+?)\s+is\s+not\s+null$", "is_not_null"),
         (r"^(.+?)\s+is\s+null$", "is_null"),
         (r"^(.+?)\s+(?:is\s+not|not\s+equals?(?:\s+to)?|!=|<>)\s+(.+)$", "neq"),
-        (r"^(.+?)\s+(?:greater\s+than\s+or\s+equal\s+to|at\s+least|>=)\s+(.+)$", "gte"),
-        (r"^(.+?)\s+(?:less\s+than\s+or\s+equal\s+to|at\s+most|<=)\s+(.+)$", "lte"),
-        (r"^(.+?)\s+(?:greater\s+than|more\s+than|above|over|>)\s+(.+)$", "gt"),
-        (r"^(.+?)\s+(?:less\s+than|below|under|<)\s+(.+)$", "lt"),
+        (r"^(.+?)\s+(?:is\s+)?(?:greater\s+than\s+or\s+equal\s+to|at\s+least|>=)\s+(.+)$", "gte"),
+        (r"^(.+?)\s+(?:is\s+)?(?:less\s+than\s+or\s+equal\s+to|at\s+most|<=)\s+(.+)$", "lte"),
+        (r"^(.+?)\s+(?:is\s+)?(?:greater\s+than|more\s+than|above|over|>)\s+(.+)$", "gt"),
+        (r"^(.+?)\s+(?:is\s+)?(?:less\s+than|below|under|<)\s+(.+)$", "lt"),
         (r"^(.+?)\s+(?:is\s+)?before\s+(.+)$", "before"),
         (r"^(.+?)\s+(?:is\s+)?after\s+(.+)$", "after"),
         (r"^(.+?)\s+(?:is\s+on|on)\s+(.+)$", "eq"),
@@ -1739,7 +1771,7 @@ def _extract_structured_having(question: str) -> list[dict[str, Any]]:
     if where_match:
         phrase = _cleanup_phrase(where_match.group(1))
         condition = _parse_having_condition(phrase)
-        if condition.get("aggregate_function"):
+        if condition.get("aggregate_function") and _where_clause_is_having(question, where_match, phrase):
             return [condition]
 
     with_match = _WITH_RE.search(question)

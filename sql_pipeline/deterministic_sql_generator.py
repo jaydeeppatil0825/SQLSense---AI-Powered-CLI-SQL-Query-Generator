@@ -503,10 +503,10 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
                 required_evidence=["selected_table", "selected_filter"],
                 reason="planner-selected filter evidence is missing",
             )
-        selected_filters = [
+        selected_filters = _dedupe_filters([
             entry for entry in (context.get("selected_filters") or [])
             if isinstance(entry, dict)
-        ]
+        ])
         selected_filter_operators = {
             str(entry.get("operator") or "").strip().lower()
             for entry in selected_filters
@@ -1178,7 +1178,21 @@ def _build_single_table_clause_plan(
             else "single_table_aggregate"
         )
     else:
+        projected_outputs = [
+            entry for entry in (context.get("selected_output_columns") or [])
+            if isinstance(entry, dict)
+            and str(entry.get("table") or "").strip() == table_name
+            and str(entry.get("column") or "").strip() in schema_columns
+        ]
         select_items = [
+            {
+                "expression": str(entry.get("column") or "").strip(),
+                "alias": str(entry.get("alias") or "").strip(),
+                "source_column": str(entry.get("column") or "").strip(),
+                "kind": "column",
+            }
+            for entry in projected_outputs
+        ] or (_ranking_projection_columns(table_name, table_data, schema_columns, order_by) if order_by else []) or [
             {"expression": column_name, "source_column": column_name, "kind": "column"}
             for column_name in schema_columns
         ]
@@ -1215,6 +1229,42 @@ def _build_single_table_clause_plan(
         route_reason=f"single-table {clause_shape} SQL generated deterministically",
         formula_evidence=list(context.get("formula_evidence") or []),
     )
+
+
+def _ranking_projection_columns(
+    table_name: str,
+    table_data: dict[str, Any],
+    schema_columns: set[str],
+    order_by: list[str],
+) -> list[dict[str, Any]]:
+    order_column = str(order_by[0]).split()[0] if order_by else ""
+    table_token = table_name[:-1] if table_name.endswith("s") else table_name
+    chosen: list[str] = []
+    for column in table_data.get("columns", []) or []:
+        column_name = str(column.get("name") or "")
+        if column_name in schema_columns and column_name == f"{table_token}_id":
+            chosen.append(column_name)
+            break
+    if not chosen:
+        for column in table_data.get("columns", []) or []:
+            column_name = str(column.get("name") or "")
+            if column_name in schema_columns and column_name.endswith("_id"):
+                chosen.append(column_name)
+                break
+    for suffix in ("_name", "_no", "_number", "name", "code"):
+        for column in table_data.get("columns", []) or []:
+            column_name = str(column.get("name") or "")
+            if column_name in schema_columns and column_name not in chosen and column_name.endswith(suffix):
+                chosen.append(column_name)
+                break
+        if len(chosen) >= 2:
+            break
+    if order_column in schema_columns and order_column not in chosen:
+        chosen.append(order_column)
+    return [
+        {"expression": column_name, "source_column": column_name, "kind": "column"}
+        for column_name in chosen
+    ]
 
 
 def _render_single_table_aggregate(plan: DeterministicSqlPlan) -> str:

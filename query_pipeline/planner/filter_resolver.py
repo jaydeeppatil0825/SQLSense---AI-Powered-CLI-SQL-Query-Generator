@@ -590,6 +590,17 @@ def _joined_aggregate_filter_contract(
             allowed_tables=allowed_tables,
             role="filter",
         )
+        if status != "resolved":
+            value_phrase = str(clause.get("value_phrase") or clause.get("value") or "").strip()
+            exact_matches = _exact_filter_column_matches(
+                field_phrase,
+                knowledge_base,
+                allowed_tables,
+                value_phrase=value_phrase,
+            )
+            if len(exact_matches) == 1:
+                resolved = exact_matches
+                status = "resolved"
         if status != "resolved" or len(resolved) != 1:
             return [], f"joined WHERE field evidence is {status}"
         candidate = dict(resolved[0])
@@ -606,6 +617,58 @@ def _joined_aggregate_filter_contract(
         )
         selected.append(candidate)
     return selected, ""
+
+
+def _exact_filter_column_matches(
+    field_phrase: str,
+    knowledge_base: dict[str, Any],
+    allowed_tables: set[str],
+    *,
+    value_phrase: str = "",
+) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    normalized_field = _humanize(field_phrase)
+    if not normalized_field:
+        return matches
+    for table_name in sorted(allowed_tables):
+        for column in knowledge_base.get(table_name, {}).get("columns", []) or []:
+            column_name = str(column.get("name") or "").strip()
+            if not column_name or _humanize(column_name) != normalized_field:
+                continue
+            matches.append(
+                {
+                    "table": table_name,
+                    "column": column_name,
+                    "semantic_type": resolved_semantic_type(column),
+                    "core_semantic_type": resolved_semantic_type(column),
+                    "data_type": column.get("type") or column.get("data_type") or "",
+                    "type": column.get("type") or column.get("data_type") or "",
+                    "is_measure": bool(column.get("is_measure")),
+                    "is_dimension": bool(column.get("is_dimension")),
+                    "is_date": bool(column.get("is_date")),
+                    "score": 1.0,
+                    "matched_terms": [field_phrase],
+                    "source": "schema_exact_filter",
+                }
+            )
+    value_phrase = str(value_phrase or "").strip()
+    if value_phrase and len(matches) > 1:
+        sample_matches: list[dict[str, Any]] = []
+        for match in matches:
+            table_name = str(match.get("table") or "")
+            column_name = str(match.get("column") or "")
+            column = next(
+                (
+                    entry for entry in knowledge_base.get(table_name, {}).get("columns", []) or []
+                    if str(entry.get("name") or "").strip() == column_name
+                ),
+                None,
+            )
+            if column and any(_sample_value_matches(value_phrase, sample) for sample in column_sample_values(column)):
+                sample_matches.append(match)
+        if sample_matches:
+            return sample_matches
+    return matches
 
 
 def _build_sample_value_filter(
@@ -808,6 +871,76 @@ def _source_scope_as_filter(
     return sample_filter, sample_status
 
 
+def _source_scope_as_filters(
+    source_phrase: str,
+    knowledge_base: dict[str, Any],
+    allowed_tables: set[str],
+) -> tuple[list[dict[str, Any]], str]:
+    parts = _source_scope_filter_parts(source_phrase, allowed_tables)
+    if not parts:
+        single, status = _source_scope_as_filter(source_phrase, knowledge_base, allowed_tables)
+        return ([single] if single is not None else []), status
+
+    resolved: list[dict[str, Any]] = []
+    for phrase, conjunction in parts:
+        selected, status = _source_scope_as_filter(phrase, knowledge_base, allowed_tables)
+        if status != "resolved" or selected is None:
+            return [], status
+        selected = dict(selected)
+        selected["conjunction"] = "" if not resolved else conjunction
+        resolved.append(selected)
+    return resolved, "resolved"
+
+
+def _source_scope_filter_parts(source_phrase: str, allowed_tables: set[str]) -> list[tuple[str, str]]:
+    phrase = _normalize(str(source_phrase or ""))
+    if not phrase:
+        return []
+
+    def has_non_owner_tokens(value: str) -> bool:
+        tokens = {_singularize_token(token) for token in _tokenize(value)}
+        if not tokens:
+            return False
+        for table_name in allowed_tables:
+            table_tokens = {_singularize_token(token) for token in _tokenize(table_name)}
+            if table_tokens and table_tokens <= tokens and not (tokens - table_tokens):
+                return False
+        return True
+
+    parts: list[tuple[str, str]] = []
+    in_match = re.search(r"\s+in\s+", phrase, flags=re.IGNORECASE)
+    if in_match:
+        prefix = phrase[: in_match.start()].strip()
+        tail = phrase[in_match.end() :].strip()
+        if has_non_owner_tokens(prefix):
+            parts.append((prefix, "and"))
+        tail_parts = [
+            _normalize(part)
+            for part in re.split(r"\s+(or|and)\s+", tail, flags=re.IGNORECASE)
+        ]
+        conjunction = "and"
+        for part in tail_parts:
+            if part in {"and", "or"}:
+                conjunction = part
+                continue
+            if part:
+                parts.append((part, conjunction))
+        return parts
+
+    split = [
+        _normalize(part)
+        for part in re.split(r"\s+(and|or)\s+", phrase, flags=re.IGNORECASE)
+    ]
+    conjunction = "and"
+    for part in split:
+        if part in {"and", "or"}:
+            conjunction = part
+            continue
+        if part and has_non_owner_tokens(part):
+            parts.append((part, conjunction))
+    return parts if len(parts) > 1 else []
+
+
 def _apply_implicit_sample_filter_contract(
     context: dict[str, Any],
     knowledge_base: dict[str, Any],
@@ -864,12 +997,12 @@ def _apply_implicit_sample_filter_contract(
         if resolved_status != "resolved" or not resolved_table:
             return context
         selected_table_names = [resolved_table]
-    implicit_filter, status = _source_scope_as_filter(
+    implicit_filters, status = _source_scope_as_filters(
         phrase,
         knowledge_base,
         {selected_table_names[0]},
     )
-    if status != "resolved" or implicit_filter is None:
+    if status != "resolved" or not implicit_filters:
         return context
 
     selected_table = selected_table_names[0]
@@ -885,19 +1018,20 @@ def _apply_implicit_sample_filter_contract(
     ]
     planned = dict(context)
     planned_intent = dict(intent)
-    planned_intent["structured_filters"] = [*structured_filters, implicit_filter]
+    planned_intent["structured_filters"] = [*structured_filters, *implicit_filters]
     requested_filters = [
         str(value).strip()
         for value in (intent.get("requested_filters") or [])
         if str(value).strip()
     ]
-    implicit_requested_filter = str(
-        implicit_filter.get("raw_phrase") or implicit_filter.get("value_phrase") or ""
-    ).strip()
-    if implicit_requested_filter and implicit_requested_filter not in requested_filters:
-        requested_filters.append(implicit_requested_filter)
+    for implicit_filter in implicit_filters:
+        implicit_requested_filter = str(
+            implicit_filter.get("raw_phrase") or implicit_filter.get("value_phrase") or ""
+        ).strip()
+        if implicit_requested_filter and implicit_requested_filter not in requested_filters:
+            requested_filters.append(implicit_requested_filter)
     planned_intent["requested_filters"] = requested_filters
-    planned_filters = [*selected_filters, implicit_filter]
+    planned_filters = [*selected_filters, *implicit_filters]
     if has_only_date_intervals:
         planned_filters, interval_reason = _resolve_interval_filters_for_scope(
             planned_filters,
@@ -919,12 +1053,12 @@ def _apply_implicit_sample_filter_contract(
             "selected_table_names": [selected_table],
             "selected_filters": planned_filters,
             "filter_candidates": _planner()._merge_candidate_columns(
-                [implicit_filter],
+                implicit_filters,
                 [entry for entry in (context.get("filter_candidates") or []) if isinstance(entry, dict)],
             ),
             "selected_columns": _planner()._merge_candidate_columns(
                 narrowed_selected_columns,
-                [implicit_filter],
+                implicit_filters,
             ),
             "required_evidence": ["selected_table", "filter_candidate"],
             "missing_evidence": [

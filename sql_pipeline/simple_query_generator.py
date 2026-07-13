@@ -649,7 +649,15 @@ def _try_show_all(
     if intent == "list" or re.search(r"\b(show|list|display|get|fetch|view|see|give|tell)\b", normalized_question):
         # Use explicit columns from schema instead of SELECT *
         columns = _table_columns(table_data)
-        column_names = [str(col.get("name", "")) for col in columns if col.get("name")]
+        schema_column_names = [str(col.get("name", "")) for col in columns if col.get("name")]
+        projected_columns = [
+            str(entry.get("column") or "").strip()
+            for entry in ((query_plan or {}).get("selected_output_columns") or [])
+            if isinstance(entry, dict)
+            and str(entry.get("table") or "").strip() == table_name
+            and str(entry.get("column") or "").strip() in schema_column_names
+        ]
+        column_names = projected_columns or schema_column_names
         if not column_names:
             # Fallback to SELECT * if no columns found
             column_list = "*"
