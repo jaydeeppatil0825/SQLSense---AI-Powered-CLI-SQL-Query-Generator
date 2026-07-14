@@ -2,9 +2,9 @@
     "db_engine": "mysql",
     "db_host": "localhost",
     "db_port": "3306",
-    "db_name": "sqlsense_phase_1_to_8_lab",
+    "db_name": "sqlsense_phase1_8_smoke_lab",
     "database_type": "mysql",
-    "database_name": "sqlsense_phase_1_to_8_lab",
-    "schema_hash": "975f9f750a5e934a9425dff1fc526a3c15dc5387a3cbac8eb23cf4162badb09a",
-    "schema_fingerprint": "975f9f750a5e934a9425dff1fc526a3c15dc5387a3cbac8eb23cf4162badb09a"
+    "database_name": "sqlsense_phase1_8_smoke_lab",
+    "schema_hash": "15d7f3d79b851f2cb5a35b368c17f2f24b36c8ba18c61d7075bded9b60700d03",
+    "schema_fingerprint": "15d7f3d79b851f2cb5a35b368c17f2f24b36c8ba18c61d7075bded9b60700d03"
 }
