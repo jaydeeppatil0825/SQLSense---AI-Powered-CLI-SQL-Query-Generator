@@ -129,7 +129,7 @@ test("offline and deep routes are controlled", async ({ page }) => {
   await page.route("**/health", async (route) => route.abort());
   await page.route("**/api/v1/gateway", async (route) => route.abort());
   await page.goto("/app/query");
-  await expect(page.getByText("Service unavailable")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Service unavailable", level: 1 })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 800 });
   await page.goto("/app/status");
   await expect(page.getByRole("button", { name: "Menu" })).toBeVisible();

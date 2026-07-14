@@ -1,6 +1,9 @@
 import { createRootRoute, createRoute, createRouter, Navigate, Outlet } from "@tanstack/react-router";
 import { lazy, Suspense, type ComponentType } from "react";
 import { FeatureErrorBoundary } from "../../components/shared/FeatureErrorBoundary";
+import { LandingPage } from "../../features/landing/LandingPage";
+import { QueryPage } from "../../features/query/QueryPage";
+import { ResultsPage } from "../../features/results/ResultsPage";
 import { AppShell } from "../layout/AppShell";
 import { paths } from "./paths";
 
@@ -21,9 +24,6 @@ function lazyPage(loader: () => Promise<{ default?: ComponentType; [key: string]
   };
 }
 
-const LandingPage = lazyPage(() => import("../../features/landing/LandingPage"), "LandingPage");
-const ResultsPage = lazyPage(() => import("../../features/results/ResultsPage"), "ResultsPage");
-const QueryPage = lazyPage(() => import("../../features/query/QueryPage"), "QueryPage");
 const HistoryPage = lazyPage(() => import("../../features/history/HistoryPage"), "HistoryPage");
 const DatabasePage = lazyPage(() => import("../../features/database/DatabasePage"), "DatabasePage");
 const KnowledgeBasePage = lazyPage(() => import("../../features/knowledge-base/KnowledgeBasePage"), "KnowledgeBasePage");
