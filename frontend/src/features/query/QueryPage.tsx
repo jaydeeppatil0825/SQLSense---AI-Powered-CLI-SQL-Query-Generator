@@ -99,16 +99,29 @@ export function QueryPage() {
   }
 
   const rejection = ask.error ? businessMessage(ask.error) : null;
+  const showWelcome = !ask.data && !ask.isPending && !rejection;
 
-  return (
-    <>
-      <PageHeader
-        eyebrow="Ask Your Data"
-        title="What would you like to know about your business?"
-        description="Ask in everyday language. SQLSense validates the request and returns read-only results."
-      />
-      <div className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
-        <Card>
+  if (showWelcome) {
+    return (
+      <div className="mx-auto flex min-h-[calc(100vh-12rem)] max-w-6xl flex-col items-center justify-center px-2 py-8 text-center">
+        <div className="grid h-28 w-28 place-items-center rounded-[2rem] border border-signal-300/40 bg-signal-500/10 text-6xl text-signal-500 shadow-[0_24px_70px_rgba(245,158,11,0.22)]">
+          <svg aria-hidden="true" viewBox="0 0 24 24" className="h-14 w-14" fill="none" stroke="currentColor" strokeWidth="1.8">
+            <path d="M12 3l1.9 6.1L20 11l-6.1 1.9L12 20l-1.9-7.1L4 11l6.1-1.9L12 3Z" />
+            <path d="M19 3v4M17 5h4" />
+          </svg>
+        </div>
+        <h1 className="mt-10 text-5xl font-black tracking-tight text-slate-950 dark:text-white md:text-7xl">
+          Ask Your <span className="text-signal-500">Data</span>
+        </h1>
+        <p className="mt-5 max-w-3xl text-lg leading-8 text-slate-600 dark:text-slate-300">
+          Ask business questions in plain English. SQLSense validates the request and returns read-only results from your connected data.
+        </p>
+
+        <div className="mt-12 w-full max-w-5xl">
+          <QuestionExamples onPick={setQuestion} />
+        </div>
+
+        <div className="mt-12 w-full max-w-5xl">
           <QuestionComposer
             question={question}
             onQuestionChange={setQuestion}
@@ -116,11 +129,31 @@ export function QueryPage() {
             onClear={clear}
             disabled={ask.isPending}
             error={formError}
+            variant="hero"
           />
-          <div className="mt-6">
-            <h2 className="mb-3 text-sm font-bold text-slate-200">Try an example</h2>
-            <QuestionExamples onPick={setQuestion} />
-          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Ask Your Data"
+        title="Ask another question"
+        description="Your question stays editable. Results appear below after SQLSense validates the request."
+      />
+      <div className="grid gap-6">
+        <Card className="mx-auto w-full max-w-5xl">
+          <QuestionComposer
+            question={question}
+            onQuestionChange={setQuestion}
+            onSubmit={submit}
+            onClear={clear}
+            disabled={ask.isPending}
+            error={formError}
+            variant="hero"
+          />
         </Card>
 
         <ResultErrorBoundary>

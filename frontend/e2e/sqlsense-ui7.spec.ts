@@ -119,7 +119,7 @@ test("complete mocked web app journey", async ({ page }) => {
 
   await page.goto("/app/query");
   await page.reload();
-  await expect(page.getByRole("heading", { name: "What would you like to know about your business?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Ask Your Data" })).toBeVisible();
 
   const results = await new AxeBuilder({ page }).exclude("pre").analyze();
   expect(results.violations.filter((violation) => ["critical", "serious"].includes(violation.impact ?? ""))).toEqual([]);
