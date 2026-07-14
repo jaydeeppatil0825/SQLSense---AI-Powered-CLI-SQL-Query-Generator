@@ -283,13 +283,13 @@ def test_invalid_generated_sql_never_becomes_last_executable_sql(monkeypatch, tm
 def test_cli_menu_labels_remain_unchanged():
     source = Path("main.py").read_text(encoding="utf-8")
 
-    assert 'print("  1) Connect Database / Auto Build KB")' in source
-    assert 'print("  2) Ask a Question / Ask Business Question")' in source
-    assert 'print("  3) Execute Last SQL")' in source
-    assert 'print("  4) Semantic AI Settings")' in source
-    assert 'print("  5) Search Business Glossary")' in source
-    assert 'print("  6) Rebuild / Refresh Knowledge Base")' in source
-    assert 'print("  7) Exit")' in source
+    assert 'print("|  1. Connect / Reuse Database                               |")' in source
+    assert 'print("|  2. Ask Question (auto-executes safe SQL)                  |")' in source
+    assert 'print("|  3. Rebuild Knowledge Base                                 |")' in source
+    assert 'print("|  4. Semantic AI Settings                                   |")' in source
+    assert 'print("|  5. Search Business Glossary                               |")' in source
+    assert 'print("|  6. Show Current Connection                                |")' in source
+    assert 'print("|  7. Exit                                                   |")' in source
 
 
 def test_connect_database_and_prepare_triggers_kb_build(monkeypatch):

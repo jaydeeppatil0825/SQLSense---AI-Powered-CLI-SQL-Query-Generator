@@ -90,6 +90,15 @@ class AppService:
     def connect_from_env(self) -> Tuple[bool, str, Optional[Engine]]:
         """Connect to database using environment variables."""
         return self.database_service.connect_from_env()
+
+    def disconnect_database(self) -> Tuple[bool, str]:
+        """Dispose the active database connection and clear runtime state."""
+        engine = self.database_service.get_engine()
+        if engine is not None:
+            engine.dispose()
+        self.database_service._reset_active_database_context(stale_reason="database disconnected")
+        self._reset_runtime_state()
+        return True, "Database disconnected"
     
     def build_knowledge_base(
         self,

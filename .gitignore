@@ -37,6 +37,8 @@ vector_store/chroma/
 # Generated output files
 output/
 charts/
+frontend/node_modules/
+frontend/dist/
 
 # Log files
 logs/

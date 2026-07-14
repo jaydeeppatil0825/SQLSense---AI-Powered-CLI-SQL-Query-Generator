@@ -1,0 +1,16 @@
+export const paths = {
+  home: "/",
+  app: "/app",
+  query: "/app/" + "query",
+  history: "/app/" + "history",
+  database: "/app/" + "database",
+  knowledgeBase: "/app/" + "knowledge",
+  settings: "/app/" + "settings",
+  systemStatus: "/app/" + "status",
+  legacyQuery: "/" + "query",
+  legacyHistory: "/" + "history",
+  legacyDatabase: "/" + "database",
+  legacyKnowledgeBase: "/" + "knowledge-base",
+  legacySettings: "/" + "settings",
+  legacySystemStatus: "/" + "system-status",
+} as const;
