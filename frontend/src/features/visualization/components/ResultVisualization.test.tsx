@@ -10,7 +10,7 @@ describe("ResultVisualization", () => {
 
     expect(screen.getByRole("tab", { name: "Table" })).toHaveAttribute("aria-selected", "true");
     await userEvent.click(screen.getByRole("tab", { name: "Chart" }));
-    expect(screen.getByText("Select category")).toBeInTheDocument();
+    expect(await screen.findByText("Select category")).toBeInTheDocument();
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
@@ -25,7 +25,7 @@ describe("ResultVisualization", () => {
     render(<ResultVisualization columns={["total"]} rows={[{ total: 99 }]} />);
 
     await userEvent.click(screen.getByRole("tab", { name: "Chart" }));
-    await userEvent.selectOptions(screen.getByLabelText("Chart"), "kpi");
+    await userEvent.selectOptions(await screen.findByLabelText("Chart"), "kpi");
     expect(screen.getByText("99")).toBeInTheDocument();
   });
 });
