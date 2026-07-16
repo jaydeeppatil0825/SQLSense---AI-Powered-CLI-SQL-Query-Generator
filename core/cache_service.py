@@ -187,12 +187,14 @@ class MemoryCacheStore:
         self._lock = RLock()
         self._entries: OrderedDict[str, str] = OrderedDict()
         self._stats = _counter_stats()
+        self._artifact_stats: dict[str, dict[str, int]] = {}
 
     def get(self, key: CacheKey, *, artifact_version: str) -> CacheRead:
         with self._lock:
             raw = self._entries.get(key.key_hash)
             if raw is None:
                 self._stats["misses"] += 1
+                _record_artifact_event(self._artifact_stats, key.artifact_type, "miss")
                 return CacheRead(MISS)
             self._entries.move_to_end(key.key_hash)
         read = _decode_envelope(raw, key=key, artifact_version=artifact_version, config=self.config)
@@ -204,7 +206,7 @@ class MemoryCacheStore:
             return CacheWrite(INVALID, reason="cache value contains sensitive data")
         try:
             raw = _encode_envelope(key=key, artifact_version=artifact_version, value=value, config=self.config)
-            self._write_entry(key.key_hash, raw)
+            self._write_entry(key.key_hash, raw, key.artifact_type)
         except Exception as exc:
             self._stats["write_failures"] += 1
             return CacheWrite(WRITE_FAILED, reason=str(exc))
@@ -227,13 +229,18 @@ class MemoryCacheStore:
 
     def stats(self) -> dict[str, Any]:
         with self._lock:
-            return {**_base_stats(self.config, len(self._entries)), **self._stats}
+            return {
+                **_base_stats(self.config, len(self._entries)),
+                **self._stats,
+                "artifacts": {name: dict(values) for name, values in self._artifact_stats.items()},
+            }
 
-    def _write_entry(self, key_hash: str, raw: str) -> None:
+    def _write_entry(self, key_hash: str, raw: str, artifact_type: str) -> None:
         with self._lock:
             self._entries[key_hash] = raw
             self._entries.move_to_end(key_hash)
             self._stats["writes"] += 1
+            _record_artifact_event(self._artifact_stats, artifact_type, "write")
             while len(self._entries) > self.config.memory_max_entries:
                 self._entries.popitem(last=False)
                 self._stats["evictions"] += 1
@@ -241,12 +248,16 @@ class MemoryCacheStore:
     def _record_read(self, read: CacheRead, key: CacheKey) -> None:
         if read.state == HIT:
             self._stats["hits"] += 1
+            _record_artifact_event(self._artifact_stats, key.artifact_type, "hit")
         elif read.state == MISS:
             self._stats["misses"] += 1
+            _record_artifact_event(self._artifact_stats, key.artifact_type, "miss")
         elif read.state == STALE:
             self._stats["stale"] += 1
+            _record_artifact_event(self._artifact_stats, key.artifact_type, "stale")
         elif read.state == CORRUPT:
             self._stats["corrupt"] += 1
+            _record_artifact_event(self._artifact_stats, key.artifact_type, "corrupt")
             self.delete(key)
 
 
@@ -255,6 +266,7 @@ class RedisCacheStore:
         self.config = config or CacheConfig.from_env()
         self._client = client
         self._stats = _counter_stats()
+        self._artifact_stats: dict[str, dict[str, int]] = {}
 
     @property
     def client(self) -> Any:
@@ -278,14 +290,16 @@ class RedisCacheStore:
             raw = self.client.get(self._redis_key(key))
         except Exception:
             self._stats["misses"] += 1
+            _record_artifact_event(self._artifact_stats, key.artifact_type, "miss")
             return CacheRead(MISS, reason="redis unavailable")
         if raw is None:
             self._stats["misses"] += 1
+            _record_artifact_event(self._artifact_stats, key.artifact_type, "miss")
             return CacheRead(MISS)
         read = _decode_envelope(raw, key=key, artifact_version=artifact_version, config=self.config)
         if read.state == CORRUPT:
             self.delete(key)
-        self._record_read(read)
+        self._record_read(read, key)
         return read
 
     def set(self, key: CacheKey, *, artifact_version: str, value: Any) -> CacheWrite:
@@ -295,6 +309,7 @@ class RedisCacheStore:
             raw = _encode_envelope(key=key, artifact_version=artifact_version, value=value, config=self.config)
             self.client.setex(self._redis_key(key), self.config.ttl_seconds, raw)
             self._stats["writes"] += 1
+            _record_artifact_event(self._artifact_stats, key.artifact_type, "write")
             return CacheWrite(STORED)
         except Exception as exc:
             self._stats["write_failures"] += 1
@@ -326,7 +341,11 @@ class RedisCacheStore:
         self.invalidate_namespace("*")
 
     def stats(self) -> dict[str, Any]:
-        return {**_base_stats(self.config, entries=None), **self._stats}
+        return {
+            **_base_stats(self.config, entries=None),
+            **self._stats,
+            "artifacts": {name: dict(values) for name, values in self._artifact_stats.items()},
+        }
 
     def _redis_key(self, key: CacheKey) -> str:
         return f"{self.config.prefix}:{self.config.contract_version}:{key.artifact_type}:{key.namespace}:{key.key_hash}"
@@ -334,15 +353,19 @@ class RedisCacheStore:
     def _redis_pattern(self, namespace: str) -> str:
         return f"{self.config.prefix}:{self.config.contract_version}:*:{namespace}:*"
 
-    def _record_read(self, read: CacheRead) -> None:
+    def _record_read(self, read: CacheRead, key: CacheKey) -> None:
         if read.state == HIT:
             self._stats["hits"] += 1
+            _record_artifact_event(self._artifact_stats, key.artifact_type, "hit")
         elif read.state == MISS:
             self._stats["misses"] += 1
+            _record_artifact_event(self._artifact_stats, key.artifact_type, "miss")
         elif read.state == STALE:
             self._stats["stale"] += 1
+            _record_artifact_event(self._artifact_stats, key.artifact_type, "stale")
         elif read.state == CORRUPT:
             self._stats["corrupt"] += 1
+            _record_artifact_event(self._artifact_stats, key.artifact_type, "corrupt")
 
 
 def _encode_envelope(*, key: CacheKey, artifact_version: str, value: Any, config: CacheConfig) -> str:
@@ -439,6 +462,17 @@ def _counter_stats() -> dict[str, int]:
         "evictions": 0,
         "write_failures": 0,
     }
+
+
+def _record_artifact_event(stats: dict[str, dict[str, int]], artifact_type: str, event: str) -> None:
+    if not artifact_type:
+        return
+    bucket = stats.setdefault(
+        artifact_type,
+        {"hit": 0, "miss": 0, "stale": 0, "corrupt": 0, "write": 0},
+    )
+    if event in bucket:
+        bucket[event] += 1
 
 
 def _base_stats(config: CacheConfig, entries: int | None) -> dict[str, Any]:

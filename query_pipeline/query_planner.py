@@ -15,7 +15,6 @@ from kb_pipeline.schema_facts import (
 )
 from kb_pipeline.relationship_graph import (
     build_relationship_graph,
-    find_safe_direct_join_relationships,
 )
 from kb_pipeline.vector import VectorRetriever
 from query_pipeline.planner.filter_resolver import (
@@ -54,6 +53,7 @@ from query_pipeline.planner.confidence import (
 )
 from query_pipeline.planner.having_resolver import _selected_having_for_contract
 from query_pipeline.planner.phase7_bfs_join_resolver import resolve_safe_multi_hop_path
+from query_pipeline.planner.phase9b_cache import cached_multi_hop_path
 from query_pipeline.planner.join_resolver import (
     _DIMENSION_SEMANTIC_TYPES,
     _GENERIC_ROLE_TERMS,
@@ -890,6 +890,8 @@ def _build_query_context_from_retrieved_context(
     intent: dict[str, Any],
     retrieved_context: dict[str, Any],
     knowledge_base: dict[str, Any],
+    cache_store: Any | None = None,
+    cache_database_identity: dict[str, Any] | None = None,
 ) -> dict:
     full_knowledge_base = dict(knowledge_base or {})
     planner_intent = _planner_intent_from_structured_intent(intent)
@@ -1151,11 +1153,26 @@ def _build_query_context_from_retrieved_context(
         debug_trace_details=debug_trace_details,
     )
     normalized_result = _apply_implicit_sample_filter_contract(normalized_result, knowledge_base)
-    joined_aggregate_result = _apply_joined_aggregate_contract(normalized_result, knowledge_base)
+    joined_aggregate_result = _apply_joined_aggregate_contract(
+        normalized_result,
+        knowledge_base,
+        cache_store=cache_store,
+        cache_database_identity=cache_database_identity,
+    )
     if joined_aggregate_result is not normalized_result:
         return joined_aggregate_result
-    join_lookup_result = _apply_join_lookup_contract(normalized_result, knowledge_base)
-    return _apply_multi_hop_join_lookup_contract(join_lookup_result, knowledge_base)
+    join_lookup_result = _apply_join_lookup_contract(
+        normalized_result,
+        knowledge_base,
+        cache_store=cache_store,
+        cache_database_identity=cache_database_identity,
+    )
+    return _apply_multi_hop_join_lookup_contract(
+        join_lookup_result,
+        knowledge_base,
+        cache_store=cache_store,
+        cache_database_identity=cache_database_identity,
+    )
 
 
 def _resolve_metric_with_modifier(
@@ -1179,6 +1196,8 @@ def _resolve_metric_with_modifier(
 def _apply_multi_hop_join_lookup_contract(
     context: dict[str, Any],
     knowledge_base: dict[str, Any],
+    cache_store: Any | None = None,
+    cache_database_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
     lookup = dict(intent.get("join_lookup_request") or {})
@@ -1224,12 +1243,23 @@ def _apply_multi_hop_join_lookup_contract(
     path_results = []
     last_failure = {"status": "no_safe_path", "reason": "explicit field tables do not resolve to one safe multi-hop path"}
     for target_table in sorted(target_tables):
-        candidate = resolve_safe_multi_hop_path(
+        candidate = cached_multi_hop_path(
+            cache_store=cache_store,
+            database_identity=cache_database_identity,
+            knowledge_base=knowledge_base,
+            relationship_graph=graph,
             base_table=base_table,
             target_table=target_table,
-            relationship_graph=graph,
-            schema=knowledge_base,
             max_depth=2,
+            candidate_tables=sorted({base_table, target_table, *field_tables}),
+            planner_options={"shape": "multi_hop_join_lookup"},
+            compute=lambda target_table=target_table: resolve_safe_multi_hop_path(
+                base_table=base_table,
+                target_table=target_table,
+                relationship_graph=graph,
+                schema=knowledge_base,
+                max_depth=2,
+            ),
         )
         if candidate.get("status") != "unique_safe_path":
             last_failure = candidate
@@ -1239,7 +1269,7 @@ def _apply_multi_hop_join_lookup_contract(
             continue
         path_results.append(candidate)
     result = path_results[0] if len(path_results) == 1 else {
-        "status": "ambiguous_path" if path_results else "no_safe_path",
+        "status": "ambiguous_path" if path_results else str(last_failure.get("status") or "no_safe_path"),
         "reason": "explicit field tables do not resolve to one safe multi-hop path" if path_results else str(last_failure.get("reason") or ""),
     }
     if result["status"] != "unique_safe_path":
@@ -2322,6 +2352,8 @@ def build_query_context(
     vector_retriever: VectorRetriever | None = None,
     intent: dict[str, Any] | None = None,
     retrieved_context: dict[str, Any] | None = None,
+    cache_store: Any | None = None,
+    cache_database_identity: dict[str, Any] | None = None,
 ) -> dict:
     """Build a deterministic planner contract without generating SQL."""
     normalized_question = _normalize(question)
@@ -2333,6 +2365,8 @@ def build_query_context(
             intent,
             retrieved_context,
             knowledge_base,
+            cache_store=cache_store,
+            cache_database_identity=cache_database_identity,
         )
 
     from query_pipeline.planner.legacy_planner import build_legacy_query_context

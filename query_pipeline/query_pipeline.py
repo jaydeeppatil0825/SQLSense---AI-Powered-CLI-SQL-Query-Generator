@@ -87,6 +87,8 @@ class QueryPipeline:
         business_glossary: Optional[Dict[str, Any]] = None,
         vector_retriever: Optional[Any] = None,
         ai_backend: str = "local",
+        cache_store: Any | None = None,
+        cache_database_identity: dict[str, Any] | None = None,
     ) -> QueryPipelineResult:
         # ai_backend is accepted only for backward compatibility.
         # Query pipeline must not call AI or SQL runtime orchestration.
@@ -109,6 +111,8 @@ class QueryPipeline:
             retrieved_context=retrieved_context,
             business_glossary=business_glossary,
             vector_retriever=vector_retriever,
+            cache_store=cache_store,
+            cache_database_identity=cache_database_identity,
         )
         formula_evidence = self._extract_formula_evidence(query_context, retrieved_context)
         evidence_sources = self._extract_evidence_sources(query_context, retrieved_context)
@@ -153,6 +157,8 @@ class QueryPipeline:
         retrieved_context: Dict[str, Any],
         business_glossary: Optional[Dict[str, Any]],
         vector_retriever: Optional[Any],
+        cache_store: Any | None,
+        cache_database_identity: dict[str, Any] | None,
     ) -> Dict[str, Any]:
         try:
             return build_query_context(
@@ -162,6 +168,8 @@ class QueryPipeline:
                 vector_retriever=vector_retriever,
                 intent=intent,
                 retrieved_context=retrieved_context,
+                cache_store=cache_store,
+                cache_database_identity=cache_database_identity,
             )
         except Exception as exc:
             if str(os.getenv("SQLSENSE_DEBUG_RERAISE_PLANNER", "")).strip().lower() in {"1", "true", "yes", "on"}:

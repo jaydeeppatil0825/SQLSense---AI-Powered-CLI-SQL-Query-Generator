@@ -325,6 +325,8 @@ class AppService:
             business_glossary=business_glossary,
             vector_retriever=vector_retriever,
             ai_backend=backend,
+            cache_store=self.cache_service,
+            cache_database_identity=self.database_service._connected_database_identity(),
         )
         self.last_pipeline_result = pipeline_result
 

@@ -8,7 +8,6 @@ from typing import Any
 
 from kb_pipeline.relationship_graph import (
     build_relationship_graph,
-    find_safe_direct_join_relationships,
 )
 from query_pipeline.planner.filter_resolver import (
     _STATUS_VALUE_TOKENS,
@@ -32,7 +31,11 @@ from query_pipeline.planner.role_resolver import (
     _source_selected_evidence_entry,
 )
 from query_pipeline.planner.phase7_bfs_join_resolver import resolve_safe_multi_hop_path
-from query_pipeline.planner.phase8a_grain_analyzer import analyze_selected_path_grain
+from query_pipeline.planner.phase9b_cache import (
+    cached_direct_join_relationships,
+    cached_grain_analysis,
+    cached_multi_hop_path,
+)
 
 
 def _planner():
@@ -500,6 +503,8 @@ def _joined_aggregate_failure_context(
 def _apply_joined_aggregate_contract(
     context: dict[str, Any],
     knowledge_base: dict[str, Any],
+    cache_store: Any | None = None,
+    cache_database_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
     if intent.get("unsafe"):
@@ -991,15 +996,35 @@ def _apply_joined_aggregate_contract(
         selected_filters.extend(dict(entry) for entry in implicit_filters)
 
     graph = build_relationship_graph(knowledge_base, infer_relationships=False)
-    graph_edges = find_safe_direct_join_relationships(graph, base_table, dimension_table)
+    graph_edges = cached_direct_join_relationships(
+        cache_store=cache_store,
+        database_identity=cache_database_identity,
+        knowledge_base=knowledge_base,
+        relationship_graph=graph,
+        source_table=base_table,
+        target_table=dimension_table,
+        candidate_tables=[base_table, dimension_table],
+        planner_options={"shape": "joined_aggregate"},
+    )
     grain_analysis: dict[str, Any] | None = None
     if not graph_edges:
-        bfs_result = resolve_safe_multi_hop_path(
+        bfs_result = cached_multi_hop_path(
+            cache_store=cache_store,
+            database_identity=cache_database_identity,
+            knowledge_base=knowledge_base,
+            relationship_graph=graph,
             base_table=base_table,
             target_table=dimension_table,
-            relationship_graph=graph,
-            schema=knowledge_base,
             max_depth=2,
+            candidate_tables=[base_table, dimension_table],
+            planner_options={"shape": "joined_aggregate"},
+            compute=lambda: resolve_safe_multi_hop_path(
+                base_table=base_table,
+                target_table=dimension_table,
+                relationship_graph=graph,
+                schema=knowledge_base,
+                max_depth=2,
+            ),
         )
         if (
             bfs_result.get("status") != "unique_safe_path"
@@ -1022,13 +1047,19 @@ def _apply_joined_aggregate_contract(
             "path_source": "relationship_graph",
             "ambiguity_status": "resolved",
         }
-        grain_analysis = analyze_selected_path_grain(
+        grain_analysis = cached_grain_analysis(
+            cache_store=cache_store,
+            database_identity=cache_database_identity,
+            knowledge_base=knowledge_base,
+            relationship_graph=graph,
             metric_base_table=base_table,
             selected_join_path=candidate_join_path,
-            relationship_graph=graph,
-            schema=knowledge_base,
             aggregate_function=aggregate_function,
             count_base_table=base_table if aggregate_function == "count" else None,
+            metric_column="" if aggregate_function == "count" else str(metric.get("column") or ""),
+            dimension_table=dimension_table,
+            dimension_column=dimension_column,
+            planner_options={"shape": "joined_aggregate"},
         )
         if not grain_analysis.get("grain_preserved"):
             return _joined_aggregate_failure_context(
@@ -1372,6 +1403,8 @@ def _apply_joined_aggregate_contract(
 def _apply_join_lookup_contract(
     context: dict[str, Any],
     knowledge_base: dict[str, Any],
+    cache_store: Any | None = None,
+    cache_database_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
     if intent.get("unsafe"):
@@ -1563,7 +1596,16 @@ def _apply_join_lookup_contract(
         )
     first_table, second_table = sorted(candidate_tables)
     graph = build_relationship_graph(knowledge_base, infer_relationships=False)
-    graph_edges = find_safe_direct_join_relationships(graph, first_table, second_table)
+    graph_edges = cached_direct_join_relationships(
+        cache_store=cache_store,
+        database_identity=cache_database_identity,
+        knowledge_base=knowledge_base,
+        relationship_graph=graph,
+        source_table=first_table,
+        target_table=second_table,
+        candidate_tables=sorted(candidate_tables),
+        planner_options={"shape": "joined_lookup"},
+    )
     resolved_nodes.add("relationship_graph_lookup")
     if not graph_edges:
         return _join_failure_context(
