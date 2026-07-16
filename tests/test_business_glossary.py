@@ -115,6 +115,64 @@ def test_generate_business_glossary_preserves_profile_and_sample_evidence_withou
     assert "Closed" not in entry["related_terms"]
 
 
+def test_generate_business_glossary_preserves_owner_qualified_column_evidence():
+    knowledge_base = {
+        "orders": {
+            "columns": [
+                {
+                    "name": "payment_status",
+                    "type": "VARCHAR(20)",
+                    "semantic_type": "category_candidate",
+                    "profile_facts": {"sample_values": ["paid", "unpaid"], "unique_count": 2},
+                    "planner_roles": {"dimension_candidate": True, "filter_candidate": True},
+                },
+                {
+                    "name": "total_amount",
+                    "type": "DECIMAL(10,2)",
+                    "semantic_type": "numeric_candidate",
+                    "planner_roles": {"measure_candidate": True, "sort_candidate": True},
+                },
+            ],
+        },
+        "payments": {
+            "columns": [
+                {
+                    "name": "payment_status",
+                    "type": "VARCHAR(20)",
+                    "semantic_type": "category_candidate",
+                    "profile_facts": {"sample_values": ["completed", "pending"], "unique_count": 2},
+                    "planner_roles": {"dimension_candidate": True, "filter_candidate": True},
+                },
+                {
+                    "name": "payment_method",
+                    "type": "VARCHAR(20)",
+                    "semantic_type": "category_candidate",
+                    "planner_roles": {"dimension_candidate": True, "filter_candidate": True},
+                },
+            ],
+        },
+    }
+
+    glossary = generate_business_glossary(knowledge_base, use_ai_enrichment=False)
+
+    generic = glossary["payment status"]["mapped_columns"]
+    assert {(item["table"], item["column"]) for item in generic} == {
+        ("orders", "payment_status"),
+        ("payments", "payment_status"),
+    }
+    assert glossary["orders payment status"]["mapped_columns"][0]["table"] == "orders"
+    assert glossary["payments payment status"]["mapped_columns"][0]["table"] == "payments"
+    assert "completed" in glossary["payments payment status"]["mapped_columns"][0]["sample_values"]
+    assert glossary["order total amount"]["mapped_columns"][0]["column"] == "total_amount"
+    assert glossary["order amount"]["mapped_columns"][0]["column"] == "total_amount"
+    assert glossary["order total"]["mapped_columns"][0]["column"] == "total_amount"
+
+    order_table_columns = {item["column"] for item in glossary["orders"]["mapped_columns"]}
+    payment_table_columns = {item["column"] for item in glossary["payments"]["mapped_columns"]}
+    assert {"payment_status", "total_amount"} <= order_table_columns
+    assert {"payment_status", "payment_method"} <= payment_table_columns
+
+
 def test_generate_business_glossary_uses_relationship_context_without_inventing_aliases():
     knowledge_base = {
         "stock_positions": {

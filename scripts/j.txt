@@ -1,0 +1,510 @@
+TEST_CASES = [
+    {
+        "id": 1,
+        "question": "list customers in Mumbai",
+        "oracle_sql": "SELECT * FROM customers WHERE city = 'Mumbai';",
+        "expect_execute": True,
+    },
+    {
+        "id": 2,
+        "question": "show inactive customers",
+        "oracle_sql": "SELECT * FROM customers WHERE customer_status = 'inactive';",
+        "expect_execute": True,
+    },
+    {
+        "id": 3,
+        "question": "show enterprise customers from Pune",
+        "oracle_sql": """
+            SELECT * FROM customers
+            WHERE customer_segment = 'enterprise'
+              AND city = 'Pune';
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 4,
+        "question": "show customers with credit limit less than 250000",
+        "oracle_sql": "SELECT * FROM customers WHERE credit_limit < 250000;",
+        "expect_execute": True,
+    },
+    {
+        "id": 5,
+        "question": "count active customers",
+        "oracle_sql": """
+            SELECT COUNT(*) AS total_customers
+            FROM customers
+            WHERE customer_status = 'active';
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 6,
+        "question": "average credit limit by customer status",
+        "oracle_sql": """
+            SELECT customer_status, AVG(credit_limit) AS average_credit_limit
+            FROM customers
+            GROUP BY customer_status;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 7,
+        "question": "top 2 customer segments by total credit limit",
+        "oracle_sql": """
+            SELECT customer_segment, SUM(credit_limit) AS total_credit_limit
+            FROM customers
+            GROUP BY customer_segment
+            ORDER BY total_credit_limit DESC
+            LIMIT 2;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 8,
+        "question": "show orders placed in January 2026",
+        "oracle_sql": """
+            SELECT * FROM orders
+            WHERE order_date BETWEEN '2026-01-01' AND '2026-01-31';
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 9,
+        "question": "show pending orders",
+        "oracle_sql": "SELECT * FROM orders WHERE order_status = 'pending';",
+        "expect_execute": True,
+    },
+    {
+        "id": 10,
+        "question": "show unpaid orders after 2026-02-01",
+        "oracle_sql": """
+            SELECT * FROM orders
+            WHERE payment_status = 'unpaid'
+              AND order_date > '2026-02-01';
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 11,
+        "question": "count orders by payment status",
+        "oracle_sql": """
+            SELECT payment_status, COUNT(*) AS total_orders
+            FROM orders
+            GROUP BY payment_status;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 12,
+        "question": "delivered order total by payment status",
+        "oracle_sql": """
+            SELECT payment_status, SUM(total_amount) AS total_order_amount
+            FROM orders
+            WHERE order_status = 'delivered'
+            GROUP BY payment_status;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 13,
+        "question": "orders with total amount above 20000",
+        "oracle_sql": "SELECT * FROM orders WHERE total_amount > 20000;",
+        "expect_execute": True,
+    },
+    {
+        "id": 14,
+        "question": "show orders and their customer information",
+        "oracle_sql": """
+            SELECT orders.*, customers.*
+            FROM orders
+            INNER JOIN customers
+              ON orders.customer_id = customers.customer_id;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 15,
+        "question": "list customers along with order records",
+        "oracle_sql": """
+            SELECT customers.*, orders.*
+            FROM customers
+            INNER JOIN orders
+              ON customers.customer_id = orders.customer_id;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 16,
+        "question": "show unpaid orders with customer details",
+        "oracle_sql": """
+            SELECT orders.*, customers.*
+            FROM orders
+            INNER JOIN customers
+              ON orders.customer_id = customers.customer_id
+            WHERE orders.payment_status = 'unpaid';
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 17,
+        "question": "total delivered order amount by customer city",
+        "oracle_sql": """
+            SELECT customers.city, SUM(orders.total_amount) AS total_order_amount
+            FROM orders
+            INNER JOIN customers
+              ON orders.customer_id = customers.customer_id
+            WHERE orders.order_status = 'delivered'
+            GROUP BY customers.city;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 18,
+        "question": "average order amount by customer segment",
+        "oracle_sql": """
+            SELECT customers.customer_segment, AVG(orders.total_amount) AS average_order_amount
+            FROM orders
+            INNER JOIN customers
+              ON orders.customer_id = customers.customer_id
+            GROUP BY customers.customer_segment;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 19,
+        "question": "bottom cities by total order amount",
+        "oracle_sql": """
+            SELECT customers.city, SUM(orders.total_amount) AS total_order_amount
+            FROM orders
+            INNER JOIN customers
+              ON orders.customer_id = customers.customer_id
+            GROUP BY customers.city
+            ORDER BY total_order_amount ASC;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 20,
+        "question": "show payments made by bank",
+        "oracle_sql": "SELECT * FROM payments WHERE payment_method = 'bank';",
+        "expect_execute": True,
+    },
+    {
+        "id": 21,
+        "question": "count completed payments by payment method",
+        "oracle_sql": """
+            SELECT payment_method, COUNT(*) AS total_payments
+            FROM payments
+            WHERE payment_status = 'completed'
+            GROUP BY payment_method;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 22,
+        "question": "total completed payment amount by payment method",
+        "oracle_sql": """
+            SELECT payment_method, SUM(payment_amount) AS total_payment_amount
+            FROM payments
+            WHERE payment_status = 'completed'
+            GROUP BY payment_method;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 23,
+        "question": "show bank payments with order information",
+        "oracle_sql": """
+            SELECT payments.*, orders.*
+            FROM payments
+            INNER JOIN orders
+              ON payments.order_id = orders.order_id
+            WHERE payments.payment_method = 'bank';
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 24,
+        "question": "list payments together with customer information",
+        "oracle_sql": """
+            SELECT payments.*, orders.*, customers.*
+            FROM payments
+            INNER JOIN orders
+              ON payments.order_id = orders.order_id
+            INNER JOIN customers
+              ON orders.customer_id = customers.customer_id;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 25,
+        "question": "show completed payments with customer details",
+        "oracle_sql": """
+            SELECT payments.*, orders.*, customers.*
+            FROM payments
+            INNER JOIN orders
+              ON payments.order_id = orders.order_id
+            INNER JOIN customers
+              ON orders.customer_id = customers.customer_id
+            WHERE payments.payment_status = 'completed';
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 26,
+        "question": "total bank payment amount by customer city",
+        "oracle_sql": """
+            SELECT customers.city, SUM(payments.payment_amount) AS total_payment_amount
+            FROM payments
+            INNER JOIN orders
+              ON payments.order_id = orders.order_id
+            INNER JOIN customers
+              ON orders.customer_id = customers.customer_id
+            WHERE payments.payment_method = 'bank'
+            GROUP BY customers.city;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 27,
+        "question": "average completed payment amount by customer segment",
+        "oracle_sql": """
+            SELECT customers.customer_segment, AVG(payments.payment_amount) AS average_payment_amount
+            FROM payments
+            INNER JOIN orders
+              ON payments.order_id = orders.order_id
+            INNER JOIN customers
+              ON orders.customer_id = customers.customer_id
+            WHERE payments.payment_status = 'completed'
+            GROUP BY customers.customer_segment;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 28,
+        "question": "bottom customer cities by total payment amount",
+        "oracle_sql": """
+            SELECT customers.city, SUM(payments.payment_amount) AS total_payment_amount
+            FROM payments
+            INNER JOIN orders
+              ON payments.order_id = orders.order_id
+            INNER JOIN customers
+              ON orders.customer_id = customers.customer_id
+            GROUP BY customers.city
+            ORDER BY total_payment_amount ASC;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 29,
+        "question": "show order items with product details",
+        "oracle_sql": """
+            SELECT order_items.*, products.*
+            FROM order_items
+            INNER JOIN products
+              ON order_items.product_id = products.product_id;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 30,
+        "question": "show active products with supplier details",
+        "oracle_sql": """
+            SELECT products.*, suppliers.*
+            FROM products
+            INNER JOIN suppliers
+              ON products.supplier_id = suppliers.supplier_id
+            WHERE products.product_status = 'active';
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 31,
+        "question": "total line total by product status",
+        "oracle_sql": """
+            SELECT products.product_status, SUM(order_items.line_total) AS total_line_total
+            FROM order_items
+            INNER JOIN products
+              ON order_items.product_id = products.product_id
+            GROUP BY products.product_status;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 32,
+        "question": "average line total by product category",
+        "oracle_sql": """
+            SELECT products.product_category, AVG(order_items.line_total) AS average_line_total
+            FROM order_items
+            INNER JOIN products
+              ON order_items.product_id = products.product_id
+            GROUP BY products.product_category;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 33,
+        "question": "top product categories by total line total",
+        "oracle_sql": """
+            SELECT products.product_category, SUM(order_items.line_total) AS total_line_total
+            FROM order_items
+            INNER JOIN products
+              ON order_items.product_id = products.product_id
+            GROUP BY products.product_category
+            ORDER BY total_line_total DESC;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 34,
+        "question": "show fixture products with supplier details",
+        "oracle_sql": """
+            SELECT products.*, suppliers.*
+            FROM products
+            INNER JOIN suppliers
+              ON products.supplier_id = suppliers.supplier_id
+            WHERE products.product_category = 'fixture';
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 35,
+        "question": "total line total by supplier status",
+        "oracle_sql": """
+            SELECT suppliers.supplier_status, SUM(order_items.line_total) AS total_line_total
+            FROM order_items
+            INNER JOIN products
+              ON order_items.product_id = products.product_id
+            INNER JOIN suppliers
+              ON products.supplier_id = suppliers.supplier_id
+            GROUP BY suppliers.supplier_status;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 36,
+        "question": "bottom supplier cities by total line total",
+        "oracle_sql": """
+            SELECT suppliers.supplier_city, SUM(order_items.line_total) AS total_line_total
+            FROM order_items
+            INNER JOIN products
+              ON order_items.product_id = products.product_id
+            INNER JOIN suppliers
+              ON products.supplier_id = suppliers.supplier_id
+            GROUP BY suppliers.supplier_city
+            ORDER BY total_line_total ASC;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 37,
+        "question": "count order items by product category",
+        "oracle_sql": """
+            SELECT products.product_category, COUNT(*) AS total_order_items
+            FROM order_items
+            INNER JOIN products
+              ON order_items.product_id = products.product_id
+            GROUP BY products.product_category;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 38,
+        "question": "show order items for delivered orders with customer details",
+        "oracle_sql": """
+            SELECT order_items.*, orders.*, customers.*
+            FROM order_items
+            INNER JOIN orders
+              ON order_items.order_id = orders.order_id
+            INNER JOIN customers
+              ON orders.customer_id = customers.customer_id
+            WHERE orders.order_status = 'delivered';
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 39,
+        "question": "show products with order item details",
+        "oracle_sql": """
+            SELECT products.*, order_items.*
+            FROM products
+            INNER JOIN order_items
+              ON products.product_id = order_items.product_id;
+        """,
+        "expect_execute": True,
+    },
+    {
+        "id": 40,
+        "question": "total quantity by product category",
+        "oracle_sql": """
+            SELECT products.product_category, SUM(order_items.quantity) AS total_quantity
+            FROM order_items
+            INNER JOIN products
+              ON order_items.product_id = products.product_id
+            GROUP BY products.product_category;
+        """,
+        "expect_execute": True,
+    },
+
+    # Fail-closed cases
+    {
+        "id": 41,
+        "question": "remove all pending payments",
+        "expect_execute": False,
+        "expected_failure": "unsafe write/delete request",
+    },
+    {
+        "id": 42,
+        "question": "change inactive suppliers to active",
+        "expect_execute": False,
+        "expected_failure": "unsafe update request",
+    },
+    {
+        "id": 43,
+        "question": "show payments with supplier details",
+        "expect_execute": False,
+        "expected_failure": "requires path longer than 2 edges",
+    },
+    {
+        "id": 44,
+        "question": "total payment amount by supplier city",
+        "expect_execute": False,
+        "expected_failure": "requires aggregate path longer than 2 edges",
+    },
+    {
+        "id": 45,
+        "question": "total customer credit limit by product category",
+        "expect_execute": False,
+        "expected_failure": "grain unsafe parent metric grouped through child/product path",
+    },
+    {
+        "id": 46,
+        "question": "show sales by customer",
+        "expect_execute": False,
+        "expected_failure": "ambiguous or unsupported metric",
+    },
+    {
+        "id": 47,
+        "question": "show value by status",
+        "expect_execute": False,
+        "expected_failure": "ambiguous metric and ambiguous status column",
+    },
+    {
+        "id": 48,
+        "question": "show details",
+        "expect_execute": False,
+        "expected_failure": "too broad and ambiguous",
+    },
+    {
+        "id": 49,
+        "question": "count distinct orders by customer city",
+        "expect_execute": False,
+        "expected_failure": "automatic COUNT DISTINCT unsupported",
+    },
+    {
+        "id": 50,
+        "question": "total quantity by customer city and product category",
+        "expect_execute": False,
+        "expected_failure": "multi-dimension or complex joined aggregate unsupported",
+    },
+]

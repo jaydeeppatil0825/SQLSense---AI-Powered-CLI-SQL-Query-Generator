@@ -93,7 +93,10 @@ def _preferred_column_order(column: dict[str, Any]) -> tuple[int, str]:
 
 def _representative_mappings(table_name: str, table_data: dict) -> list[dict[str, Any]]:
     mappings: list[dict[str, Any]] = []
-    for column in sorted(table_data.get("columns", []), key=_preferred_column_order)[:4]:
+    for column in sorted(table_data.get("columns", []), key=_preferred_column_order):
+        roles = column_planner_roles(column)
+        if not any(bool(roles.get(role)) for role in ("measure_candidate", "dimension_candidate", "filter_candidate", "date_candidate", "sort_candidate", "join_candidate")):
+            continue
         mappings.append(
             {
                 "table": table_name,
@@ -166,6 +169,24 @@ def _schema_terms_for_column(column_name: str) -> list[str]:
     human_column = _humanize(column_name)
     singular_column = _singularize(human_column)
     return _unique_preserve_order([human_column, singular_column])
+
+
+def _owner_qualified_column_terms(table_name: str, column_name: str) -> list[str]:
+    table_terms = _schema_terms_for_table(table_name)
+    column_terms = _schema_terms_for_column(column_name)
+    abbreviated_terms = []
+    for column_term in column_terms:
+        if column_term.startswith("total "):
+            tail = column_term.removeprefix("total ").strip()
+            abbreviated_terms.extend([tail, "total"])
+    return _unique_preserve_order(
+        [
+            f"{table_term} {column_term}"
+            for table_term in table_terms
+            for column_term in [*column_terms, *abbreviated_terms]
+            if column_term
+        ]
+    )
 
 
 def _clean_ai_terms(values: list[str]) -> list[str]:
@@ -576,7 +597,7 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                     relationship_sources=column_relationship_sources,
                     mapping_kind="column",
                     structural_facts=structural_facts,
-                    allow_mapping_merge=False,
+                    allow_mapping_merge=True,
                     usage_scope="column_lookup",
                     confidence=_term_source_confidence(
                         term,
@@ -585,6 +606,26 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                         ai_confidence=column_ai_confidence,
                         target_type="column",
                     ),
+                )
+
+            for term in _owner_qualified_column_terms(table_name, column_name):
+                _add_entry(
+                    glossary,
+                    term,
+                    description=column_description,
+                    mapped_tables=[table_name],
+                    mappings=[mapping],
+                    example_questions=[],
+                    primary_terms=[term, *validated_column_terms],
+                    related_terms=column_related_terms,
+                    related_tables=column_related_tables,
+                    sources=column_sources,
+                    relationship_sources=column_relationship_sources,
+                    mapping_kind="column",
+                    structural_facts=structural_facts,
+                    allow_mapping_merge=False,
+                    usage_scope="column_lookup",
+                    confidence=0.95,
                 )
 
     logger.info(f"Generated glossary with {len(glossary)} terms")

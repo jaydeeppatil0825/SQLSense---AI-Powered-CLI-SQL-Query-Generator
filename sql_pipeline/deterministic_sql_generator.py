@@ -93,6 +93,7 @@ class DeterministicSqlPlan:
     missing_evidence: list[str] = field(default_factory=list)
     evidence_sources: list[str] = field(default_factory=list)
     sql_skeleton_type: Optional[str] = None
+    projection_mode: Optional[str] = None
     can_render: bool = False
     route_reason: str = ""
 
@@ -1071,6 +1072,7 @@ def _build_single_table_clause_plan(
 
     having_clauses: list[str] = []
     having_columns: list[str] = []
+    projection_mode = None
     if requires_having:
         having_clauses, having_columns, having_reason = _resolve_having_clauses(
             query_context=context,
@@ -1188,6 +1190,12 @@ def _build_single_table_clause_plan(
             {"expression": column_name, "source_column": column_name, "kind": "column"}
             for column_name in schema_columns
         ]
+        projected_names = {str(entry.get("column") or "").strip() for entry in projected_outputs}
+        projection_mode = (
+            "full_row"
+            if not projected_outputs or projected_names == set(schema_columns)
+            else "selected_columns"
+        )
         sql_skeleton_type = "ranked_single_table_list" if order_by else "filtered_single_table_list"
 
     return DeterministicSqlPlan(
@@ -1217,6 +1225,7 @@ def _build_single_table_clause_plan(
             "knowledge_base.columns",
         ],
         sql_skeleton_type=sql_skeleton_type,
+        projection_mode=projection_mode,
         can_render=True,
         route_reason=f"single-table {clause_shape} SQL generated deterministically",
         formula_evidence=list(context.get("formula_evidence") or []),
@@ -2027,11 +2036,14 @@ def _render_grouped_aggregate(plan: DeterministicSqlPlan) -> str:
 
 
 def _render_plan_in_canonical_order(plan: DeterministicSqlPlan) -> str:
-    select_parts = []
-    for item in plan.select_items:
-        expression = str(item.get("expression") or "").strip()
-        alias = str(item.get("alias") or "").strip()
-        select_parts.append(f"{expression} AS {alias}" if alias else expression)
+    if _uses_single_table_star_projection(plan):
+        select_parts = ["*"]
+    else:
+        select_parts = []
+        for item in plan.select_items:
+            expression = str(item.get("expression") or "").strip()
+            alias = str(item.get("alias") or "").strip()
+            select_parts.append(f"{expression} AS {alias}" if alias else expression)
     sql = f"SELECT {', '.join(select_parts)} FROM {plan.base_table}"
     for join in plan.joins:
         joined_table = str(join.get("table") or "")
@@ -2052,6 +2064,18 @@ def _render_plan_in_canonical_order(plan: DeterministicSqlPlan) -> str:
     if plan.limit:
         sql += f" LIMIT {plan.limit}"
     return sql + ";"
+
+
+def _uses_single_table_star_projection(plan: DeterministicSqlPlan) -> bool:
+    return (
+        plan.sql_skeleton_type == "filtered_single_table_list"
+        and plan.projection_mode == "full_row"
+        and not plan.joins
+        and not plan.group_by
+        and not plan.having_clauses
+        and not plan.order_by
+        and not plan.aggregation_type
+    )
 
 
 def _render_predicates(clauses: list[str], conjunctions: list[str]) -> str:

@@ -352,9 +352,18 @@ def test_filtered_list_quotes_string_value_and_uses_schema_columns():
 
     assert result.status == "generated"
     assert result.sql == (
-        "SELECT bill_id, amount_total, tax_total, status_code, customer_name, bill_date FROM bills "
-        "WHERE status_code = 'pending' LIMIT 50;"
+        "SELECT * FROM bills WHERE status_code = 'pending' LIMIT 50;"
     )
+
+
+def test_filtered_list_keeps_selected_column_projection_explicit():
+    context = _filtered_context(field="status_code", operator="eq", value="pending")
+    context["selected_output_columns"] = [{"table": "bills", "column": "status_code"}]
+
+    result = generate_deterministic_sql(query_context=context, knowledge_base=_bills_kb())
+
+    assert result.status == "generated"
+    assert result.sql == "SELECT status_code FROM bills WHERE status_code = 'pending' LIMIT 50;"
 
 
 def test_filtered_list_keeps_numeric_comparison_unquoted():
