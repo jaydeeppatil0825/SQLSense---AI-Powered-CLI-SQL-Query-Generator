@@ -24,6 +24,7 @@ _STATUS_VALUE_TOKENS = {
     "partial",
     "cancelled",
     "canceled",
+    "completed",
     "delivered",
     "shipped",
     "refunded",
@@ -110,7 +111,13 @@ def _detect_runtime_filters(question: str, candidate_tables: dict[str, Any]) -> 
                         "type": "status" if _column_can_hold_status(column) else "value",
                         "table": table_name,
                         "column": column_name,
+                        "field_phrase": column_name,
+                        "raw_phrase": normalized_value,
+                        "operator": "eq",
                         "value": raw_value,
+                        "value_phrase": normalized_value,
+                        "values": [raw_value],
+                        "conjunction": "",
                         "term": normalized_value,
                     }
                 )

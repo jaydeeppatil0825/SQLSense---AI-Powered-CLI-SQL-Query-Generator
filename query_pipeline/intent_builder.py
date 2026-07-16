@@ -179,7 +179,7 @@ _GENERIC_METRIC_TERMS = {
     "qty",
     "count",
 }
-_IMPLICIT_SUM_METRIC_NOUNS = {"sale", "sales", "revenue", "revenues"}
+_IMPLICIT_SUM_METRIC_NOUNS = {"sale", "sales", "revenue", "revenues", "amount", "value"}
 _AGGREGATE_KEYWORD_MAP = {
     "total": "sum",
     "sum": "sum",

@@ -540,14 +540,6 @@ def analyze_deterministic_capabilities(query_context: dict[str, Any]) -> Determi
                 blocked_by=["filter_conjunction_not_supported"],
                 reason="mixed or unsupported filter conjunctions cannot be planned safely",
             )
-        if aggregate_function == "count":
-            return DeterministicCapabilityResult(
-                status="not_applicable",
-                query_shape="filtered_query",
-                supported_now=False,
-                blocked_by=["filtered_count_not_supported"],
-                reason="filtered count SQL is not implemented in this phase",
-            )
         return DeterministicCapabilityResult(
             status="supported",
             query_shape="filtered_query",
@@ -1343,13 +1335,20 @@ def _validate_joined_lookup_path(path_tables: list[str], edges: list[dict[str, A
         to_column = str(edge.get("to_column") or "")
         if edge.get("safe_for_planner") is not True:
             return "selected_join_path_not_authorized"
-        if from_table != path_tables[index] or to_table != path_tables[index + 1]:
+        if {from_table, to_table} != {path_tables[index], path_tables[index + 1]}:
             return "selected_join_path_order_invalid"
         if not all(_SAFE_IDENTIFIER_RE.fullmatch(value) for value in (from_table, to_table, from_column, to_column)):
             return "selected_join_path_invalid"
         if from_column not in _schema_column_names(knowledge_base, from_table) or to_column not in _schema_column_names(knowledge_base, to_table):
             return "join_edge_not_in_schema"
     return ""
+
+
+def _path_join_entries(path_tables: list[str], edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {"table": path_tables[index + 1], "edge": edge}
+        for index, edge in enumerate(edges)
+    ]
 
 
 def _schema_column_names(knowledge_base: dict[str, Any], table_name: str) -> set[str]:
@@ -1454,7 +1453,7 @@ def _build_joined_lookup_plan(
         status="ready",
         supported_now=True,
         base_table=base_table,
-        joins=[{"table": edge["to_table"], "edge": edge} for edge in edges],
+        joins=_path_join_entries(path_tables, edges),
         required_joins=edges,
         selected_join_path=dict(selected_path),
         selected_output_columns=outputs,
@@ -1550,7 +1549,7 @@ def _build_joined_aggregate_plan(
             route_reason="selected joined aggregate path is not authorized by Relationship Graph",
         )
     for index, edge in enumerate(edges):
-        if str(edge.get("from_table") or "") != path_tables[index] or str(edge.get("to_table") or "") != path_tables[index + 1]:
+        if {str(edge.get("from_table") or ""), str(edge.get("to_table") or "")} != {path_tables[index], path_tables[index + 1]}:
             return DeterministicSqlPlan(
                 query_shape="joined_aggregate",
                 status="cannot_plan_safely",
@@ -1738,7 +1737,7 @@ def _build_joined_aggregate_plan(
         status="ready",
         supported_now=True,
         base_table=base_table,
-        joins=[{"table": edge["to_table"], "edge": edge} for edge in edges],
+        joins=_path_join_entries(path_tables, edges),
         required_joins=edges,
         selected_join_path=dict(selected_path),
         selected_output_columns=outputs,

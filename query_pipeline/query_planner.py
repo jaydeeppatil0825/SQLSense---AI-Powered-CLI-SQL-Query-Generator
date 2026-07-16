@@ -2120,6 +2120,9 @@ def _normalize_planner_output(
             intent = structured_intent
     raw_aggregate_function = structured_intent.get("aggregate_function")
     aggregate_function = str(raw_aggregate_function or "").strip().lower()
+    planner_intent = str(plan.get("intent") or "").strip().lower()
+    if not aggregate_function and (intent_type == "count" or planner_intent == "count"):
+        aggregate_function = "count"
     if not aggregate_function and ranking_mode != "row" and metric_fallback_allowed:
         aggregate_function = _aggregate_function_hint(question)
     selected_order_by, order_by_reason, order_by_ambiguity_choices = _resolve_order_by_for_contract(

@@ -88,6 +88,19 @@ def _metric_modifier_value_phrase(prefix: str, base_table: str) -> str:
     return phrase
 
 
+def _metric_modifier_from_metric_phrase(metric_phrase: str, metric: dict[str, Any]) -> str:
+    metric_column_phrase = _humanize(str(metric.get("column") or ""))
+    normalized_metric_phrase = _humanize(metric_phrase)
+    if (
+        metric_column_phrase
+        and normalized_metric_phrase.endswith(metric_column_phrase)
+        and normalized_metric_phrase != metric_column_phrase
+    ):
+        prefix = normalized_metric_phrase[: -len(metric_column_phrase)].strip()
+        return _metric_modifier_value_phrase(prefix, str(metric.get("table") or ""))
+    return ""
+
+
 def _metric_resolution_phrase(metric_phrase: str) -> str:
     return re.sub(
         r"^\s*(?:total|sum|average|avg|mean|maximum|max|minimum|min)\s+",
@@ -711,18 +724,7 @@ def _apply_joined_aggregate_contract(
             ) or None
         elif metric_evidence_result.get("status") == "resolved":
             metric = dict(metric_evidence_result.get("selected", {}).get("candidate") or {})
-            metric_column_phrase = _humanize(str(metric.get("column") or ""))
-            normalized_metric_phrase = _humanize(metric_lookup_phrase)
-            if (
-                metric_column_phrase
-                and normalized_metric_phrase.endswith(metric_column_phrase)
-                and normalized_metric_phrase != metric_column_phrase
-            ):
-                prefix = normalized_metric_phrase[: -len(metric_column_phrase)].strip()
-                modifier_filter_phrase = _metric_modifier_value_phrase(
-                    prefix,
-                    str(metric.get("table") or ""),
-                ) or None
+            modifier_filter_phrase = _metric_modifier_from_metric_phrase(metric_lookup_phrase, metric) or None
         else:
             if modifier_status == "ambiguous":
                 metric_evidence_result = modifier_evidence_result
@@ -779,6 +781,7 @@ def _apply_joined_aggregate_contract(
                 pass
             elif schema_metric_status == "resolved" and schema_metric is not None:
                 metric = schema_metric
+                modifier_filter_phrase = _metric_modifier_from_metric_phrase(metric_lookup_phrase, metric) or None
                 metric_evidence_result = {
                     "status": "resolved",
                     "selected": {
@@ -817,7 +820,9 @@ def _apply_joined_aggregate_contract(
             if metric_table
             else []
         )
-        if not exact_dimensions and aggregate_function == "count":
+        if not exact_dimensions and (
+            aggregate_function == "count" or len(_tokenize(dimension_phrase)) == 1
+        ):
             exact_dimensions = [
                 match
                 for table_name in sorted(knowledge_base)
@@ -1658,6 +1663,7 @@ def _apply_join_lookup_contract(
     source_filter_phrase = str(
         next(iter(intent.get("source_scope") or []), "")
         or intent.get("source_scope_phrase")
+        or base_phrase
         or ""
     ).strip()
     if source_filter_phrase:
