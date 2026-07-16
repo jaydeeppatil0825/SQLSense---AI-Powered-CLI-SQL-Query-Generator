@@ -111,7 +111,7 @@ _SORTED_BY_RE = re.compile(
 _RANKING_BY_RE = re.compile(
     r"^\s*(top|highest|largest|maximum|bottom|lowest|smallest|minimum)"
     r"(?:\s+(\d+))?\s+(.+?)\s+by\s+(.+?)"
-    r"(?=\s+(?:where|having|group(?:ed)?\s+by|sort(?:ed)?\s+by|order(?:ed)?\s+by|limit|from)\b|$)",
+    r"(?=\s+(?:where|having|group(?:ed)?\s+by|sort(?:ed)?\s+by|order(?:ed)?\s+by|limit\s+\d+|from)\b|$)",
     re.IGNORECASE,
 )
 _BY_RE = re.compile(r"\s+by\s+", re.IGNORECASE)
@@ -165,6 +165,7 @@ _AGGREGATE_AVG_RE = re.compile(r"\b(?:average|avg)\b", re.IGNORECASE)
 _AGGREGATE_MAX_RE = re.compile(r"\b(?:maximum|max|highest)\b", re.IGNORECASE)
 _AGGREGATE_MIN_RE = re.compile(r"\b(?:minimum|min|lowest)\b", re.IGNORECASE)
 _UNSAFE_RE = re.compile(r"\b(delete|update|insert|drop|alter|truncate)\b", re.IGNORECASE)
+_MADE_BY_RE = re.compile(r"\bmade\s+by\s+(.+?)(?=\s+(?:where|having|group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit\s+\d+|from)\b|$)", re.IGNORECASE)
 _STOPWORD_RE = re.compile(
     rf"^(?:{_phrase_group_pattern(_DISPLAY_VERBS)}|me|all|the|a|an|of|for|to|with|by|from|in|where|per|each|group|filter)$",
     re.IGNORECASE,
@@ -365,7 +366,6 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str, *, today: date
         unsupported_constructs.append("multi_aggregate_having_not_supported")
     if len([part for part in str(question or "").split(";") if part.strip()]) > 1:
         unsupported_constructs.append("multiple_statements")
-
     normalized["intent_contract_version"] = INTENT_CONTRACT_VERSION
     normalized["keyword_markers"] = keyword_markers
     normalized["structured_filters"] = structured_filters
@@ -1392,6 +1392,11 @@ def _extract_filter_text(question: str) -> str:
             if _where_clause_is_having(question, match, candidate):
                 continue
             return candidate
+    made_by_match = _MADE_BY_RE.search(question)
+    if made_by_match:
+        candidate = _cleanup_phrase(made_by_match.group(1))
+        if candidate:
+            return f"method {candidate}"
     with_match = _WITH_RE.search(question)
     if with_match:
         candidate = _cleanup_phrase(with_match.group(1))
@@ -1418,7 +1423,7 @@ def _where_clause_is_having(question: str, match: re.Match[str], candidate: str)
 
 
 def _with_phrase_is_row_filter(phrase: str) -> bool:
-    if not phrase or _parse_having_condition(phrase).get("aggregate_function"):
+    if not phrase:
         return False
     if re.search(
         r"\b(?:between|contains|equals?|is|not\s+equal|greater\s+than|more\s+than|less\s+than|at\s+least|at\s+most|above|below|over|under|null|=|!=|<>|>=|<=|>|<)\b",
@@ -1426,6 +1431,8 @@ def _with_phrase_is_row_filter(phrase: str) -> bool:
         re.IGNORECASE,
     ):
         return True
+    if _parse_having_condition(phrase).get("aggregate_function"):
+        return False
     return bool(re.match(r"^\s*status\s+\S+", phrase, re.IGNORECASE))
 
 
@@ -1485,6 +1492,7 @@ def _extract_structured_filters(question: str, *, today: date | None = None) -> 
         (r"^(.+?)\s+(?:equals?|is|=)\s+(.+)$", "eq"),
         (r"^(.+?)\s+contains\s+(.+)$", "contains"),
         (r"^(status)\s+(.+)$", "eq"),
+        (r"^(method)\s+(.+)$", "eq"),
     )
     for phrase, conjunction in phrases:
         entry = {
@@ -1778,7 +1786,7 @@ def _extract_structured_having(question: str) -> list[dict[str, Any]]:
     if with_match:
         phrase = _cleanup_phrase(with_match.group(1))
         condition = _parse_having_condition(phrase)
-        if condition.get("aggregate_function"):
+        if condition.get("aggregate_function") and not _with_phrase_is_row_filter(phrase):
             return [condition]
     return []
 
@@ -1992,6 +2000,9 @@ def _remove_filter_clauses(question: str) -> str:
     with_match = _WITH_RE.search(stripped)
     if with_match and _with_phrase_is_row_filter(_cleanup_phrase(with_match.group(1))):
         stripped = _clean_scalar(f"{stripped[: with_match.start()]} {stripped[with_match.end() :]}")
+    made_by_match = _MADE_BY_RE.search(stripped)
+    if made_by_match:
+        stripped = _clean_scalar(f"{stripped[: made_by_match.start()]} {stripped[made_by_match.end() :]}")
     having_match = _HAVING_RE.search(stripped)
     if having_match:
         stripped = _clean_scalar(f"{stripped[: having_match.start()]} {stripped[having_match.end() :]}")

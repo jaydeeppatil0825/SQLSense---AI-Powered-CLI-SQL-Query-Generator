@@ -848,6 +848,18 @@ def _source_scope_as_filter(
         return sample_filter, sample_status
     value_token_set = {_singularize_token(token) for token in _tokenize(value_phrase)}
     if value_token_set & _STATUS_VALUE_TOKENS:
+        for token in _tokenize(value_phrase):
+            if _singularize_token(token) not in _STATUS_VALUE_TOKENS:
+                continue
+            status_filter, status = _build_single_role_value_filter(
+                value_phrase=token,
+                knowledge_base=knowledge_base,
+                table_name=owner_table,
+                role="status",
+                source="source_scope_value_filter",
+            )
+            if status == "resolved":
+                return status_filter, status
         status_filter, status = _build_single_role_value_filter(
             value_phrase=value_phrase,
             knowledge_base=knowledge_base,

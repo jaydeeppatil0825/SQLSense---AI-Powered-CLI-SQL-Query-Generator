@@ -1153,14 +1153,21 @@ def _build_query_context_from_retrieved_context(
         debug_trace_details=debug_trace_details,
     )
     normalized_result = _apply_implicit_sample_filter_contract(normalized_result, knowledge_base)
-    joined_aggregate_result = _apply_joined_aggregate_contract(
-        normalized_result,
-        knowledge_base,
-        cache_store=cache_store,
-        cache_database_identity=cache_database_identity,
+    skip_joined_aggregate_contract = bool(
+        normalized_result.get("query_shape") in {"grouped_aggregate", "ranking_query"}
+        and len(normalized_result.get("selected_table_names") or []) == 1
+        and not normalized_result.get("selected_relationship_path")
+        and not normalized_result.get("required_joins")
     )
-    if joined_aggregate_result is not normalized_result:
-        return joined_aggregate_result
+    if not skip_joined_aggregate_contract:
+        joined_aggregate_result = _apply_joined_aggregate_contract(
+            normalized_result,
+            knowledge_base,
+            cache_store=cache_store,
+            cache_database_identity=cache_database_identity,
+        )
+        if joined_aggregate_result is not normalized_result:
+            return joined_aggregate_result
     join_lookup_result = _apply_join_lookup_contract(
         normalized_result,
         knowledge_base,
@@ -1189,6 +1196,25 @@ def _resolve_metric_with_modifier(
         if status == "resolved" and len(resolved) == 1:
             return dict(resolved[0]), modifier_phrase, "resolved"
         if status == "ambiguous":
+            residual_tokens = {_singularize_token(token) for token in _tokenize(residual_phrase)}
+            owner_tables = {
+                str(candidate.get("table") or "").strip()
+                for candidate in metric_candidates
+                if str(candidate.get("table") or "").strip()
+                and {
+                    _singularize_token(token)
+                    for token in _tokenize(str(candidate.get("table") or ""))
+                }
+                <= residual_tokens
+            }
+            if len(owner_tables) == 1:
+                narrowed, narrowed_status = _resolve_role_candidate(
+                    residual_phrase,
+                    metric_candidates,
+                    allowed_tables=owner_tables,
+                )
+                if narrowed_status == "resolved" and len(narrowed) == 1:
+                    return dict(narrowed[0]), modifier_phrase, "resolved"
             return None, None, "ambiguous"
     return None, None, "missing"
 
@@ -1214,6 +1240,12 @@ def _apply_multi_hop_join_lookup_contract(
     retrieved_tables = [dict(entry) for entry in (retrieved.get("matched_tables") or []) if isinstance(entry, dict)]
     retrieved_columns = [dict(entry) for entry in (retrieved.get("matched_columns") or []) if isinstance(entry, dict)]
     base_phrase = str(lookup.get("base_entity_phrase") or intent.get("target_entity_phrase") or "").strip()
+    base_filter_phrase = ""
+    if re.search(r"\s+for\s+", base_phrase, flags=re.IGNORECASE):
+        base_phrase, base_filter_phrase = [
+            part.strip()
+            for part in re.split(r"\s+for\s+", base_phrase, maxsplit=1, flags=re.IGNORECASE)
+        ]
     base_table, base_status = _resolve_join_table(base_phrase, knowledge_base, retrieved_tables)
     requested_fields = [str(value).strip() for value in (lookup.get("requested_output_fields") or []) if str(value).strip()]
     resolved_fields: list[dict[str, Any]] = []
@@ -1322,6 +1354,36 @@ def _apply_multi_hop_join_lookup_contract(
         for table_name in result["tables"]
     ]
     resolved_limit = intent.get("limit") if intent.get("limit") is not None else 50
+    selected_filters = [
+        dict(entry)
+        for entry in (context.get("selected_filters") or [])
+        if isinstance(entry, dict)
+    ]
+    if base_filter_phrase:
+        path_filters, filter_status = _source_scope_as_filters(
+            base_filter_phrase,
+            knowledge_base,
+            set(result["tables"]),
+        )
+        if filter_status == "resolved" and path_filters:
+            seen_filters = {
+                (
+                    str(entry.get("table") or ""),
+                    str(entry.get("column") or ""),
+                    str(entry.get("value") or ""),
+                )
+                for entry in selected_filters
+            }
+            selected_filters.extend(
+                dict(entry)
+                for entry in path_filters
+                if (
+                    str(entry.get("table") or ""),
+                    str(entry.get("column") or ""),
+                    str(entry.get("value") or ""),
+                )
+                not in seen_filters
+            )
     planned = dict(context)
     planned.update(
         {
@@ -1341,6 +1403,7 @@ def _apply_multi_hop_join_lookup_contract(
             },
             "selected_columns": list(output_columns),
             "selected_output_columns": list(output_columns),
+            "selected_filters": selected_filters,
             "join_paths": [selected_join_path],
             "limit": resolved_limit,
             "missing_evidence": [],
@@ -1483,6 +1546,14 @@ def _normalize_planner_output(
             effective_measure_candidates,
             allowed_tables={explicit_base} if explicit_base else None,
         )
+        if metric_status != "resolved":
+            modifier_metric, _modifier_phrase, modifier_status = _resolve_metric_with_modifier(
+                requested_metric_phrase,
+                effective_measure_candidates,
+            )
+            if modifier_status == "resolved" and modifier_metric:
+                resolved_metrics = [dict(modifier_metric)]
+                metric_status = "resolved"
         if metric_status != "resolved" and ranking_mode_hint == "grouped_aggregate":
             dimension_phrase = str(
                 next(iter(structured_intent.get("requested_dimensions") or []), "")
@@ -1510,6 +1581,7 @@ def _normalize_planner_output(
                 and explicit_base
                 and len(resolved_metrics) == 1
                 and str(resolved_metrics[0].get("table") or "").strip() == explicit_base
+                and not structured_intent.get("requested_dimensions")
             ):
                 structured_intent = dict(structured_intent)
                 diagnostics = dict(structured_intent.get("ranking_diagnostics") or {})
@@ -1614,6 +1686,25 @@ def _normalize_planner_output(
     ).strip()
     target_filter_phrase = str(structured_intent.get("target_entity_phrase") or "").strip()
     implicit_filter_phrase = source_scope_filter_phrase
+    if not implicit_filter_phrase and grouped_mode_hint:
+        metric_filter_phrase = str(
+            structured_intent.get("metric_phrase")
+            or next(iter(structured_intent.get("requested_metrics") or []), "")
+            or ""
+        ).strip()
+        requested_dimension_phrase = str(
+            next(iter(structured_intent.get("requested_dimensions") or []), "")
+            or structured_intent.get("grouping_phrase")
+            or ""
+        ).strip()
+        if metric_filter_phrase:
+            implicit_filter_phrase = metric_filter_phrase
+        elif (
+            str(structured_intent.get("intent_type") or "").strip().lower() != "ranking"
+            and target_filter_phrase
+            and _humanize(target_filter_phrase) != _humanize(requested_dimension_phrase)
+        ):
+            implicit_filter_phrase = target_filter_phrase
     if not implicit_filter_phrase and not grouped_mode_hint:
         implicit_filter_phrase = target_filter_phrase
     structured_filter_entries = [
@@ -1633,14 +1724,14 @@ def _normalize_planner_output(
         or [entry for entry in (plan.get("filters") or []) if entry.get("filter_kind") != "date_interval"]
     )
     if (
-        query_shape in {"single_table_list", "filtered_query", "grouped_aggregate", "ranking_query", "joined_lookup"}
+        query_shape in {"single_table_list", "single_table_count", "filtered_query", "grouped_aggregate", "ranking_query", "joined_lookup"}
         and primary_table
         and implicit_filter_phrase
         and not has_explicit_non_interval_filter_request
         and not lookup_requested
         and not structured_intent.get("requested_output_fields")
         and (
-            str(structured_intent.get("intent_type") or "").strip().lower() in {"list", "filter"}
+            str(structured_intent.get("intent_type") or "").strip().lower() in {"list", "filter", "count"}
             or grouped_mode_hint
             or str(structured_intent.get("intent_type") or "").strip().lower() == "ranking"
         )
@@ -1661,6 +1752,47 @@ def _normalize_planner_output(
             if query_shape in {"single_table_list", "filtered_query", "joined_lookup"}:
                 query_shape = "filtered_query"
                 row_single_table = True
+    if (
+        query_shape in {"single_table_list", "single_table_count", "filtered_query", "grouped_aggregate", "ranking_query", "joined_lookup"}
+        and selected_table_names
+        and not has_explicit_non_interval_filter_request
+    ):
+        runtime_filter_scope = {
+            table_name: full_knowledge_base.get(table_name) or schema_for_resolution.get(table_name) or {}
+            for table_name in selected_table_names
+            if table_name in full_knowledge_base or table_name in schema_for_resolution
+        }
+        runtime_filters = _detect_runtime_filters(question, runtime_filter_scope)
+        if runtime_filters:
+            existing_signatures = {
+                (
+                    str(entry.get("table") or ""),
+                    str(entry.get("column") or ""),
+                    str(entry.get("value") or ""),
+                )
+                for entry in (plan.get("filters") or [])
+                if isinstance(entry, dict)
+            }
+            new_runtime_filters = [
+                dict(entry)
+                for entry in runtime_filters
+                if (
+                    str(entry.get("table") or ""),
+                    str(entry.get("column") or ""),
+                    str(entry.get("value") or ""),
+                )
+                not in existing_signatures
+            ]
+            if new_runtime_filters:
+                filter_candidates = _merge_candidate_columns(new_runtime_filters, filter_candidates)
+                selected_columns = _merge_candidate_columns(selected_columns, new_runtime_filters)
+                plan["filters"] = [
+                    *[dict(entry) for entry in (plan.get("filters") or []) if isinstance(entry, dict)],
+                    *new_runtime_filters,
+                ]
+                if query_shape in {"single_table_list", "filtered_query", "joined_lookup"}:
+                    query_shape = "filtered_query"
+                    row_single_table = True
     requested_dimensions = [
         str(value).strip()
         for value in (structured_intent.get("requested_dimensions") or [])
@@ -2042,7 +2174,7 @@ def _normalize_planner_output(
         else:
             missing_evidence_flags["missing_filter_column"] = False
             blocking_ambiguities.discard("filter_selection")
-    source_filter_primary_table = primary_table or (
+    source_filter_primary_table = primary_table if primary_table in selected_table_names else (
         selected_table_names[0] if len(selected_table_names) == 1 else ""
     )
     if (
@@ -2061,6 +2193,26 @@ def _normalize_planner_output(
             plan["filters"] = [dict(entry) for entry in implicit_filters]
             filter_candidates = _merge_candidate_columns(implicit_filters, filter_candidates)
             selected_columns = _merge_candidate_columns(selected_columns, implicit_filters)
+            missing_evidence_flags["missing_filter_column"] = False
+            blocking_ambiguities.discard("filter_selection")
+    if (
+        not selected_filters
+        and grouped_dimension_required
+        and source_filter_primary_table
+    ):
+        runtime_filter_scope = {
+            source_filter_primary_table: (
+                full_knowledge_base.get(source_filter_primary_table)
+                or schema_for_resolution.get(source_filter_primary_table)
+                or {}
+            )
+        }
+        runtime_filters = _detect_runtime_filters(question, runtime_filter_scope)
+        if runtime_filters:
+            selected_filters = [dict(entry) for entry in runtime_filters]
+            plan["filters"] = [dict(entry) for entry in runtime_filters]
+            filter_candidates = _merge_candidate_columns(runtime_filters, filter_candidates)
+            selected_columns = _merge_candidate_columns(selected_columns, runtime_filters)
             missing_evidence_flags["missing_filter_column"] = False
             blocking_ambiguities.discard("filter_selection")
     if (

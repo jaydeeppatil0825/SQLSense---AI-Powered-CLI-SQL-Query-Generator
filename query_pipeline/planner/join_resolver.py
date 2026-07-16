@@ -75,7 +75,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 def _metric_modifier_value_phrase(prefix: str, base_table: str) -> str:
     phrase = re.sub(
-        r"^\s*(?:total|sum|average|avg|mean|maximum|max|minimum|min)\s+",
+        r"^\s*(?:total|sum|average|avg|mean|maximum|max|minimum|min)(?:\s+|$)",
         "",
         str(prefix or ""),
         flags=re.IGNORECASE,
@@ -98,16 +98,28 @@ def _metric_modifier_from_metric_phrase(metric_phrase: str, metric: dict[str, An
     ):
         prefix = normalized_metric_phrase[: -len(metric_column_phrase)].strip()
         return _metric_modifier_value_phrase(prefix, str(metric.get("table") or ""))
+    metric_column_tokens = {
+        _singularize_token(token)
+        for token in _tokenize(metric_column_phrase)
+    }
+    for token in _tokenize(normalized_metric_phrase):
+        singular = _singularize_token(token)
+        if singular in _STATUS_VALUE_TOKENS and singular not in metric_column_tokens:
+            return token
     return ""
 
 
 def _metric_resolution_phrase(metric_phrase: str) -> str:
-    return re.sub(
+    phrase = re.sub(
         r"^\s*(?:total|sum|average|avg|mean|maximum|max|minimum|min)\s+",
         "",
         str(metric_phrase or ""),
         flags=re.IGNORECASE,
     ).strip() or str(metric_phrase or "").strip()
+    tokens = _tokenize(phrase)
+    if tokens and _singularize_token(tokens[0]) in _STATUS_VALUE_TOKENS:
+        return " ".join(tokens[1:]).strip() or phrase
+    return phrase
 
 
 def _remove_weak_context_warning(warnings: list[Any]) -> list[Any]:
@@ -653,6 +665,20 @@ def _apply_joined_aggregate_contract(
     modifier_filter_phrase: str | None = None
     if aggregate_function != "count":
         metric_evidence_result = _rank_role_candidates(metric_lookup_phrase, metric_candidates, role="metric")
+        context_metric = context.get("selected_metric") if isinstance(context.get("selected_metric"), dict) else None
+        if metric_evidence_result.get("status") == "ambiguous" and context_metric:
+            metric_evidence_result = {
+                "status": "resolved",
+                "selected": {
+                    "candidate": dict(context_metric),
+                    "tier": "owner_qualified_exact",
+                    "score": _SCORING_TIERS["owner_qualified_exact"],
+                    "candidate_score": _safe_float(context_metric.get("score")),
+                    "reasons": ["metric narrowed by upstream owner-qualified role resolution"],
+                },
+                "ranked": list(metric_evidence_result.get("ranked") or []),
+                "tie_reason": "",
+            }
         if metric_evidence_result.get("status") == "ambiguous" and dimension_table_hint:
             narrowed_metric_result = _rank_role_candidates(
                 metric_lookup_phrase,
@@ -724,7 +750,7 @@ def _apply_joined_aggregate_contract(
             ) or None
         elif metric_evidence_result.get("status") == "resolved":
             metric = dict(metric_evidence_result.get("selected", {}).get("candidate") or {})
-            modifier_filter_phrase = _metric_modifier_from_metric_phrase(metric_lookup_phrase, metric) or None
+            modifier_filter_phrase = _metric_modifier_from_metric_phrase(metric_phrase, metric) or None
         else:
             if modifier_status == "ambiguous":
                 metric_evidence_result = modifier_evidence_result
@@ -781,7 +807,7 @@ def _apply_joined_aggregate_contract(
                 pass
             elif schema_metric_status == "resolved" and schema_metric is not None:
                 metric = schema_metric
-                modifier_filter_phrase = _metric_modifier_from_metric_phrase(metric_lookup_phrase, metric) or None
+                modifier_filter_phrase = _metric_modifier_from_metric_phrase(metric_phrase, metric) or None
                 metric_evidence_result = {
                     "status": "resolved",
                     "selected": {
@@ -907,7 +933,8 @@ def _apply_joined_aggregate_contract(
                     resolved_nodes={"unsafe_check"},
                 )
         elif base_table and base_table != explicit_base:
-            deferred_source_filter_phrase = source_phrase
+            if explicit_base != dimension_table:
+                deferred_source_filter_phrase = source_phrase
         else:
             base_table = explicit_base
             source_evidence_status = base_status
@@ -1001,6 +1028,78 @@ def _apply_joined_aggregate_contract(
         selected_filters.extend(dict(entry) for entry in implicit_filters)
 
     graph = build_relationship_graph(knowledge_base, infer_relationships=False)
+    dimension_phrase_tokens = {_singularize_token(token) for token in _tokenize(dimension_phrase)}
+    if len(dimension_phrase_tokens) == 1:
+        graph_compatible_dimensions: list[dict[str, Any]] = []
+        candidate_pool = [dict(candidate) for candidate in dimension_candidates]
+        seen_candidate_pool = {
+            (str(candidate.get("table") or ""), str(candidate.get("column") or ""))
+            for candidate in candidate_pool
+        }
+        for table_name, table_data in knowledge_base.items():
+            for column in table_data.get("columns", []):
+                column_name = str(column.get("name") or "").strip()
+                if not column_name:
+                    continue
+                signature = (str(table_name), column_name)
+                if signature in seen_candidate_pool:
+                    continue
+                column_tokens = {
+                    _singularize_token(token)
+                    for token in _tokenize(_humanize(column_name))
+                }
+                semantic = _normalize(str(column.get("semantic_type") or column.get("data_type") or ""))
+                column_type = _normalize(str(column.get("type") or ""))
+                if (
+                    dimension_phrase_tokens <= column_tokens
+                    and semantic not in {"money", "numeric", "numeric_candidate", "date", "id"}
+                    and not any(token in column_type for token in ("int", "decimal", "numeric", "date"))
+                ):
+                    candidate_pool.append({"table": str(table_name), "column": column_name, **dict(column)})
+                    seen_candidate_pool.add(signature)
+        for candidate in candidate_pool:
+            candidate_table = str(candidate.get("table") or "").strip()
+            candidate_column = str(candidate.get("column") or "").strip()
+            if not candidate_table or not candidate_column or candidate_table == base_table:
+                continue
+            candidate_tokens = {
+                _singularize_token(token)
+                for token in _tokenize(_humanize(candidate_column))
+            }
+            if not dimension_phrase_tokens <= candidate_tokens:
+                continue
+            path_check = resolve_safe_multi_hop_path(
+                base_table=base_table,
+                target_table=candidate_table,
+                relationship_graph=graph,
+                schema=knowledge_base,
+                max_depth=2,
+            )
+            if (
+                path_check.get("status") == "unique_safe_path"
+                and int(path_check.get("edge_count") or 0) in {1, 2}
+            ):
+                graph_compatible_dimensions.append(dict(candidate))
+        unique_compatible = {
+            (str(item.get("table") or ""), str(item.get("column") or "")): item
+            for item in graph_compatible_dimensions
+        }
+        if len(unique_compatible) == 1:
+            dimension = dict(next(iter(unique_compatible.values())))
+            dimension_table = str(dimension.get("table") or "").strip()
+            dimension_column = str(dimension.get("column") or "").strip()
+            dimension_evidence_result = {
+                "status": "resolved",
+                "selected": {
+                    "candidate": dict(dimension),
+                    "tier": "direct_graph_compatible",
+                    "score": _SCORING_TIERS["direct_graph_compatible"],
+                    "candidate_score": _safe_float(dimension.get("score")),
+                    "reasons": ["generic dimension phrase resolved to one graph-compatible column"],
+                },
+                "ranked": [],
+                "tie_reason": "",
+            }
     graph_edges = cached_direct_join_relationships(
         cache_store=cache_store,
         database_identity=cache_database_identity,
