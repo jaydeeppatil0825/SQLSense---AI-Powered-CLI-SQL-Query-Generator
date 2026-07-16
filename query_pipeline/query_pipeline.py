@@ -17,8 +17,11 @@ from datetime import date
 import os
 from typing import Any, Dict, Optional
 
-from query_pipeline.context_retriever import retrieve_context
 from query_pipeline.intent_builder import build_intent
+from query_pipeline.planner.phase9c_cache import (
+    cached_planner_evidence_summary,
+    cached_retrieve_context,
+)
 from query_pipeline.query_planner import build_query_context
 from query_pipeline.question_normalizer import normalize_question
 
@@ -96,10 +99,12 @@ class QueryPipeline:
 
         normalized_question, _ = normalize_question(question)
         intent = build_intent(normalized_question, today=_fixed_today_from_env())
-        retrieved_context = retrieve_context(
-            normalized_question,
-            intent,
-            knowledge_base,
+        retrieved_context = cached_retrieve_context(
+            cache_store=cache_store,
+            database_identity=cache_database_identity,
+            normalized_question=normalized_question,
+            intent=intent,
+            knowledge_base=knowledge_base,
             business_glossary=business_glossary,
             vector_retriever=vector_retriever,
             require_normalized_vector_evidence=True,
@@ -113,6 +118,16 @@ class QueryPipeline:
             vector_retriever=vector_retriever,
             cache_store=cache_store,
             cache_database_identity=cache_database_identity,
+        )
+        cached_planner_evidence_summary(
+            cache_store=cache_store,
+            database_identity=cache_database_identity,
+            normalized_question=normalized_question,
+            knowledge_base=knowledge_base,
+            business_glossary=business_glossary,
+            vector_retriever=vector_retriever,
+            retrieved_context=retrieved_context,
+            query_context=query_context,
         )
         formula_evidence = self._extract_formula_evidence(query_context, retrieved_context)
         evidence_sources = self._extract_evidence_sources(query_context, retrieved_context)

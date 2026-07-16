@@ -5,6 +5,6 @@
     "db_name": "sqlsense_phase1_8_smoke_lab",
     "database_type": "mysql",
     "database_name": "sqlsense_phase1_8_smoke_lab",
-    "schema_hash": "15d7f3d79b851f2cb5a35b368c17f2f24b36c8ba18c61d7075bded9b60700d03",
-    "schema_fingerprint": "15d7f3d79b851f2cb5a35b368c17f2f24b36c8ba18c61d7075bded9b60700d03"
+    "schema_hash": "1722a1a5408c584737184b282870dacb34c8dd61bc8977bb3da9ef300e2fe4d9",
+    "schema_fingerprint": "1722a1a5408c584737184b282870dacb34c8dd61bc8977bb3da9ef300e2fe4d9"
 }
