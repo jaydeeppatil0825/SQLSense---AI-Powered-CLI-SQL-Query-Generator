@@ -29,7 +29,7 @@ export function QuestionComposer({
   if (variant === "hero") {
     return (
       <div className="grid gap-3">
-        <div className="flex items-center rounded-full border border-slate-200 bg-white px-5 py-3 shadow-[0_22px_55px_rgba(15,23,42,0.20)] dark:border-white/10 dark:bg-slate-950/90">
+        <div className="query-input-shell flex items-center rounded-[1.75rem] border border-slate-200/80 bg-white p-2 pl-5 dark:border-white/10 dark:bg-slate-950/90 sm:rounded-full sm:pl-7">
           <label className="sr-only" htmlFor="business-question">
             Business question
           </label>
@@ -42,20 +42,20 @@ export function QuestionComposer({
             placeholder="Ask anything about your business data..."
             aria-invalid={Boolean(error)}
             aria-describedby={error ? errorId : undefined}
-            className="min-h-10 flex-1 resize-none bg-transparent py-2 text-base text-slate-900 outline-none placeholder:text-slate-400 dark:text-white"
+            className="max-h-28 min-h-12 flex-1 resize-none bg-transparent py-3 text-base font-medium leading-6 text-slate-900 outline-none placeholder:font-normal placeholder:text-slate-400 dark:text-white sm:text-lg"
           />
           <button
             type="button"
             aria-label="Ask your data"
             disabled={disabled}
             onClick={onSubmit}
-            className="ml-3 grid h-14 w-14 shrink-0 place-items-center rounded-full bg-signal-500 text-2xl font-black text-ink-950 shadow-[0_12px_30px_rgba(245,158,11,0.35)] transition hover:bg-signal-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal-400 disabled:cursor-not-allowed disabled:opacity-60"
+            className="query-submit-button ml-3 grid h-14 w-14 shrink-0 place-items-center rounded-full bg-signal-500 text-xs font-black uppercase tracking-wide text-ink-950 shadow-[0_12px_30px_rgba(6,182,212,0.32)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal-500 disabled:cursor-not-allowed disabled:opacity-60 sm:h-16 sm:w-16"
           >
-            {disabled ? "..." : ">"}
+            {disabled ? "Wait" : "Ask"}
           </button>
         </div>
         {error ? (
-          <p id={errorId} className="text-center text-sm text-rose-300">
+          <p id={errorId} className="text-center text-sm font-semibold text-rose-600 dark:text-rose-300">
             {error}
           </p>
         ) : null}
@@ -64,7 +64,7 @@ export function QuestionComposer({
             type="button"
             onClick={onClear}
             disabled={disabled}
-            className="mx-auto text-sm font-semibold text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
+            className="mx-auto rounded-lg px-3 py-1 text-sm font-semibold text-slate-500 transition hover:bg-slate-900/5 hover:text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal-500 dark:text-slate-400 dark:hover:bg-white/5 dark:hover:text-white"
           >
             Clear question
           </button>

@@ -3,7 +3,6 @@ import { useState } from "react";
 import { EmptyState } from "../../components/shared/EmptyState";
 import { PageHeader } from "../../components/shared/PageHeader";
 import { Button } from "../../components/ui/Button";
-import { Card } from "../../components/ui/Card";
 import { paths } from "../../app/router/paths";
 import { EmptyResult } from "../results/EmptyResult";
 import { QueryDetails } from "../results/QueryDetails";
@@ -103,48 +102,59 @@ export function QueryPage() {
 
   if (showWelcome) {
     return (
-      <div className="mx-auto flex min-h-[calc(100vh-12rem)] max-w-6xl flex-col items-center justify-center px-2 py-8 text-center">
-        <div className="grid h-28 w-28 place-items-center rounded-[2rem] border border-signal-300/40 bg-signal-500/10 text-6xl text-signal-500 shadow-[0_24px_70px_rgba(245,158,11,0.22)]">
-          <svg aria-hidden="true" viewBox="0 0 24 24" className="h-14 w-14" fill="none" stroke="currentColor" strokeWidth="1.8">
-            <path d="M12 3l1.9 6.1L20 11l-6.1 1.9L12 20l-1.9-7.1L4 11l6.1-1.9L12 3Z" />
-            <path d="M19 3v4M17 5h4" />
-          </svg>
-        </div>
-        <h1 className="mt-10 text-5xl font-black tracking-tight text-slate-950 dark:text-white md:text-7xl">
-          Ask Your <span className="text-signal-500">Data</span>
-        </h1>
-        <p className="mt-5 max-w-3xl text-lg leading-8 text-slate-600 dark:text-slate-300">
-          Ask business questions in plain English. SQLSense validates the request and returns read-only results from your connected data.
-        </p>
+      <section className="query-canvas query-canvas-welcome mx-auto flex min-h-[calc(100vh-11rem)] max-w-7xl items-center overflow-hidden rounded-[2rem] px-5 py-12 sm:px-10 lg:px-16">
+        <div className="relative z-10 mx-auto flex w-full max-w-5xl flex-col items-center text-center">
+          <div className="query-enter query-hero-stage" aria-hidden="true">
+            <div className="query-hero-mark">
+              <span>SQL</span>
+            </div>
+          </div>
 
-        <div className="mt-12 w-full max-w-5xl">
-          <QuestionExamples onPick={setQuestion} />
-        </div>
+          <div className="query-enter query-enter-delay-1 mt-9">
+            <p className="text-xs font-bold uppercase tracking-[0.3em] text-signal-600 dark:text-signal-400">Business answers, safely delivered</p>
+            <h1 className="mt-4 text-5xl font-black leading-tight tracking-normal text-slate-950 dark:text-white md:text-7xl">
+              Ask Your <span className="text-signal-600 dark:text-signal-400">Data</span>
+            </h1>
+            <p className="mx-auto mt-6 max-w-2xl text-base leading-7 text-slate-600 dark:text-slate-300 sm:text-lg sm:leading-8">
+              Turn everyday business questions into clear, validated, read-only results from the data you already trust.
+            </p>
+          </div>
 
-        <div className="mt-12 w-full max-w-5xl">
-          <QuestionComposer
-            question={question}
-            onQuestionChange={setQuestion}
-            onSubmit={submit}
-            onClear={clear}
-            disabled={ask.isPending}
-            error={formError}
-            variant="hero"
-          />
+          <div className="query-enter query-enter-delay-2 mt-10 w-full">
+            <QuestionExamples onPick={setQuestion} />
+          </div>
+
+          <div className="query-enter query-enter-delay-3 mt-10 w-full">
+            <QuestionComposer
+              question={question}
+              onQuestionChange={setQuestion}
+              onSubmit={submit}
+              onClear={clear}
+              disabled={ask.isPending}
+              error={formError}
+              variant="hero"
+            />
+            <p className="mt-4 text-xs font-medium text-slate-500 dark:text-slate-400">
+              Validated read-only access. Press Ctrl+Enter to submit.
+            </p>
+          </div>
         </div>
-      </div>
+      </section>
     );
   }
 
   return (
-    <>
-      <PageHeader
-        eyebrow="Ask Your Data"
-        title="Ask another question"
-        description="Your question stays editable. Results appear below after SQLSense validates the request."
-      />
-      <div className="grid gap-6">
-        <Card className="mx-auto w-full max-w-5xl">
+    <section className="query-canvas mx-auto min-h-[calc(100vh-11rem)] max-w-7xl rounded-[2rem] p-5 sm:p-8 lg:p-10">
+      <div className="query-enter mx-auto max-w-5xl text-center">
+        <p className="text-xs font-bold uppercase tracking-[0.3em] text-signal-600 dark:text-signal-400">Ask Your Data</p>
+        <h1 className="mt-3 text-3xl font-black tracking-normal text-slate-950 dark:text-white sm:text-4xl">Ask another question</h1>
+        <p className="mx-auto mt-3 max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-300 sm:text-base">
+          Your question stays editable while SQLSense presents the validated answer below.
+        </p>
+      </div>
+
+      <div className="mt-8 grid gap-7">
+        <div className="query-enter query-enter-delay-1 mx-auto w-full max-w-5xl">
           <QuestionComposer
             question={question}
             onQuestionChange={setQuestion}
@@ -154,23 +164,28 @@ export function QueryPage() {
             error={formError}
             variant="hero"
           />
-        </Card>
+        </div>
 
         <ResultErrorBoundary>
-          <div className="grid gap-4">
+          <div aria-live="polite" className="grid gap-5">
             {ask.isPending ? <QueryLoadingState /> : null}
             {rejection ? (
-              <QueryRejection
-                code={rejection.code}
-                message={rejection.message}
-                details={rejection.details}
-                onClarify={(text) => setQuestion(text)}
-              />
+              <div className="query-result-enter">
+                <QueryRejection
+                  code={rejection.code}
+                  message={rejection.message}
+                  details={rejection.details}
+                  onClarify={(text) => setQuestion(text)}
+                />
+              </div>
             ) : null}
             {ask.data ? (
-              <Card>
+              <section className="query-result-panel query-result-enter rounded-[1.75rem] border border-white/10 bg-slate-950/90 p-5 shadow-[0_28px_90px_rgba(15,23,42,0.22)] sm:p-7 lg:p-8">
                 <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                  <h2 className="text-2xl font-black text-white">Results</h2>
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-[0.24em] text-signal-400">Validated answer</p>
+                    <h2 className="mt-2 text-2xl font-black tracking-normal text-white sm:text-3xl">Results</h2>
+                  </div>
                   <div className="flex flex-wrap gap-3">
                     <ResultSummary result={ask.data} />
                     <ResultExportMenu result={ask.data} />
@@ -186,11 +201,11 @@ export function QueryPage() {
                     <QueryDetails result={ask.data} />
                   </div>
                 ) : null}
-              </Card>
+              </section>
             ) : null}
           </div>
         </ResultErrorBoundary>
       </div>
-    </>
+    </section>
   );
 }

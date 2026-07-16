@@ -15,6 +15,7 @@ from query_pipeline.query_pipeline import QueryPipeline
 from sql_pipeline.question_service import QuestionService
 from sql_pipeline.result_service import ResultService
 from core.chart_service import ChartService
+from core.cache_service import build_cache_store
 from core.insight_service import InsightService
 from core.ai_backend_service import get_ai_backend_service
 from utils.logger import get_logger
@@ -49,6 +50,7 @@ class AppService:
         self.query_pipeline = QueryPipeline(self.question_service)
         self.last_pipeline_result = None
         self.result_service = ResultService()
+        self.cache_service = build_cache_store()
         self.chart_service = ChartService()
         self.insight_service = InsightService()
         self.ai_backend_service = get_ai_backend_service()
@@ -60,6 +62,7 @@ class AppService:
         self.last_pipeline_result = None
         self.question_service.reset_conversation()
         self.result_service.reset()
+        self.cache_service.clear()
         self.chart_service.reset()
         self.insight_service.reset()
         self.database_ready = False
@@ -77,6 +80,7 @@ class AppService:
         sqlite_path: str = "",
     ) -> Tuple[bool, str, Optional[Engine]]:
         """Connect to database."""
+        self.cache_service.clear()
         return self.database_service.connect_database(
             db_type=db_type,
             host=host,
@@ -89,6 +93,7 @@ class AppService:
     
     def connect_from_env(self) -> Tuple[bool, str, Optional[Engine]]:
         """Connect to database using environment variables."""
+        self.cache_service.clear()
         return self.database_service.connect_from_env()
 
     def disconnect_database(self) -> Tuple[bool, str]:
@@ -107,6 +112,7 @@ class AppService:
         force_rebuild: bool = False,
     ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
         """Build knowledge base."""
+        self.cache_service.clear()
         success, message, knowledge_base = self.database_service.build_knowledge_base(
             use_ai_enrichment=use_ai_enrichment,
             ai_backend=ai_backend,
