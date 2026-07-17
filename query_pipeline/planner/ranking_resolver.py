@@ -49,6 +49,171 @@ def _resolve_limit_for_contract(
     return raw_limit, "explicit_or_ranking_limit"
 
 
+def _ranking_mode_for_contract(intent: dict[str, Any], query_shape: str) -> str:
+    mode_hint = str((intent.get("ranking_diagnostics") or {}).get("mode_hint") or "").strip()
+    if mode_hint == "grouped_aggregate":
+        return "grouped_aggregate_ranking"
+    if mode_hint == "ordered_list":
+        return "ordered_list"
+    if intent.get("requested_sort"):
+        return "row_ranking"
+    if query_shape == "ranking_query":
+        return "row_ranking"
+    return ""
+
+
+def _ranking_projection_mode(ranking_mode: str) -> str:
+    if ranking_mode == "grouped_aggregate_ranking":
+        return "grouped_aggregate_projection"
+    if ranking_mode == "ordered_list":
+        return "ordered_list_projection"
+    if ranking_mode == "row_ranking":
+        return "row_projection"
+    return ""
+
+
+def _ranking_direction_conflict(intent: dict[str, Any]) -> bool:
+    markers = (intent.get("keyword_markers") or {}).get("ranking") or []
+    directions = {
+        str(entry.get("normalized") or "").strip().lower()
+        for entry in markers
+        if isinstance(entry, dict)
+    }
+    return "asc" in directions and "desc" in directions
+
+
+def _ranking_rejected_alternatives(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rejected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        table_name, column_name = _order_candidate_identity(entry)
+        identity = (table_name, column_name)
+        if not table_name or not column_name or identity in seen:
+            continue
+        seen.add(identity)
+        rejected.append(
+            {
+                "table": table_name,
+                "column": column_name,
+                "source": str(entry.get("source") or ""),
+                "score": entry.get("score"),
+            }
+        )
+    return rejected
+
+
+def _build_ranking_decision_for_contract(
+    *,
+    query_shape: str,
+    intent: dict[str, Any],
+    selected_tables: list[dict[str, Any]],
+    selected_metric: dict[str, Any] | None,
+    selected_dimensions: list[dict[str, Any]],
+    selected_order_by: dict[str, Any] | None,
+    aggregate_function: str,
+    limit: int | None,
+    limit_reason: str,
+    order_by_reason: str,
+    order_by_ambiguity_choices: list[dict[str, Any]],
+) -> dict[str, Any]:
+    sorting = dict(intent.get("requested_sort") or {})
+    if not sorting:
+        return {}
+
+    ranking_mode = _ranking_mode_for_contract(intent, query_shape)
+    target_table = (
+        str(selected_tables[0].get("table") or "").strip()
+        if len(selected_tables) == 1
+        else ""
+    )
+    selected_direction = str(
+        (selected_order_by or {}).get("direction") or sorting.get("direction") or ""
+    ).strip().upper()
+    terms = str(sorting.get("terms") or "").strip()
+    reason_code = ""
+    ambiguity_group_key = ""
+    rejected_alternatives = _ranking_rejected_alternatives(order_by_ambiguity_choices)
+
+    if _ranking_direction_conflict(intent):
+        status = "ambiguous"
+        reason_code = "ranking_direction_conflict"
+        ambiguity_group_key = "ranking_direction"
+    elif selected_direction.lower() not in {"asc", "desc"}:
+        status = "unsupported"
+        reason_code = "order_by_direction_invalid"
+        ambiguity_group_key = "ranking_direction"
+    elif order_by_reason:
+        status = "ambiguous" if "ambiguous" in order_by_reason else "unsupported"
+        reason_code = order_by_reason
+        ambiguity_group_key = f"order_by:{_normalize(terms)}" if terms else "order_by"
+    elif limit_reason in {"limit_not_numeric", "limit_out_of_safe_range"}:
+        status = "unsupported"
+        reason_code = limit_reason
+        ambiguity_group_key = "ranking_limit"
+    elif ranking_mode == "grouped_aggregate_ranking" and aggregate_function not in {"count", "sum", "avg", "min", "max"}:
+        status = "unsupported"
+        reason_code = "ranking_aggregate_missing"
+        ambiguity_group_key = "ranking_aggregate"
+    elif ranking_mode == "grouped_aggregate_ranking" and not selected_dimensions:
+        status = "unsupported"
+        reason_code = "ranking_grouping_dimension_missing"
+        ambiguity_group_key = "ranking_dimension"
+    elif ranking_mode == "grouped_aggregate_ranking" and len(selected_dimensions) > 1:
+        status = "ambiguous"
+        reason_code = "ranking_grouping_dimension_ambiguous"
+        ambiguity_group_key = "ranking_dimension"
+    elif not isinstance(selected_order_by, dict):
+        status = "unsupported"
+        reason_code = "order_by_target_missing"
+        ambiguity_group_key = "order_by"
+    else:
+        status = "resolved"
+
+    ranking_metric: dict[str, Any] = {}
+    if isinstance(selected_order_by, dict):
+        ranking_metric = {
+            "table": str(selected_order_by.get("table") or "").strip(),
+            "column": str(selected_order_by.get("column") or "").strip(),
+        }
+    elif isinstance(selected_metric, dict):
+        table_name, column_name = _order_candidate_identity(selected_metric)
+        ranking_metric = {"table": table_name, "column": column_name}
+
+    grouping_dimension: dict[str, Any] = {}
+    if selected_dimensions:
+        table_name, column_name = _order_candidate_identity(selected_dimensions[0])
+        grouping_dimension = {"table": table_name, "column": column_name}
+
+    score_reasons: list[str] = []
+    if status == "resolved":
+        score_reasons.extend(["ranking_direction_resolved", "order_by_target_resolved"])
+        if isinstance(limit, int):
+            score_reasons.append("ranking_limit_resolved")
+        if ranking_mode == "grouped_aggregate_ranking":
+            score_reasons.extend(["aggregate_metric_resolved", "grouping_dimension_resolved"])
+
+    return {
+        "status": status,
+        "ranking_mode": ranking_mode,
+        "target_entity": target_table,
+        "target_table": target_table,
+        "ranking_metric": ranking_metric,
+        "aggregate_function": aggregate_function or None,
+        "grouping_dimension": grouping_dimension,
+        "direction": selected_direction if selected_direction in {"ASC", "DESC"} else "",
+        "limit": limit,
+        "selected_projection_mode": _ranking_projection_mode(ranking_mode),
+        "score": 1.0 if status == "resolved" else 0.0,
+        "score_reasons": score_reasons,
+        "evidence_reasons": score_reasons,
+        "rejected_alternatives": rejected_alternatives,
+        "ambiguity_group_key": ambiguity_group_key,
+        "reason_code": reason_code,
+    }
+
+
 def _order_candidate_identity(entry: dict[str, Any]) -> tuple[str, str]:
     return (
         str(entry.get("table") or entry.get("table_name") or "").strip(),

@@ -77,6 +77,7 @@ from query_pipeline.planner.join_resolver import (
     _table_phrase_score,
 )
 from query_pipeline.planner.ranking_resolver import (
+    _build_ranking_decision_for_contract,
     _order_by_candidates_for_contract,
     _order_candidate_identity,
     _resolve_limit_for_contract,
@@ -2303,6 +2304,39 @@ def _normalize_planner_output(
     }:
         blocking_ambiguities.add("limit_selection")
     plan["limit"] = resolved_limit
+    ranking_decision = _build_ranking_decision_for_contract(
+        query_shape=query_shape,
+        intent=structured_intent,
+        selected_tables=selected_tables,
+        selected_metric=selected_metric,
+        selected_dimensions=selected_dimensions,
+        selected_order_by=selected_order_by,
+        aggregate_function=aggregate_function or "",
+        limit=resolved_limit,
+        limit_reason=limit_reason,
+        order_by_reason=order_by_reason,
+        order_by_ambiguity_choices=order_by_ambiguity_choices,
+    )
+    if order_by_required and ranking_decision.get("status") != "resolved":
+        selected_order_by = None
+        blocking_ambiguities.add("ranking_selection")
+        reason_code = str(ranking_decision.get("reason_code") or "").strip()
+        if reason_code and not order_by_reason:
+            order_by_reason = reason_code
+    if order_by_required and blocking_ambiguities and ranking_decision.get("status") == "resolved":
+        selected_order_by = None
+        blocking_ambiguities.add("ranking_selection")
+        ranking_decision = {
+            **ranking_decision,
+            "status": "ambiguous",
+            "score": 0.0,
+            "score_reasons": [],
+            "evidence_reasons": [],
+            "ambiguity_group_key": "ranking_selection",
+            "reason_code": "ranking_blocked_by_unresolved_evidence",
+        }
+        if not order_by_reason:
+            order_by_reason = "ranking_blocked_by_unresolved_evidence"
     selected_order_table = str((selected_order_by or {}).get("table") or "").strip()
     if (
         final_single_table_scope
@@ -2356,6 +2390,8 @@ def _normalize_planner_output(
     )
     if order_by_ambiguity_choices:
         ambiguity_details.append({"type": "order_by_selection", "choices": order_by_ambiguity_choices})
+    if ranking_decision and ranking_decision.get("status") != "resolved":
+        ambiguity_details.append({"type": "ranking_selection", "decision": dict(ranking_decision)})
     selected_having = _selected_having_for_contract(
         structured_intent,
         selected_metric,
@@ -2378,6 +2414,8 @@ def _normalize_planner_output(
         limit_reason=limit_reason,
         join_paths=join_paths,
     )
+    if ranking_decision:
+        clause_plan["ranking_decision"] = dict(ranking_decision)
     sorting = dict(
         ((intent or {}).get("requested_sort") or plan.get("sorting") or {})
         if isinstance(intent, dict)
@@ -2417,6 +2455,7 @@ def _normalize_planner_output(
         normalized_complex_sql_plan["required_joins"] = required_joins
         normalized_complex_sql_plan["having"] = list(selected_having)
         normalized_complex_sql_plan["selected_order_by"] = dict(selected_order_by or {})
+        normalized_complex_sql_plan["ranking_decision"] = dict(ranking_decision or {})
         normalized_complex_sql_plan["limit"] = resolved_limit
         normalized_complex_sql_plan["clause_plan"] = dict(clause_plan)
         normalized_complex_sql_plan["route_recommendation"] = route_recommendation
@@ -2453,6 +2492,7 @@ def _normalize_planner_output(
         "selected_filters": selected_filters,
         "selected_having": selected_having,
         "selected_order_by": selected_order_by,
+        "ranking_decision": ranking_decision,
         "clause_plan": clause_plan,
         "selected_relationship_path": selected_relationship_path,
         "aggregate_function": aggregate_function,
