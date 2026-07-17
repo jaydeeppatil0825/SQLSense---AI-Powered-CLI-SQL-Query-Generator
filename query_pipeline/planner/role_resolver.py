@@ -929,7 +929,12 @@ def rank_role_candidates(
             and len(ties) == 1
             and any("selected join path" in reason for reason in path_reasons)
         )
-        if not selected_path_winner:
+        owner_context_winner = (
+            owner_context
+            and len(ties) == 1
+            and any("owner context" in reason for reason in path_reasons)
+        )
+        if not selected_path_winner and not owner_context_winner:
             return {
                 "status": "ambiguous",
                 "selected": None,
@@ -1116,6 +1121,100 @@ def build_metric_decision_contract(
         "score_reasons": list(selected.get("reasons") or selected.get("score_reasons") or []),
         "penalties": list(selected.get("penalties") or []),
         "ambiguity_group_key": "" if not reason else f"metric:{table_name}.{column_name}",
+        "rejected_candidates": [
+            item for item in (result.get("ranked") or [])
+            if (item.get("candidate") or {}) != candidate
+        ],
+        "reason_code": reason,
+    }
+
+
+def build_dimension_decision_contract(
+    *,
+    dimension_phrase: str,
+    dimension_candidates: list[dict[str, Any]],
+    dimension_mode: str = "grouping_dimension",
+    selected_dimension: dict[str, Any] | None = None,
+    selected_join_path: dict[str, Any] | None = None,
+    owner_context: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    allowed_tables: set[str] | None = None,
+) -> dict[str, Any]:
+    mode = str(dimension_mode or "grouping_dimension").strip()
+    if mode not in {"grouping_dimension", "display_dimension", "entity_label"}:
+        mode = "grouping_dimension"
+    path_tables = _selected_path_tables(selected_join_path)
+
+    def _path_compatible(table_name: str) -> bool:
+        return not path_tables or table_name in path_tables
+
+    result = (
+        {"status": "resolved", "selected": {"candidate": dict(selected_dimension), "tier": "preserved_selected_dimension", "score": 1.0, "reasons": ["dimension preserved from upstream planner decision"]}, "ranked": [], "tie_reason": ""}
+        if isinstance(selected_dimension, dict) and selected_dimension
+        else rank_role_candidates(
+            dimension_phrase,
+            dimension_candidates,
+            role="dimension",
+            allowed_tables=allowed_tables,
+            owner_context=owner_context,
+            selected_join_path=selected_join_path,
+        )
+    )
+    if result.get("status") != "resolved":
+        return {
+            "status": str(result.get("status") or "missing"),
+            "dimension_phrase": dimension_phrase,
+            "dimension_mode": mode,
+            "owner_entity": "",
+            "table": "",
+            "column": "",
+            "semantic_type": "",
+            "display_eligible": False,
+            "grouping_eligible": False,
+            "selected_path_compatible": False,
+            "evidence_tier": "",
+            "score": 0.0,
+            "score_reasons": [],
+            "penalties": [],
+            "ambiguity_group_key": f"dimension:{result.get('status') or 'missing'}",
+            "rejected_candidates": list(result.get("ranked") or []),
+            "reason_code": f"dimension_evidence_{result.get('status') or 'missing'}",
+        }
+
+    selected = result.get("selected") or {}
+    candidate = dict(selected.get("candidate") or {})
+    table_name = str(candidate.get("table") or "").strip()
+    column_name = str(candidate.get("column") or "").strip()
+    semantic_type = _candidate_semantic_type(candidate)
+    display_ok = _candidate_is_dimension(candidate, dimension_phrase)
+    grouping_ok = display_ok and semantic_type not in {"money", "numeric", "numeric_candidate", "date"}
+    table_allowed = allowed_tables is None or table_name in allowed_tables
+    path_ok = _path_compatible(table_name)
+    reason = ""
+    if not display_ok:
+        reason = "dimension_not_display_eligible"
+    elif mode == "grouping_dimension" and not grouping_ok:
+        reason = "dimension_not_grouping_eligible"
+    elif not table_allowed:
+        reason = "dimension_table_not_allowed"
+    elif not path_ok:
+        reason = "dimension_table_outside_selected_path"
+
+    return {
+        "status": "resolved" if not reason else "unsupported",
+        "dimension_phrase": dimension_phrase,
+        "dimension_mode": mode,
+        "owner_entity": table_name,
+        "table": table_name,
+        "column": column_name,
+        "semantic_type": semantic_type,
+        "display_eligible": display_ok,
+        "grouping_eligible": grouping_ok,
+        "selected_path_compatible": path_ok,
+        "evidence_tier": str(selected.get("tier") or selected.get("evidence_tier") or ""),
+        "score": _safe_float(selected.get("score"), 0.0),
+        "score_reasons": list(selected.get("reasons") or selected.get("score_reasons") or []),
+        "penalties": list(selected.get("penalties") or []),
+        "ambiguity_group_key": "" if not reason else f"dimension:{table_name}.{column_name}",
         "rejected_candidates": [
             item for item in (result.get("ranked") or [])
             if (item.get("candidate") or {}) != candidate

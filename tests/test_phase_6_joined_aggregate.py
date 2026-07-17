@@ -319,6 +319,16 @@ def test_joined_aggregate_positive_shapes(question, aggregate, dimension, extra)
     assert valid is True, reason
 
 
+def test_grouped_aggregate_generic_status_uses_metric_owner_context():
+    context = _context("show sum total amount by status from service orders")
+
+    assert context["route_recommendation"] == "deterministic_sql_required"
+    assert context["query_shape"] == "grouped_aggregate"
+    assert context["selected_dimensions"][0]["table"] == "service_orders"
+    assert context["selected_dimensions"][0]["column"] == "order_status"
+    assert context["dimension_decision"]["status"] == "resolved"
+
+
 def test_joined_aggregate_contract_has_exact_decision_path():
     context = _context("show sum total amount by customer city from service orders")
     path = context["clause_plan"]["decision_path"]
@@ -598,7 +608,6 @@ def test_validator_rejects_selected_graph_path_mismatch():
         "show sum total amount by customer city from service orders via region",
         "show sum total amount by customer city from service orders and products",
         "show sum amount by customer city from service orders",
-        "show sum total amount by status from service orders",
     ],
 )
 def test_unsupported_or_ambiguous_joined_aggregates_fail_closed(question):

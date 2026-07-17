@@ -94,6 +94,7 @@ from query_pipeline.planner.text_utils import (
     _tokenize,
 )
 from query_pipeline.planner.role_resolver import (
+    build_dimension_decision_contract,
     _candidate_is_numeric_metric,
     _exact_table_column_candidates,
     _fallback_metric_candidates_from_selected_columns,
@@ -2375,6 +2376,32 @@ def _normalize_planner_output(
         }
         if not order_by_reason:
             order_by_reason = "ranking_blocked_by_unresolved_evidence"
+    selected_relationship_path = dict(join_paths[0]) if join_paths else None
+    dimension_decision: dict[str, Any] = {}
+    if grouped_dimension_required:
+        dimension_phrase_for_decision = str(
+            next(iter(structured_intent.get("requested_dimensions") or []), "")
+            or structured_intent.get("grouping_phrase")
+            or plan.get("dimension")
+            or ""
+        ).strip()
+        selected_dimension = selected_dimensions[0] if len(selected_dimensions) == 1 else None
+        dimension_owner_context = [
+            str(structured_intent.get("target_entity_phrase") or ""),
+            str(next(iter(structured_intent.get("source_scope") or []), "")),
+            str((selected_metric or {}).get("table") or "") if isinstance(selected_metric, dict) else "",
+        ]
+        dimension_decision = build_dimension_decision_contract(
+            dimension_phrase=dimension_phrase_for_decision,
+            dimension_candidates=dimension_candidates,
+            dimension_mode="grouping_dimension",
+            selected_dimension=selected_dimension,
+            selected_join_path=selected_relationship_path,
+            owner_context=dimension_owner_context,
+        )
+        if dimension_decision.get("status") != "resolved":
+            selected_dimensions = []
+            blocking_ambiguities.add("dimension_selection")
     selected_order_table = str((selected_order_by or {}).get("table") or "").strip()
     if (
         final_single_table_scope
@@ -2435,7 +2462,6 @@ def _normalize_planner_output(
         selected_metric,
         selected_tables,
     )
-    selected_relationship_path = dict(join_paths[0]) if join_paths else None
     filter_decision = build_filter_decision_contract(
         selected_filters=selected_filters,
         selected_having=selected_having,
@@ -2520,6 +2546,7 @@ def _normalize_planner_output(
         normalized_complex_sql_plan["having"] = list(selected_having)
         normalized_complex_sql_plan["selected_order_by"] = dict(selected_order_by or {})
         normalized_complex_sql_plan["ranking_decision"] = dict(ranking_decision or {})
+        normalized_complex_sql_plan["dimension_decision"] = dict(dimension_decision or {})
         normalized_complex_sql_plan["limit"] = resolved_limit
         normalized_complex_sql_plan["clause_plan"] = dict(clause_plan)
         normalized_complex_sql_plan["route_recommendation"] = route_recommendation
@@ -2553,6 +2580,7 @@ def _normalize_planner_output(
         "selected_columns": list(selected_columns),
         "selected_metric": selected_metric,
         "selected_dimensions": selected_dimensions,
+        "dimension_decision": dimension_decision,
         "selected_filters": selected_filters,
         "filter_decision": filter_decision,
         "selected_having": selected_having,

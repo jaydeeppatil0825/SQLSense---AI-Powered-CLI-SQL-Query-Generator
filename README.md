@@ -1,9 +1,12 @@
-# SQLSense - AI-Powered CLI SQL Query Generator
-unstable
+# SQLSense - AI-Powered SQL Query Generator
 
-A Python CLI tool that connects to MySQL databases, builds a semantic knowledge base, and converts plain-English questions into safe, read-only SQL `SELECT` queries using deterministic SQL generation with optional AI semantic enrichment during knowledge base build.
+A full-stack application that connects to MySQL databases, builds a semantic knowledge base, and converts plain-English questions into safe, read-only SQL `SELECT` queries using deterministic SQL generation with optional AI semantic enrichment during knowledge base build.
 
-**This project is CLI-only.** Run it with `python main.py`.
+**Available interfaces:**
+- **CLI**: Run with `python main.py`
+- **Web UI**: React frontend with FastAPI backend
+- **API Gateway**: REST API for programmatic access
+
 **AI/LLM is used only during KB build/semantic enrichment.** Runtime question answering is entirely deterministic without AI.
 
 ---
@@ -21,17 +24,23 @@ SQL-Sense/
 ├── main.py                          # CLI entry point, menu loop
 ├── .env                             # Your credentials (not committed)
 ├── .env.template                    # Template — copy this to .env
-├── requirements.txt                 # Pinned dependencies
+├── requirements.txt                 # Python dependencies
 ├── README.md                        # Main documentation
 ├── PIPELINE_ARCHITECTURE.md        # Pipeline architecture documentation
 ├── SECURITY.md                      # Security recommendations
 ├── LICENSE                          # MIT License
-├── core/
+├── api_gateway/                     # FastAPI backend for web UI
+│   ├── __init__.py
+│   └── app.py                       # FastAPI BFF for AppService
+├── core/                            # Core application services
 │   ├── app_service.py               # Main application service orchestrator
 │   ├── ai_backend_service.py        # AI backend service (KB build only)
 │   ├── chart_service.py             # Chart generation service
-│   └── insight_service.py           # Insight generation service (runtime disabled)
-├── kb_pipeline/
+│   ├── insight_service.py           # Insight generation service (runtime disabled)
+│   ├── database_service.py          # Compatibility alias for kb_pipeline
+│   ├── query_planner.py             # Compatibility alias for query_pipeline
+│   └── question_service.py          # Compatibility alias for sql_pipeline
+├── kb_pipeline/                     # Knowledge Base Pipeline
 │   ├── database_service.py         # Database connection and KB build orchestration
 │   ├── connection.py                # Engine factory (env + interactive)
 │   ├── schema_reader.py             # SQLAlchemy reflection → schema dict
@@ -53,7 +62,7 @@ SQL-Sense/
 │       ├── index_builder.py         # Vector index builder
 │       ├── persistence.py           # Vector index persistence
 │       └── retriever.py             # Vector retriever
-├── query_pipeline/
+├── query_pipeline/                  # Query Planning Pipeline
 │   ├── query_pipeline.py            # Query planning pipeline entry point
 │   ├── query_planner.py             # Query planning and routing logic with structured contract
 │   ├── intent_builder.py            # Schema-agnostic deterministic intent detection
@@ -64,7 +73,7 @@ SQL-Sense/
 │       ├── followup_detector.py     # Follow-up question detection
 │       ├── question_rewriter.py     # Follow-up question rewriting (rule-based)
 │       └── conversation_memory.py   # Conversation session management
-├── sql_pipeline/
+├── sql_pipeline/                    # SQL Generation Pipeline
 │   ├── question_service.py          # Question processing orchestration
 │   ├── deterministic_sql_generator.py  # Deterministic SQL generation
 │   ├── simple_query_generator.py    # Deterministic SQL for simple queries
@@ -73,22 +82,37 @@ SQL-Sense/
 │   ├── sql_validator.py             # SQL validation
 │   ├── query_executor.py            # Safe SELECT execution
 │   └── result_service.py            # Result storage and retrieval
-├── utils/
+├── frontend/                        # React 19 + TypeScript frontend
+│   ├── src/                         # React source code
+│   ├── package.json                 # Node.js dependencies
+│   ├── vite.config.ts              # Vite configuration
+│   ├── tailwind.config.ts          # TailwindCSS configuration
+│   └── README.md                    # Frontend documentation
+├── db/                              # Legacy database utilities (compatibility)
+│   ├── __init__.py
+│   ├── connection.py
+│   ├── data_profiler.py
+│   ├── query_executor.py
+│   └── schema_reader.py
+├── vector_store/                    # Legacy vector store (compatibility)
+│   ├── __init__.py
+│   └── ...
+├── utils/                           # Utility functions
 │   ├── config_manager.py            # Local connection configuration manager
 │   ├── file_utils.py                # save_json / load_json
 │   └── logger.py                    # Centralized logging configuration
-├── semantic/
-│   ├── knowledge_base.json          # Generated output (git-ignored)
-│   ├── knowledge_base.meta.json    # KB metadata (git-ignored)
-│   └── business_glossary.json       # Generated business glossary (git-ignored)
+├── semantic/                        # Generated knowledge base artifacts (git-ignored)
+│   ├── knowledge_base.json          # Generated output
+│   ├── knowledge_base.meta.json    # KB metadata
+│   └── business_glossary.json       # Generated business glossary
 ├── .sqlsense/                       # Local configuration directory (git-ignored)
-│   └── local_connection.json        # Last-used connection details (git-ignored)
-├── logs/
-│   └── app.log                      # Application logs (git-ignored)
-├── output/
-│   ├── charts/                      # Generated charts (git-ignored)
-│   ├── history/                     # Query history JSON files (git-ignored)
-│   └── conversations/               # Conversation session JSON files (git-ignored)
+│   └── local_connection.json        # Last-used connection details
+├── logs/                            # Application logs (git-ignored)
+│   └── app.log                      # Application logs
+├── output/                          # Generated outputs (git-ignored)
+│   ├── charts/                      # Generated charts
+│   ├── history/                     # Query history JSON files
+│   └── conversations/               # Conversation session JSON files
 └── tests/                           # Unit and property-based tests
 ```
 
@@ -96,12 +120,16 @@ SQL-Sense/
 
 ## Setup Steps
 
-**Requirements:** Python 3.10+ and pip.
+**Requirements:**
+- Python 3.10+ and pip (for backend)
+- Node.js 18+ and npm (for frontend)
+
+### Backend Setup
 
 ```bash
 # 1. Clone the project
 git clone <repo-url>
-cd aisqlqurrey
+cd SQL-Sense
 
 # 2. Create a virtual environment
 python -m venv .venv
@@ -112,11 +140,27 @@ python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
 
-# 3. Install dependencies
+# 3. Install Python dependencies
 pip install -r requirements.txt
 
 # 4. Copy and fill in the .env template
 copy .env.template .env
+```
+
+### Frontend Setup (Optional - for Web UI)
+
+```bash
+# Navigate to frontend directory
+cd frontend
+
+# Install Node.js dependencies
+npm install
+
+# Copy environment template
+cp .env.example .env.local
+
+# Return to project root
+cd ..
 ```
 
 ### .env Variables
@@ -163,6 +207,8 @@ The CLI checks `http://localhost:11434/api/tags` before AI enrichment. If Ollama
 
 ## How to Run
 
+### CLI Mode
+
 ```bash
 python main.py
 ```
@@ -186,6 +232,47 @@ You will see:
 ║  7. Exit                                                    ║
 ╚════════════════════════════════════════════════════════════╝
 ```
+
+### Web UI Mode (Optional)
+
+```bash
+# Start the API Gateway (FastAPI backend)
+python -m uvicorn api_gateway.app:app --reload --host 0.0.0.0 --port 8000
+
+# In a new terminal, start the React frontend
+cd frontend
+npm run dev
+```
+
+The web UI will be available at `http://localhost:5173` and the API at `http://localhost:8000`.
+
+**Web UI Features:**
+- Modern React 19 interface with TypeScript
+- Real-time database connection status
+- Interactive question composer with examples
+- Visual query results with charts
+- Query history and conversation management
+- Knowledge base status and management
+
+### API Gateway Mode (Optional)
+
+The API Gateway provides a REST API for programmatic access:
+
+```bash
+# Start the API Gateway
+python -m uvicorn api_gateway.app:app --reload --host 0.0.0.0 --port 8000
+```
+
+**API Endpoints:**
+- `POST /api/action` - Main action endpoint for all operations
+- `GET /api/health` - Health check endpoint
+- `GET /api/system/status` - System status (database, KB, AI backend)
+
+**API Features:**
+- Session-based authentication
+- CORS support for web UI
+- Structured JSON responses
+- Error handling and validation
 
 ### CLI Features
 
@@ -638,3 +725,13 @@ python -m pytest -v --basetemp=temp_pytest_full
 - Additional AI enrichment improvements for larger schemas
 - Enhanced vector retrieval with hybrid search
 - Support for more chart types and visualizations
+- Web UI enhancements:
+  - User authentication and authorization
+  - Saved queries and dashboards
+  - Advanced filtering and export options
+  - Real-time collaboration features
+- API Gateway improvements:
+  - OAuth2/JWT authentication
+  - Rate limiting and API keys
+  - WebSocket support for real-time updates
+  - API documentation with OpenAPI/Swagger

@@ -1,6 +1,6 @@
 # SQLSense Pipeline Architecture
 
-SQLSense is a CLI-only tool organized around three logical pipelines.
+SQLSense is a full-stack application organized around three logical pipelines with multiple interface layers (CLI, Web UI, API Gateway).
 
 This document describes the active runtime boundaries and architecture of the system. The goal is to keep the codebase understandable, dynamic, and safe while maintaining the current behavior.
 
@@ -165,17 +165,18 @@ Boundary rules:
 
 ## Current Orchestration
 
-`core/app_service.py` is the main application service orchestrator that coordinates all lower-level services behind the CLI.
+`core/app_service.py` is the main application service orchestrator that coordinates all lower-level services behind the CLI and API Gateway.
 
 The orchestration flow:
-1. `main.py` handles CLI menu display and user input
-2. `utils/config_manager.py` handles local connection configuration persistence
-3. `core/app_service.py` coordinates business logic across all pipelines
-4. `kb_pipeline/database_service.py` handles database connection and KB build
-5. `query_pipeline/query_pipeline.py` handles question processing and planning
-6. `sql_pipeline/question_service.py` handles SQL generation and execution
-7. `core/chart_service.py` handles chart generation
-8. `core/insight_service.py` handles insight generation (runtime disabled)
+1. **CLI Mode**: `main.py` handles CLI menu display and user input
+2. **Web/API Mode**: `api_gateway/app.py` handles HTTP requests and session management
+3. `utils/config_manager.py` handles local connection configuration persistence
+4. `core/app_service.py` coordinates business logic across all pipelines
+5. `kb_pipeline/database_service.py` handles database connection and KB build
+6. `query_pipeline/query_pipeline.py` handles question processing and planning
+7. `sql_pipeline/question_service.py` handles SQL generation and execution
+8. `core/chart_service.py` handles chart generation
+9. `core/insight_service.py` handles insight generation (runtime disabled)
 
 ## Evidence Flow
 
@@ -228,6 +229,58 @@ The `core/` directory contains the main application services that orchestrate th
 - `core/ai_backend_service.py`: AI backend service for KB build only (local Ollama)
 - `core/chart_service.py`: Chart generation service
 - `core/insight_service.py`: Insight generation service (runtime disabled - AI restricted to KB enrichment)
+- `core/database_service.py`: Compatibility alias for `kb_pipeline.database_service`
+- `core/query_planner.py`: Compatibility shim for `query_pipeline.query_planner`
+- `core/question_service.py`: Compatibility alias for `sql_pipeline.question_service`
+
+## Interface Layers
+
+SQLSense provides multiple interface layers to access the same core pipeline architecture:
+
+### CLI Interface
+- **Entry Point**: `main.py`
+- **Features**: 
+  - Interactive menu system
+  - Connection reuse with password protection
+  - Auto-execute validated SQL
+  - Real-time status indicators
+  - Conversation memory and follow-up questions
+
+### API Gateway
+- **Entry Point**: `api_gateway/app.py`
+- **Technology**: FastAPI
+- **Features**:
+  - REST API for programmatic access
+  - Session-based authentication
+  - CORS support for web UI
+  - Structured JSON responses
+  - Error handling and validation
+- **Endpoints**:
+  - `POST /api/action` - Main action endpoint
+  - `GET /api/health` - Health check
+  - `GET /api/system/status` - System status
+
+### Web UI
+- **Technology**: React 19 + TypeScript + Vite
+- **Features**:
+  - Modern responsive interface
+  - Real-time database connection status
+  - Interactive question composer
+  - Visual query results with charts
+  - Query history and conversation management
+  - Knowledge base status dashboard
+
+## Legacy Compatibility
+
+The following directories and files are maintained for backward compatibility:
+
+- `db/` - Legacy database utilities (connection, data_profiler, query_executor, schema_reader)
+- `vector_store/` - Legacy vector store implementation
+- `core/database_service.py` - Compatibility alias for `kb_pipeline.database_service`
+- `core/query_planner.py` - Compatibility shim for `query_pipeline.query_planner`
+- `core/question_service.py` - Compatibility alias for `sql_pipeline.question_service`
+
+These are gradually being phased out in favor of the pipeline-based architecture.
 
 ## Utility Services
 

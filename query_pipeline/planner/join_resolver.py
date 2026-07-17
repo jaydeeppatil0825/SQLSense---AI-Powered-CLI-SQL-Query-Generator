@@ -18,6 +18,7 @@ from query_pipeline.planner.filter_resolver import (
     _source_scope_as_filters,
 )
 from query_pipeline.planner.role_resolver import (
+    build_dimension_decision_contract,
     build_metric_decision_contract,
     _candidate_is_numeric_metric,
     _exact_table_column_candidates,
@@ -612,7 +613,17 @@ def _apply_joined_aggregate_contract(
         aggregate_function = "sum"
     if aggregate_function not in {"count", "sum", "avg", "min", "max"}:
         return context
-    dimension_owner_context = metric_lookup_phrase if aggregate_function == "count" else None
+    source_phrase = str(next(iter(intent.get("source_scope") or []), "")).strip()
+    dimension_owner_context = (
+        metric_lookup_phrase
+        if aggregate_function == "count"
+        else [
+            source_phrase,
+            str((context.get("selected_metric") or {}).get("table") or "")
+            if isinstance(context.get("selected_metric"), dict)
+            else "",
+        ]
+    )
 
     retrieved = context.get("retrieved_context") if isinstance(context.get("retrieved_context"), dict) else {}
     retrieved_tables = [
@@ -836,6 +847,11 @@ def _apply_joined_aggregate_contract(
                     resolved_nodes={"unsafe_check", "table_scope", "query_shape", "aggregate"},
                 )
 
+    if aggregate_function != "count":
+        dimension_owner_context = [
+            source_phrase,
+            str((metric or {}).get("table") or ""),
+        ]
     dimension_evidence_result = _rank_role_candidates(
         dimension_phrase,
         dimension_candidates,
@@ -913,7 +929,6 @@ def _apply_joined_aggregate_contract(
     dimension_table = str(dimension.get("table") or "").strip()
     dimension_column = str(dimension.get("column") or "").strip()
 
-    source_phrase = str(next(iter(intent.get("source_scope") or []), "")).strip()
     if aggregate_function == "count" and not source_phrase:
         source_phrase = metric_phrase or str(intent.get("target_entity_phrase") or "").strip()
     base_table = str((metric or {}).get("table") or "").strip()
@@ -1225,17 +1240,36 @@ def _apply_joined_aggregate_contract(
         path_edges = [dict(graph_edges[0])]
 
     path_tables = {base_table, *joined_tables}
+    selected_join_path_for_decisions = {
+        "base_table": base_table,
+        "joined_tables": joined_tables,
+        "edges": path_edges,
+        "path_source": "relationship_graph",
+    }
+    dimension_decision = build_dimension_decision_contract(
+        dimension_phrase=dimension_phrase,
+        dimension_candidates=dimension_candidates,
+        dimension_mode="grouping_dimension",
+        selected_dimension=dimension,
+        selected_join_path=selected_join_path_for_decisions,
+        owner_context=[source_phrase, base_table],
+    )
+    if dimension_decision.get("status") != "resolved":
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="dimension",
+            reason=str(dimension_decision.get("reason_code") or "joined aggregate dimension contract is invalid"),
+            resolved_nodes={
+                "unsafe_check", "table_scope", "query_shape", "aggregate", "metric",
+                "join_need", "relationship_graph_lookup", "safe_join_path",
+            },
+        )
     metric_decision = build_metric_decision_contract(
         metric_phrase=metric_lookup_phrase,
         metric_candidates=metric_candidates,
         aggregate_function=aggregate_function,
         selected_metric=metric,
-        selected_join_path={
-            "base_table": base_table,
-            "joined_tables": joined_tables,
-            "edges": path_edges,
-            "path_source": "relationship_graph",
-        },
+        selected_join_path=selected_join_path_for_decisions,
         count_base_table=base_table if aggregate_function == "count" else "",
     )
     if metric_decision.get("status") != "resolved":
@@ -1495,6 +1529,7 @@ def _apply_joined_aggregate_contract(
             "metric_candidates": [metric] if metric is not None else [],
             "measure_candidates": [metric] if metric is not None else [],
             "selected_dimensions": [dimension],
+            "dimension_decision": dimension_decision,
             "selected_filters": selected_filters,
             "selected_having": selected_having,
             "selected_order_by": selected_order_by,
@@ -1542,6 +1577,7 @@ def _apply_joined_aggregate_contract(
         "selected_tables": selected_tables,
         "selected_metric": metric,
         "selected_dimensions": [dimension],
+        "dimension_decision": dimension_decision,
         "selected_output_columns": selected_output_columns,
         "filters": selected_filters,
         "having": selected_having,
