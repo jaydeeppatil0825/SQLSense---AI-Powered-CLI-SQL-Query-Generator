@@ -1802,7 +1802,7 @@ def _apply_join_lookup_contract(
         }
 
     if structured_filters:
-        if len(selected_filters) != len(structured_filters) or not filter_tables <= candidate_tables:
+        if len(selected_filters) < len(structured_filters) or not filter_tables <= candidate_tables:
             return _join_failure_context(
                 context,
                 blocked_node="where",

@@ -99,7 +99,7 @@ def _detect_runtime_filters(question: str, candidate_tables: dict[str, Any]) -> 
                     continue
                 if requested_limit is not None and normalized_value == str(requested_limit):
                     continue
-                if normalized_value not in normalized_question and not value_terms <= question_terms:
+                if not value_terms <= question_terms:
                     continue
 
                 signature = (table_name, column_name, raw_value)

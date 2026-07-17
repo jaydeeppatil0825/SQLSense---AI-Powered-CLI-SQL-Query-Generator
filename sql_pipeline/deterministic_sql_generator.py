@@ -670,6 +670,10 @@ def _apply_clause_plan_contract(
         for entry in (clause_plan.get("decision_path") or [])
         if isinstance(entry, dict)
     ] or _decision_path_from_plan(plan, clause_shape)
+    if plan.status == "ready" and any(entry.get("status") == "blocked" for entry in decision_path):
+        resolved_path = _decision_path_from_plan(plan, clause_shape)
+        if not any(entry.get("status") == "blocked" for entry in resolved_path):
+            decision_path = resolved_path
     declared_requires = clause_plan.get("requires") if isinstance(clause_plan.get("requires"), dict) else {}
     declared_order_by = (
         clause_plan.get("selected_order_by")
@@ -1286,7 +1290,7 @@ def _resolve_join_filter_clauses(
     ])
     if not selected_filters:
         return [], [], [], ""
-    if structured_filters and len(selected_filters) != len(structured_filters):
+    if structured_filters and len(selected_filters) < len(structured_filters):
         return [], [], [], "filter_evidence_incomplete"
     clauses: list[str] = []
     conjunctions: list[str] = []
@@ -1862,7 +1866,7 @@ def _resolve_filter_clauses(
     ])
     if not selected_filters:
         return [], [], [], "selected_filter_missing"
-    if structured_filters and len(selected_filters) != len(structured_filters):
+    if structured_filters and len(selected_filters) < len(structured_filters):
         return [], [], [], "filter_evidence_incomplete"
 
     schema_columns = {
@@ -1915,7 +1919,7 @@ def _dedupe_filters(filters: list[dict[str, Any]]) -> list[dict[str, Any]]:
             str(entry.get("table") or ""),
             str(entry.get("column") or entry.get("column_name") or ""),
             str(entry.get("operator") or "").lower(),
-            str(entry.get("value") or entry.get("values") or ""),
+            str(entry.get("value") or entry.get("values") or "").lower(),
         )
         if key in seen:
             continue
