@@ -10,9 +10,12 @@ import type {
 import type { ConnectionProfile, HistoryEntry } from "@/stores/app-store";
 
 const USE_MOCK = (import.meta.env.VITE_USE_MOCK_API ?? "false") === "true";
-const API_ORIGIN = String(import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000")
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL ?? "")
+  .trim()
   .replace(/\/api\/v1\/?$/, "")
   .replace(/\/$/, "");
+const BACKEND_UNREACHABLE_MESSAGE =
+  "Cannot reach SQLSense backend. Make sure backend is running and VITE_API_BASE_URL or Vite proxy is configured.";
 
 type GatewayAction =
   | "session.status"
@@ -60,14 +63,32 @@ class GatewayError extends Error {
   }
 }
 
+function apiUrl(path: string) {
+  return `${API_BASE}${path}`;
+}
+
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(url, init);
+  } catch {
+    throw new GatewayError("server_unreachable", BACKEND_UNREACHABLE_MESSAGE);
+  }
+
+  try {
+    return (await res.json()) as T;
+  } catch {
+    throw new GatewayError("server_unreachable", BACKEND_UNREACHABLE_MESSAGE);
+  }
+}
+
 async function gatewayEnvelope<T>(action: GatewayAction, payload: Record<string, unknown> = {}) {
-  const res = await fetch(`${API_ORIGIN}/api/v1/gateway`, {
+  return fetchJson<GatewayEnvelope<T>>(apiUrl("/api/v1/gateway"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     credentials: "include",
     body: JSON.stringify({ action, payload }),
   });
-  return (await res.json()) as GatewayEnvelope<T>;
 }
 
 async function gateway<T>(action: GatewayAction, payload: Record<string, unknown> = {}) {
@@ -234,8 +255,9 @@ function mapHistoryEntry(raw: Record<string, unknown>): HistoryEntry {
 
 export const api = {
   async health() {
-    const res = await fetch(`${API_ORIGIN}/health`, { credentials: "include" });
-    return (await res.json()) as { ok: boolean; service?: string };
+    return fetchJson<{ ok: boolean; service?: string }>(apiUrl("/health"), {
+      credentials: "include",
+    });
   },
 
   gateway,
