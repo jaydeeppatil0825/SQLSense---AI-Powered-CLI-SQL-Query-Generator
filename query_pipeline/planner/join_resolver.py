@@ -611,6 +611,7 @@ def _apply_joined_aggregate_contract(
         aggregate_function = "sum"
     if aggregate_function not in {"count", "sum", "avg", "min", "max"}:
         return context
+    dimension_owner_context = metric_lookup_phrase if aggregate_function == "count" else None
 
     retrieved = context.get("retrieved_context") if isinstance(context.get("retrieved_context"), dict) else {}
     retrieved_tables = [
@@ -637,6 +638,7 @@ def _apply_joined_aggregate_contract(
         dimension_phrase,
         dimension_candidates,
         role="dimension",
+        owner_context=dimension_owner_context,
     )
     dimension_table_hint = ""
     if dimension_hint_result.get("status") == "resolved":
@@ -658,6 +660,7 @@ def _apply_joined_aggregate_contract(
                     dimension_phrase,
                     dimension_candidates,
                     role="dimension",
+                    owner_context=dimension_owner_context,
                 )
                 dimension_table_hint = hinted_table
     metric: dict[str, Any] | None = None
@@ -832,6 +835,7 @@ def _apply_joined_aggregate_contract(
         dimension_phrase,
         dimension_candidates,
         role="dimension",
+        owner_context=dimension_owner_context,
     )
     if dimension_evidence_result.get("status") == "resolved":
         resolved_dimensions = [dict(dimension_evidence_result.get("selected", {}).get("candidate") or {})]

@@ -512,6 +512,51 @@ def _infer_metric_from_glossary_matches(
     return ranked_semantics[0][1] if ranked_semantics else None
 
 
+_DIMENSION_DISPLAY_TOKENS = {
+    "name",
+    "title",
+    "label",
+    "category",
+    "type",
+    "status",
+    "segment",
+    "city",
+    "method",
+    "region",
+    "group",
+}
+
+_EXPLICIT_IDENTIFIER_TOKENS = {"id", "identifier", "code", "number", "key"}
+
+
+def _owner_context_tokens(owner_context: str | list[str] | tuple[str, ...] | set[str] | None) -> set[str]:
+    if owner_context is None:
+        return set()
+    values = owner_context if isinstance(owner_context, (list, tuple, set)) else [owner_context]
+    tokens: set[str] = set()
+    for value in values:
+        tokens.update(_field_tokens(str(value or "")))
+    return tokens
+
+
+def _selected_path_tables(selected_join_path: dict[str, Any] | None) -> set[str]:
+    if not isinstance(selected_join_path, dict):
+        return set()
+    if selected_join_path.get("path_source") != "relationship_graph":
+        return set()
+    tables = {
+        str(selected_join_path.get("base_table") or "").strip(),
+        *[str(table).strip() for table in (selected_join_path.get("joined_tables") or [])],
+    }
+    for edge in selected_join_path.get("edges") or []:
+        if not isinstance(edge, dict):
+            continue
+        tables.add(str(edge.get("from_table") or "").strip())
+        tables.add(str(edge.get("to_table") or "").strip())
+    tables.discard("")
+    return tables
+
+
 @dataclass
 class RoleCandidateScore:
     table: str
@@ -604,17 +649,108 @@ def _candidate_is_dimension(entry: dict[str, Any], phrase: str) -> bool:
     )
 
 
+def _dimension_identifier_explicitly_requested(phrase_tokens: set[str]) -> bool:
+    return bool(phrase_tokens & _EXPLICIT_IDENTIFIER_TOKENS)
+
+
+def _dimension_display_tokens(column_name: str) -> set[str]:
+    return _field_tokens(column_name) & _DIMENSION_DISPLAY_TOKENS
+
+
+def _dimension_candidate_is_join_key(entry: dict[str, Any], column_tokens: set[str]) -> bool:
+    semantic_type = _candidate_semantic_type(entry)
+    planner_roles = entry.get("planner_roles") if isinstance(entry.get("planner_roles"), dict) else {}
+    column_name = str(entry.get("column") or "").strip().lower()
+    return bool(
+        semantic_type == "id"
+        or entry.get("primary_key")
+        or entry.get("is_primary_key")
+        or entry.get("foreign_key")
+        or entry.get("is_foreign_key")
+        or planner_roles.get("join_candidate")
+        or column_name.endswith("_id")
+        or column_tokens == {"id"}
+        or "id" in column_tokens
+    )
+
+
+def _apply_dimension_display_preferences(
+    *,
+    phrase_tokens: set[str],
+    column_name: str,
+    column_tokens: set[str],
+    entry: dict[str, Any],
+    score: float,
+    reasons: list[str],
+) -> tuple[float, list[str]]:
+    penalties: list[str] = []
+    explicit_identifier = _dimension_identifier_explicitly_requested(phrase_tokens)
+    display_tokens = _dimension_display_tokens(column_name)
+    if display_tokens and not explicit_identifier:
+        score += 0.08
+        reasons.append(f"display-friendly dimension column matched: {', '.join(sorted(display_tokens))}")
+
+    if _dimension_candidate_is_join_key(entry, column_tokens) and not explicit_identifier:
+        score = max(0.0, score - 0.25)
+        penalties.append("dimension ID/join-key penalty")
+
+    return score, penalties
+
+
+def _apply_owner_preferences(
+    *,
+    phrase_tokens: set[str],
+    table_tokens: set[str],
+    column_tokens: set[str],
+    owner_tokens: set[str],
+    score: float,
+    reasons: list[str],
+) -> float:
+    if owner_tokens and table_tokens and (table_tokens <= owner_tokens or owner_tokens <= table_tokens):
+        score += 0.14
+        reasons.append("owner context matched candidate table")
+        return score
+    if table_tokens and table_tokens <= phrase_tokens and phrase_tokens != column_tokens:
+        score += 0.08
+        reasons.append("owner-qualified phrase matched candidate table")
+    return score
+
+
+def _apply_selected_path_preferences(
+    *,
+    role: str,
+    table_name: str,
+    base_table: str,
+    path_tables: set[str],
+    score: float,
+    reasons: list[str],
+) -> float:
+    if not table_name or table_name not in path_tables:
+        return score
+    score += 0.06
+    reasons.append("selected join path contains candidate table")
+    if role == "metric" and base_table and table_name == base_table:
+        score += 0.04
+        reasons.append("metric candidate agrees with selected join path base table")
+    return score
+
+
 def score_role_candidate(
     phrase: str,
     entry: dict[str, Any],
     *,
     role: str = "generic",
+    owner_context: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    selected_join_path: dict[str, Any] | None = None,
 ) -> RoleCandidateScore | None:
     phrase_tokens = _field_tokens(phrase)
     table_name = str(entry.get("table") or "").strip()
     column_name = str(entry.get("column") or "").strip()
     column_tokens = _field_tokens(column_name)
     table_tokens = {_singularize_token(token) for token in _tokenize(table_name)}
+    owner_tokens = _owner_context_tokens(owner_context)
+    path_tables = _selected_path_tables(selected_join_path)
+    path_base_table = str((selected_join_path or {}).get("base_table") or "").strip()
     qualified_tokens = table_tokens | column_tokens
     if not phrase_tokens or not column_tokens:
         return None
@@ -673,18 +809,46 @@ def score_role_candidate(
         score = round(max(lexical_score, _planner()._SCORING_TIERS[tier]), 4)
         reasons.append(f"{tier.replace('_', ' ')} supported by candidate evidence")
 
+    score = _apply_owner_preferences(
+        phrase_tokens=phrase_tokens,
+        table_tokens=table_tokens,
+        column_tokens=column_tokens,
+        owner_tokens=owner_tokens,
+        score=score,
+        reasons=reasons,
+    )
+    score = _apply_selected_path_preferences(
+        role=role,
+        table_name=table_name,
+        base_table=path_base_table,
+        path_tables=path_tables,
+        score=score,
+        reasons=reasons,
+    )
+
+    penalties: list[str] = []
+    if role == "dimension":
+        score, penalties = _apply_dimension_display_preferences(
+            phrase_tokens=phrase_tokens,
+            column_name=column_name,
+            column_tokens=column_tokens,
+            entry=entry,
+            score=score,
+            reasons=reasons,
+        )
+
     evidence_score = _safe_float(entry.get("score") or entry.get("confidence"), 0.0)
     return RoleCandidateScore(
         table=table_name,
         column=column_name,
         role=role,
-        score=round(min(score, 1.0), 4),
+        score=round(score, 4),
         score_reasons=reasons,
-        penalties=[],
+        penalties=penalties,
         evidence_tier=tier,
         source=str(entry.get("source") or ""),
         candidate_score=round(evidence_score, 4),
-        ambiguity_group_key=f"{role}:{tier}:{round(min(score, 1.0), 4)}",
+        ambiguity_group_key=f"{role}:{tier}:{round(score, 4)}",
         candidate=dict(entry),
     )
 
@@ -694,8 +858,16 @@ def _role_candidate_scoring_entry(
     entry: dict[str, Any],
     *,
     role: str = "generic",
+    owner_context: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    selected_join_path: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    scored = score_role_candidate(phrase, entry, role=role)
+    scored = score_role_candidate(
+        phrase,
+        entry,
+        role=role,
+        owner_context=owner_context,
+        selected_join_path=selected_join_path,
+    )
     return scored.as_ranked_entry() if scored else None
 
 
@@ -714,6 +886,8 @@ def rank_role_candidates(
     *,
     role: str = "generic",
     allowed_tables: set[str] | None = None,
+    owner_context: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    selected_join_path: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ranked: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -726,7 +900,13 @@ def rank_role_candidates(
         if allowed_tables is not None and table_name not in allowed_tables:
             continue
         seen.add(signature)
-        scored = score_role_candidate(phrase, candidate, role=role)
+        scored = score_role_candidate(
+            phrase,
+            candidate,
+            role=role,
+            owner_context=owner_context,
+            selected_join_path=selected_join_path,
+        )
         if scored:
             ranked.append(scored.as_ranked_entry())
 
@@ -736,20 +916,26 @@ def rank_role_candidates(
 
     phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
     generic_single_token = len(phrase_tokens) == 1 and next(iter(phrase_tokens), "") in _planner()._GENERIC_ROLE_TERMS
-    if generic_single_token and len(ranked) > 1:
-        return {
-            "status": "ambiguous",
-            "selected": None,
-            "ranked": ranked,
-            "tie_reason": "generic single-token phrase matched multiple safe candidates",
-        }
-
     top = ranked[0]
     ties = [
         item for item in ranked
         if item.get("tier") == top.get("tier")
         and abs(_safe_float(item.get("score")) - _safe_float(top.get("score"))) < 0.0001
     ]
+    if generic_single_token and len(ranked) > 1:
+        path_reasons = list(top.get("score_reasons") or top.get("reasons") or [])
+        selected_path_winner = (
+            selected_join_path
+            and len(ties) == 1
+            and any("selected join path" in reason for reason in path_reasons)
+        )
+        if not selected_path_winner:
+            return {
+                "status": "ambiguous",
+                "selected": None,
+                "ranked": ranked,
+                "tie_reason": "generic single-token phrase matched multiple safe candidates",
+            }
     if len(ties) > 1:
         return {
             "status": "ambiguous",
@@ -766,12 +952,16 @@ def _rank_role_candidates(
     *,
     role: str = "generic",
     allowed_tables: set[str] | None = None,
+    owner_context: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    selected_join_path: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return rank_role_candidates(
         phrase,
         candidates,
         role=role,
         allowed_tables=allowed_tables,
+        owner_context=owner_context,
+        selected_join_path=selected_join_path,
     )
 
 
@@ -811,12 +1001,16 @@ def _resolve_role_candidate(
     *,
     allowed_tables: set[str] | None = None,
     role: str = "generic",
+    owner_context: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    selected_join_path: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     result = rank_role_candidates(
         phrase,
         candidates,
         role=role,
         allowed_tables=allowed_tables,
+        owner_context=owner_context,
+        selected_join_path=selected_join_path,
     )
     if result.get("status") != "resolved":
         return [], str(result.get("status") or "missing")

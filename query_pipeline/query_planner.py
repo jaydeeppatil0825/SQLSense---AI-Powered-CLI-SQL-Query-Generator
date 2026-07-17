@@ -1849,6 +1849,7 @@ def _normalize_planner_output(
             field_phrase,
             filter_candidates,
             allowed_tables=allowed_filter_tables,
+            owner_context=preferred_filter_table,
         )
         if filter_status != "resolved":
             all_filters_resolved = False
