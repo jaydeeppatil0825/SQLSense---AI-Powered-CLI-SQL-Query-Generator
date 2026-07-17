@@ -18,6 +18,7 @@ from query_pipeline.planner.filter_resolver import (
     _source_scope_as_filters,
 )
 from query_pipeline.planner.role_resolver import (
+    build_metric_decision_contract,
     _candidate_is_numeric_metric,
     _exact_table_column_candidates,
     _graph_selected_evidence_entry,
@@ -668,6 +669,10 @@ def _apply_joined_aggregate_contract(
     modifier_filter_phrase: str | None = None
     if aggregate_function != "count":
         metric_evidence_result = _rank_role_candidates(metric_lookup_phrase, metric_candidates, role="metric")
+        if metric_evidence_result.get("status") == "ambiguous" and metric_phrase != metric_lookup_phrase:
+            original_phrase_result = _rank_role_candidates(metric_phrase, metric_candidates, role="metric")
+            if original_phrase_result.get("status") == "resolved":
+                metric_evidence_result = original_phrase_result
         context_metric = context.get("selected_metric") if isinstance(context.get("selected_metric"), dict) else None
         if metric_evidence_result.get("status") == "ambiguous" and context_metric:
             metric_evidence_result = {
@@ -769,27 +774,27 @@ def _apply_joined_aggregate_contract(
             sales_metric = None
             sales_metric_status = "missing"
             metric_tokens_for_sales = _tokenize(metric_lookup_phrase)
-            if (
-                metric_tokens_for_sales
-                and _singularize_token(metric_tokens_for_sales[0]) in _STATUS_VALUE_TOKENS
-                and dimension_table_hint
-            ):
-                sales_phrase = " ".join(metric_tokens_for_sales[1:]).strip()
+            if metric_tokens_for_sales and dimension_table_hint:
+                sales_phrase = (
+                    " ".join(metric_tokens_for_sales[1:]).strip()
+                    if _singularize_token(metric_tokens_for_sales[0]) in _STATUS_VALUE_TOKENS
+                    else metric_lookup_phrase
+                )
                 sales_metric, sales_metric_status = _resolve_related_sales_amount_metric(
                     sales_phrase,
                     dimension_table=dimension_table_hint,
                     knowledge_base=knowledge_base,
                 )
             if sales_metric_status == "resolved" and sales_metric is not None:
-                metric = sales_metric
+                metric = {**dict(sales_metric), "source": "kb_schema_profile"}
                 metric_evidence_result = {
                     "status": "resolved",
                     "selected": {
-                        "candidate": dict(sales_metric),
-                        "tier": "direct_graph_compatible",
-                        "score": _SCORING_TIERS["direct_graph_compatible"],
-                        "candidate_score": _safe_float(sales_metric.get("score")),
-                        "reasons": ["generic sales wording resolved to one graph-related amount-like measure"],
+                        "candidate": dict(metric),
+                        "tier": "numeric_metric_eligible",
+                        "score": _SCORING_TIERS["numeric_metric_eligible"],
+                        "candidate_score": _safe_float(metric.get("score")),
+                        "reasons": ["fallback-only schema/profile metric evidence"],
                     },
                     "ranked": [],
                     "tie_reason": "",
@@ -1220,6 +1225,29 @@ def _apply_joined_aggregate_contract(
         path_edges = [dict(graph_edges[0])]
 
     path_tables = {base_table, *joined_tables}
+    metric_decision = build_metric_decision_contract(
+        metric_phrase=metric_lookup_phrase,
+        metric_candidates=metric_candidates,
+        aggregate_function=aggregate_function,
+        selected_metric=metric,
+        selected_join_path={
+            "base_table": base_table,
+            "joined_tables": joined_tables,
+            "edges": path_edges,
+            "path_source": "relationship_graph",
+        },
+        count_base_table=base_table if aggregate_function == "count" else "",
+    )
+    if metric_decision.get("status") != "resolved":
+        return _joined_aggregate_failure_context(
+            context,
+            blocked_node="metric",
+            reason=str(metric_decision.get("reason_code") or "joined aggregate metric contract is invalid"),
+            resolved_nodes={
+                "unsafe_check", "table_scope", "query_shape", "aggregate", "dimension",
+                "join_need", "relationship_graph_lookup", "safe_join_path",
+            },
+        )
     filter_tables = {str(entry.get("table") or "") for entry in selected_filters}
     if not filter_tables <= path_tables:
         return _joined_aggregate_failure_context(
@@ -1470,6 +1498,7 @@ def _apply_joined_aggregate_contract(
             "selected_filters": selected_filters,
             "selected_having": selected_having,
             "selected_order_by": selected_order_by,
+            "metric_decision": metric_decision,
             "selected_join_path": selected_join_path,
             "selected_relationship_path": selected_join_path,
             "selected_evidence": selected_evidence,
@@ -1517,6 +1546,7 @@ def _apply_joined_aggregate_contract(
         "filters": selected_filters,
         "having": selected_having,
         "selected_order_by": dict(selected_order_by or {}),
+        "metric_decision": metric_decision,
         "selected_join_path": selected_join_path,
         "phase8a_grain_analysis": grain_analysis,
         "selected_evidence": selected_evidence,

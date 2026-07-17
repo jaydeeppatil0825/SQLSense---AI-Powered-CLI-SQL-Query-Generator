@@ -1155,11 +1155,26 @@ def _build_query_context_from_retrieved_context(
         debug_trace_details=debug_trace_details,
     )
     normalized_result = _apply_implicit_sample_filter_contract(normalized_result, knowledge_base)
+    joined_aggregate_recovery_needed = bool(
+        normalized_result.get("query_shape") in {"grouped_aggregate", "ranking_query"}
+        and (
+            normalized_result.get("missing_evidence")
+            and any(
+                item in {"missing_metric", "missing_join_path"}
+                for item in (normalized_result.get("missing_evidence") or [])
+            )
+        )
+        and (
+            (intent or {}).get("target_entity_phrase")
+            or (intent or {}).get("requested_metrics")
+        )
+    )
     skip_joined_aggregate_contract = bool(
         normalized_result.get("query_shape") in {"grouped_aggregate", "ranking_query"}
         and len(normalized_result.get("selected_table_names") or []) == 1
         and not normalized_result.get("selected_relationship_path")
         and not normalized_result.get("required_joins")
+        and not joined_aggregate_recovery_needed
     )
     if not skip_joined_aggregate_contract:
         joined_aggregate_result = _apply_joined_aggregate_contract(

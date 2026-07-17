@@ -995,6 +995,135 @@ def build_role_candidate_debug(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_metric_decision_contract(
+    *,
+    metric_phrase: str,
+    metric_candidates: list[dict[str, Any]],
+    aggregate_function: str,
+    selected_metric: dict[str, Any] | None = None,
+    selected_join_path: dict[str, Any] | None = None,
+    owner_context: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    allowed_tables: set[str] | None = None,
+    count_base_table: str = "",
+) -> dict[str, Any]:
+    aggregate = str(aggregate_function or "").strip().lower()
+    path_tables = _selected_path_tables(selected_join_path)
+
+    def _path_compatible(table_name: str) -> bool:
+        return not path_tables or table_name in path_tables
+
+    if aggregate not in {"count", "sum", "avg", "min", "max"}:
+        return {
+            "status": "unsupported",
+            "metric_phrase": metric_phrase,
+            "owner_entity": "",
+            "table": "",
+            "column": "",
+            "aggregate_function": aggregate,
+            "metric_mode": "numeric_metric",
+            "numeric_eligible": False,
+            "selected_path_compatible": False,
+            "evidence_tier": "",
+            "score": 0.0,
+            "score_reasons": [],
+            "penalties": [],
+            "ambiguity_group_key": "metric:unsupported_aggregate",
+            "rejected_candidates": [],
+            "reason_code": "unsupported_aggregate_function",
+        }
+
+    if aggregate == "count":
+        base_table = str(count_base_table or "").strip()
+        path_ok = _path_compatible(base_table) if base_table else True
+        return {
+            "status": "resolved" if path_ok else "unsupported",
+            "metric_phrase": metric_phrase,
+            "owner_entity": base_table,
+            "table": base_table,
+            "column": "",
+            "aggregate_function": aggregate,
+            "metric_mode": "entity_count" if base_table else "row_count",
+            "numeric_eligible": True,
+            "selected_path_compatible": path_ok,
+            "evidence_tier": "count_entity" if base_table else "count_rows",
+            "score": 1.0,
+            "score_reasons": ["COUNT does not require a numeric metric column"],
+            "penalties": [],
+            "ambiguity_group_key": "",
+            "rejected_candidates": [],
+            "reason_code": "" if path_ok else "count_base_table_outside_selected_path",
+        }
+
+    result = (
+        {"status": "resolved", "selected": {"candidate": dict(selected_metric), "tier": "preserved_selected_metric", "score": 1.0, "reasons": ["metric preserved from upstream planner decision"]}, "ranked": [], "tie_reason": ""}
+        if isinstance(selected_metric, dict) and selected_metric
+        else rank_role_candidates(
+            metric_phrase,
+            metric_candidates,
+            role="metric",
+            allowed_tables=allowed_tables,
+            owner_context=owner_context,
+            selected_join_path=selected_join_path,
+        )
+    )
+    if result.get("status") != "resolved":
+        return {
+            "status": str(result.get("status") or "missing"),
+            "metric_phrase": metric_phrase,
+            "owner_entity": "",
+            "table": "",
+            "column": "",
+            "aggregate_function": aggregate,
+            "metric_mode": "numeric_metric",
+            "numeric_eligible": False,
+            "selected_path_compatible": False,
+            "evidence_tier": "",
+            "score": 0.0,
+            "score_reasons": [],
+            "penalties": [],
+            "ambiguity_group_key": f"metric:{result.get('status') or 'missing'}",
+            "rejected_candidates": list(result.get("ranked") or []),
+            "reason_code": f"metric_evidence_{result.get('status') or 'missing'}",
+        }
+
+    selected = result.get("selected") or {}
+    candidate = dict(selected.get("candidate") or {})
+    table_name = str(candidate.get("table") or "").strip()
+    column_name = str(candidate.get("column") or "").strip()
+    numeric_ok = _candidate_is_numeric_metric(candidate)
+    table_allowed = allowed_tables is None or table_name in allowed_tables
+    path_ok = _path_compatible(table_name)
+    reason = ""
+    if not numeric_ok:
+        reason = "metric_not_numeric_eligible"
+    elif not table_allowed:
+        reason = "metric_table_not_allowed"
+    elif not path_ok:
+        reason = "metric_table_outside_selected_path"
+
+    return {
+        "status": "resolved" if not reason else "unsupported",
+        "metric_phrase": metric_phrase,
+        "owner_entity": table_name,
+        "table": table_name,
+        "column": column_name,
+        "aggregate_function": aggregate,
+        "metric_mode": "numeric_metric",
+        "numeric_eligible": numeric_ok,
+        "selected_path_compatible": path_ok,
+        "evidence_tier": str(selected.get("tier") or selected.get("evidence_tier") or ""),
+        "score": _safe_float(selected.get("score"), 0.0),
+        "score_reasons": list(selected.get("reasons") or selected.get("score_reasons") or []),
+        "penalties": list(selected.get("penalties") or []),
+        "ambiguity_group_key": "" if not reason else f"metric:{table_name}.{column_name}",
+        "rejected_candidates": [
+            item for item in (result.get("ranked") or [])
+            if (item.get("candidate") or {}) != candidate
+        ],
+        "reason_code": reason,
+    }
+
+
 def _resolve_role_candidate(
     phrase: str,
     candidates: list[dict[str, Any]],
