@@ -496,6 +496,19 @@ def test_shape_decision_marks_with_aggregate_condition_as_grouped_having():
     assert intent["structured_having"][0]["metric_phrase"] == "received amount"
 
 
+def test_shape_decision_keeps_total_field_comparison_as_row_filter():
+    intent = build_intent("show invoices with total amount above 20000")
+
+    assert intent["shape_decision"]["selected_shape"] == "filtered_lookup"
+    assert intent["intent_type"] == "filter"
+    assert intent["aggregate_function"] is None
+    assert intent["requested_metrics"] == []
+    assert intent["requested_dimensions"] == []
+    assert intent["structured_having"] == []
+    assert intent["structured_filters"][0]["field_phrase"] == "total amount"
+    assert intent["structured_filters"][0]["operator"] == "gt"
+
+
 def test_shape_decision_keeps_grouped_count_count_only():
     intent = build_intent("show count service invoices by invoice status")
 

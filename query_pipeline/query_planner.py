@@ -2070,7 +2070,9 @@ def _normalize_planner_output(
         blocking_ambiguities.add("table_selection")
     is_filtered_aggregate = query_shape == "filtered_query" and bool(
         (intent.get("aggregate_function") if isinstance(intent, dict) else None)
-        or _aggregate_function_hint(question)
+        or (
+            bool(intent.get("needs_aggregation")) if isinstance(intent, dict) else False
+        )
     )
     if (
         (query_shape in {"single_table_aggregate", "grouped_aggregate", "ranking_query"} or is_filtered_aggregate)
@@ -2088,15 +2090,23 @@ def _normalize_planner_output(
         blocking_ambiguities.add("dimension_selection")
     if "filter_selection" in ambiguities and query_shape in {"filtered_query", "ranking_query"}:
         blocking_ambiguities.add("filter_selection")
-    selected_metric = None if "metric_selection" in blocking_ambiguities else (
-        dict(effective_measure_candidates[0]) if effective_measure_candidates else None
+    metric_selection_required = (
+        query_shape in {"single_table_aggregate", "grouped_aggregate", "ranking_query"}
+        or is_filtered_aggregate
     )
-    selected_dimensions = [] if "dimension_selection" in blocking_ambiguities else [
-        dict(entry) for entry in dimension_candidates
-    ]
     grouped_dimension_required = (
         query_shape == "grouped_aggregate"
         or (query_shape == "ranking_query" and ranking_mode == "grouped_aggregate")
+    )
+    selected_metric = (
+        None
+        if "metric_selection" in blocking_ambiguities or not metric_selection_required
+        else dict(effective_measure_candidates[0]) if effective_measure_candidates else None
+    )
+    selected_dimensions = (
+        []
+        if "dimension_selection" in blocking_ambiguities or not grouped_dimension_required
+        else [dict(entry) for entry in dimension_candidates]
     )
     if grouped_dimension_required and len(selected_dimensions) != 1:
         blocking_ambiguities.add("dimension_selection")

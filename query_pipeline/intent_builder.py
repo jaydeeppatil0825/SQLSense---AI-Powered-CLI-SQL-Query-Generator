@@ -1656,6 +1656,8 @@ def _where_clause_is_having(question: str, match: re.Match[str], candidate: str)
 def _with_phrase_is_row_filter(phrase: str) -> bool:
     if not phrase:
         return False
+    if _with_phrase_is_total_field_filter(phrase):
+        return True
     if _parse_having_condition(phrase).get("aggregate_function"):
         return False
     if re.search(
@@ -1665,6 +1667,17 @@ def _with_phrase_is_row_filter(phrase: str) -> bool:
     ):
         return True
     return bool(re.match(r"^\s*status\s+\S+", phrase, re.IGNORECASE))
+
+
+def _with_phrase_is_total_field_filter(phrase: str) -> bool:
+    return bool(
+        re.match(
+            r"^\s*total\s+(?:amount|value|price|cost|quantity|qty|limit|balance)\s+"
+            r"(?:is\s+)?(?:greater\s+than|more\s+than|above|over|less\s+than|below|under|at\s+least|at\s+most|equals?|=|>|<|>=|<=)\s+",
+            phrase,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _split_filter_phrases(filter_text: str) -> list[tuple[str, str | None]]:

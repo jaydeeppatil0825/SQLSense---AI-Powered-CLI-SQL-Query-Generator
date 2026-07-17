@@ -492,6 +492,40 @@ def test_active_grouped_query_fails_closed_when_dimension_evidence_is_missing():
     assert context["selected_dimensions"] == []
 
 
+def test_active_planner_does_not_promote_total_field_filter_to_grouped_aggregate():
+    question = "show invoices with total amount above 20000"
+    intent = build_intent(question)
+    filter_column = {
+        "table": "invoices",
+        "column": "total_amount",
+        "semantic_type": "numeric_candidate",
+        "core_semantic_type": "numeric_candidate",
+        "data_type": "DECIMAL(10,2)",
+        "is_measure": True,
+        "is_dimension": False,
+        "is_date": False,
+        "score": 0.98,
+        "matched_terms": ["total amount"],
+        "source": "vector",
+    }
+    evidence = _normalized_runtime_evidence(
+        tables=[{"table": "invoices", "score": 0.96, "matched_terms": ["invoices"], "source": "vector"}],
+        columns=[filter_column],
+        filters=[filter_column],
+    )
+
+    context = build_query_context(question, {}, intent=intent, retrieved_context=evidence)
+
+    assert intent["shape_decision"]["selected_shape"] == "filtered_lookup"
+    assert context["query_shape"] == "filtered_query"
+    assert context["aggregate_function"] in {"", None}
+    assert context["selected_metric"] is None
+    assert context["selected_dimensions"] == []
+    assert context["clause_plan"]["clause_shape"] == "where_only"
+    assert context["selected_filters"][0]["table"] == "invoices"
+    assert context["selected_filters"][0]["column"] == "total_amount"
+
+
 def test_active_planner_blocks_unsafe_intent_and_fails_closed_on_unsupported_intent():
     evidence = _normalized_runtime_evidence(
         tables=[{"table": "bills", "score": 0.96, "matched_terms": ["bills"], "source": "vector"}],
