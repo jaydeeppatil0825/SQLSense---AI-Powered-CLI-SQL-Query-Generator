@@ -1,0 +1,210 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+@custom-variant dark (&:is(.dark, .dark *));
+
+/*
+ * SQLSense design system — editorial violet, dark-first.
+ * Tokens mirror the pcsoft mobile handoff and are mapped to shadcn variables.
+ */
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ring-offset-background: var(--background);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-surface-2: var(--surface-2);
+  --color-inset: var(--inset);
+  --color-divider: var(--divider);
+  --color-text-2: var(--text-2);
+  --color-text-3: var(--text-3);
+  --color-positive: var(--positive);
+  --color-positive-soft: var(--positive-soft);
+  --color-negative: var(--negative);
+  --color-negative-soft: var(--negative-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-border: var(--accent-border);
+  --font-display: 'Space Grotesk', ui-sans-serif, sans-serif;
+  --font-sans: 'Inter', -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+:root {
+  --radius: 0.875rem;
+  /* light — grey-violet canvas */
+  --bg: #ECEAF2;
+  --surface: #FFFFFF;
+  --surface-2: #F3F1F8;
+  --inset: #F3F1F8;
+  --border-c: #DCD8E8;
+  --divider: #E8E5F0;
+  --text-c: #141220;
+  --text-2: #4E4963;
+  --text-3: #7B7691;
+  --positive: #15803D;
+  --positive-soft: #E7F4EA;
+  --negative: #DC2626;
+  --negative-soft: #FCEAEA;
+  --warning: #B45309;
+  --warning-soft: #FDF3E0;
+  --accent-c: #6D28D9;
+  --on-accent: #FFFFFF;
+  --accent-soft: #EFE9FC;
+  --accent-border: #C7B3F2;
+
+  /* shadcn mappings */
+  --background: var(--bg);
+  --foreground: var(--text-c);
+  --card: var(--surface);
+  --card-foreground: var(--text-c);
+  --popover: var(--surface);
+  --popover-foreground: var(--text-c);
+  --primary: var(--accent-c);
+  --primary-foreground: var(--on-accent);
+  --secondary: var(--surface-2);
+  --secondary-foreground: var(--text-c);
+  --muted: var(--surface-2);
+  --muted-foreground: var(--text-2);
+  --accent: var(--surface-2);
+  --accent-foreground: var(--text-c);
+  --destructive: var(--negative);
+  --destructive-foreground: #FFFFFF;
+  --border: var(--border-c);
+  --input: var(--border-c);
+  --ring: var(--accent-c);
+  --chart-1: var(--accent-c);
+  --chart-2: #0D9488;
+  --chart-3: #D97706;
+  --chart-4: #D85A30;
+  --chart-5: #2563EB;
+  --sidebar: var(--surface);
+  --sidebar-foreground: var(--text-c);
+  --sidebar-primary: var(--accent-c);
+  --sidebar-primary-foreground: var(--on-accent);
+  --sidebar-accent: var(--surface-2);
+  --sidebar-accent-foreground: var(--text-c);
+  --sidebar-border: var(--border-c);
+  --sidebar-ring: var(--accent-c);
+}
+
+.dark {
+  --bg: #0E0D13;
+  --surface: #17151F;
+  --surface-2: #1E1B29;
+  --inset: #11101A;
+  --border-c: #2A2738;
+  --divider: #232031;
+  --text-c: #F2F0F7;
+  --text-2: #9B96AD;
+  --text-3: #6B6680;
+  --positive: #4ADE80;
+  --positive-soft: rgba(74, 222, 128, 0.12);
+  --negative: #F87171;
+  --negative-soft: rgba(248, 113, 113, 0.12);
+  --warning: #FCD34D;
+  --warning-soft: rgba(252, 211, 77, 0.12);
+  --accent-c: #BD93F9;
+  --on-accent: #1A1226;
+  --accent-soft: #2A1F45;
+  --accent-border: rgba(124, 58, 237, 0.5);
+
+  --background: var(--bg);
+  --foreground: var(--text-c);
+  --card: var(--surface);
+  --card-foreground: var(--text-c);
+  --popover: var(--surface);
+  --popover-foreground: var(--text-c);
+  --primary: var(--accent-c);
+  --primary-foreground: var(--on-accent);
+  --secondary: var(--surface-2);
+  --secondary-foreground: var(--text-c);
+  --muted: var(--surface-2);
+  --muted-foreground: var(--text-2);
+  --accent: var(--surface-2);
+  --accent-foreground: var(--text-c);
+  --destructive: var(--negative);
+  --destructive-foreground: #1A0A0A;
+  --border: var(--border-c);
+  --input: var(--border-c);
+  --ring: var(--accent-c);
+  --chart-1: var(--accent-c);
+  --chart-2: #5EEAD4;
+  --chart-3: #FCD34D;
+  --chart-4: #F0997B;
+  --chart-5: #85B7EB;
+  --sidebar: var(--surface);
+  --sidebar-foreground: var(--text-c);
+  --sidebar-primary: var(--accent-c);
+  --sidebar-primary-foreground: var(--on-accent);
+  --sidebar-accent: var(--surface-2);
+  --sidebar-accent-foreground: var(--text-c);
+  --sidebar-border: var(--border-c);
+  --sidebar-ring: var(--accent-c);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+  .num, .tabular {
+    font-family: var(--font-display);
+    font-feature-settings: 'tnum' 1;
+  }
+  .display {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+}
+
+@utility mono {
+  font-family: var(--font-mono);
+  font-feature-settings: 'tnum' 1;
+}
