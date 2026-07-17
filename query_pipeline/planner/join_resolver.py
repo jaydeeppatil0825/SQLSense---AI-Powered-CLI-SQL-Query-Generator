@@ -969,6 +969,26 @@ def _apply_joined_aggregate_contract(
         ],
         allow_preferred_owner_date=True,
     )
+    if not selected_filters:
+        filter_decision = context.get("filter_decision") if isinstance(context.get("filter_decision"), dict) else {}
+        selected_filters = [
+            {
+                "table": entry.get("table"),
+                "column": entry.get("column"),
+                "field_phrase": entry.get("column"),
+                "raw_phrase": entry.get("normalized_value"),
+                "operator": entry.get("operator"),
+                "value": entry.get("value", entry.get("normalized_value")),
+                "value_phrase": entry.get("normalized_value"),
+                "values": list(entry.get("values") or [entry.get("value", entry.get("normalized_value"))]),
+                "conjunction": "",
+                "source": entry.get("evidence_tier"),
+            }
+            for entry in filter_decision.get("resolved_where_filters") or []
+            if isinstance(entry, dict)
+            and str(entry.get("table") or "") in allowed_tables
+            and str(entry.get("column") or "")
+        ]
     if filter_reason:
         return _joined_aggregate_failure_context(
             context,

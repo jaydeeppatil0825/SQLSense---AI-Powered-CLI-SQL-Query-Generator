@@ -29,6 +29,7 @@ from query_pipeline.planner.filter_resolver import (
     _source_scope_as_filter,
     _source_scope_as_filters,
     _structured_filter_entries,
+    build_filter_decision_contract,
 )
 from query_pipeline.planner.contract_builder import (
     _ambiguities_for_contract,
@@ -2152,7 +2153,11 @@ def _normalize_planner_output(
     if has_date_interval_clause and final_interval_tables:
         allow_relative_owner_date = bool(
             len(final_interval_tables) == 1
-            and any(entry.get("source") == "source_scope_value_filter" for entry in selected_filters)
+            and any(
+                str(entry.get("table") or "").strip() in final_interval_tables
+                and entry.get("filter_kind") != "date_interval"
+                for entry in selected_filters
+            )
             and any(
                 isinstance(entry, dict)
                 and entry.get("filter_kind") == "date_interval"
@@ -2179,16 +2184,21 @@ def _normalize_planner_output(
     source_filter_primary_table = primary_table if primary_table in selected_table_names else (
         selected_table_names[0] if len(selected_table_names) == 1 else ""
     )
+    source_filter_allowed_tables = {
+        str(name).strip()
+        for name in selected_table_names
+        if str(name).strip()
+    } or ({source_filter_primary_table} if source_filter_primary_table else set())
     if (
         not selected_filters
         and grouped_dimension_required
-        and source_filter_primary_table
+        and source_filter_allowed_tables
         and implicit_filter_phrase
     ):
         implicit_filters, implicit_filter_status = _source_scope_as_filters(
             implicit_filter_phrase,
             schema_for_resolution,
-            {source_filter_primary_table},
+            source_filter_allowed_tables,
         )
         if implicit_filter_status == "resolved" and implicit_filters:
             selected_filters = [dict(entry) for entry in implicit_filters]
@@ -2272,6 +2282,19 @@ def _normalize_planner_output(
             ]
             structured_intent["structured_filters"] = structured_filter_clauses
             intent = structured_intent
+    filter_decision = build_filter_decision_contract(
+        selected_filters=selected_filters,
+        selected_having=[],
+        knowledge_base=full_knowledge_base,
+        selected_tables=selected_tables,
+        selected_join_path=None,
+        join_paths=join_paths,
+    )
+    if filter_decision.get("overall_status") != "resolved":
+        selected_filters = []
+        plan["filters"] = []
+        missing_evidence_flags["missing_filter_column"] = True
+        blocking_ambiguities.add("filter_selection")
     raw_aggregate_function = structured_intent.get("aggregate_function")
     aggregate_function = str(raw_aggregate_function or "").strip().lower()
     planner_intent = str(plan.get("intent") or "").strip().lower()
@@ -2398,6 +2421,32 @@ def _normalize_planner_output(
         selected_tables,
     )
     selected_relationship_path = dict(join_paths[0]) if join_paths else None
+    filter_decision = build_filter_decision_contract(
+        selected_filters=selected_filters,
+        selected_having=selected_having,
+        knowledge_base=full_knowledge_base,
+        selected_tables=selected_tables,
+        selected_join_path=selected_relationship_path,
+        join_paths=join_paths,
+    )
+    if not selected_filters and filter_decision.get("resolved_where_filters"):
+        selected_filters = [
+            {
+                "table": entry.get("table"),
+                "column": entry.get("column"),
+                "field_phrase": entry.get("column"),
+                "raw_phrase": entry.get("normalized_value"),
+                "operator": entry.get("operator"),
+                "value": entry.get("value", entry.get("normalized_value")),
+                "value_phrase": entry.get("normalized_value"),
+                "values": list(entry.get("values") or [entry.get("value", entry.get("normalized_value"))]),
+                "conjunction": "",
+                "source": entry.get("evidence_tier"),
+            }
+            for entry in filter_decision.get("resolved_where_filters") or []
+            if isinstance(entry, dict)
+        ]
+        plan["filters"] = [dict(entry) for entry in selected_filters]
     clause_plan = _build_clause_plan_for_contract(
         query_shape=query_shape,
         route_recommendation=route_recommendation,
@@ -2490,6 +2539,7 @@ def _normalize_planner_output(
         "selected_metric": selected_metric,
         "selected_dimensions": selected_dimensions,
         "selected_filters": selected_filters,
+        "filter_decision": filter_decision,
         "selected_having": selected_having,
         "selected_order_by": selected_order_by,
         "ranking_decision": ranking_decision,

@@ -500,6 +500,149 @@ def _resolve_interval_filters_for_scope(
     return resolved, ""
 
 
+def _filter_path_tables(
+    *,
+    selected_tables: list[dict[str, Any]],
+    selected_join_path: dict[str, Any] | None = None,
+    join_paths: list[dict[str, Any]] | None = None,
+) -> set[str]:
+    tables = {
+        str(entry.get("table") or "").strip()
+        for entry in selected_tables
+        if isinstance(entry, dict) and str(entry.get("table") or "").strip()
+    }
+    paths = []
+    if isinstance(selected_join_path, dict):
+        paths.append(selected_join_path)
+    paths.extend(path for path in (join_paths or []) if isinstance(path, dict))
+    for path in paths:
+        base = str(path.get("base_table") or "").strip()
+        if base:
+            tables.add(base)
+        tables.update(str(table).strip() for table in (path.get("joined_tables") or []) if str(table).strip())
+        for edge in path.get("edges") or []:
+            if not isinstance(edge, dict):
+                continue
+            for key in ("from_table", "to_table"):
+                value = str(edge.get(key) or "").strip()
+                if value:
+                    tables.add(value)
+    return tables
+
+
+def _schema_has_column(knowledge_base: dict[str, Any], table_name: str, column_name: str) -> bool:
+    if table_name not in knowledge_base:
+        return True
+    return any(
+        isinstance(column, dict) and str(column.get("name") or "").strip() == column_name
+        for column in (knowledge_base.get(table_name, {}).get("columns", []) or [])
+    )
+
+
+def _filter_decision(
+    entry: dict[str, Any],
+    *,
+    clause_scope: str,
+    knowledge_base: dict[str, Any],
+    path_tables: set[str],
+) -> dict[str, Any]:
+    table_name = str(entry.get("table") or "").strip()
+    column_name = str(entry.get("column") or entry.get("field") or "").strip()
+    reason = ""
+    if not table_name or not column_name:
+        reason = "filter_column_missing"
+    elif table_name not in path_tables:
+        reason = "filter_table_outside_selected_path"
+    elif not _schema_has_column(knowledge_base, table_name, column_name):
+        reason = "filter_column_not_in_schema"
+    source = str(entry.get("source") or entry.get("value_source") or entry.get("term") or "").strip()
+    score = float(entry.get("score") or entry.get("evidence_score") or 1.0)
+    return {
+        "status": "resolved" if not reason else "unsupported",
+        "clause_scope": clause_scope,
+        "table": table_name,
+        "column": column_name,
+        "operator": str(entry.get("operator") or "").strip(),
+        "value": entry.get("value"),
+        "values": list(entry.get("values") or []),
+        "normalized_value": _normalize(str(entry.get("value_phrase") or entry.get("value") or "")),
+        "value_source": source,
+        "owner_entity": table_name,
+        "evidence_tier": str(entry.get("source") or "selected_filter"),
+        "score": score,
+        "score_reasons": ["selected_filter", "path_compatible"] if not reason else [],
+        "penalties": [],
+        "selected_path_compatible": bool(table_name and table_name in path_tables),
+        "ambiguity_group_key": "" if not reason else f"{clause_scope}:{table_name}.{column_name}",
+        "rejected_candidates": [],
+        "reason_code": reason,
+    }
+
+
+def build_filter_decision_contract(
+    *,
+    selected_filters: list[dict[str, Any]],
+    selected_having: list[dict[str, Any]],
+    knowledge_base: dict[str, Any],
+    selected_tables: list[dict[str, Any]],
+    selected_join_path: dict[str, Any] | None = None,
+    join_paths: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    path_tables = _filter_path_tables(
+        selected_tables=selected_tables,
+        selected_join_path=selected_join_path,
+        join_paths=join_paths,
+    )
+    where_decisions = [
+        _filter_decision(
+            dict(entry),
+            clause_scope="where",
+            knowledge_base=knowledge_base,
+            path_tables=path_tables,
+        )
+        for entry in selected_filters
+        if isinstance(entry, dict)
+    ]
+    having_decisions = [
+        _filter_decision(
+            dict(entry),
+            clause_scope="having",
+            knowledge_base=knowledge_base,
+            path_tables=path_tables,
+        )
+        for entry in selected_having
+        if isinstance(entry, dict)
+    ]
+    unresolved = [
+        dict(entry)
+        for entry in [*where_decisions, *having_decisions]
+        if entry.get("status") != "resolved"
+    ]
+    conjunctions = [
+        str(entry.get("conjunction") or "").strip().lower()
+        for entry in selected_filters
+        if isinstance(entry, dict) and str(entry.get("conjunction") or "").strip()
+    ]
+    if len(set(value for value in conjunctions if value in {"and", "or"})) > 1:
+        unresolved.append(
+            {
+                "status": "unsupported",
+                "clause_scope": "where",
+                "reason_code": "mixed_filter_conjunctions_not_supported",
+                "ambiguity_group_key": "filter_conjunction",
+                "rejected_candidates": [],
+            }
+        )
+    return {
+        "overall_status": "resolved" if not unresolved else "unsupported",
+        "resolved_where_filters": [entry for entry in where_decisions if entry.get("status") == "resolved"],
+        "resolved_having_filters": [entry for entry in having_decisions if entry.get("status") == "resolved"],
+        "rejected_filters": [],
+        "unresolved_filters": unresolved,
+        "conjunction_structure": conjunctions,
+    }
+
+
 def _has_structured_filter_ambiguity(
     filter_candidates: list[dict[str, Any]],
     structured_filters: list[dict[str, Any]],
