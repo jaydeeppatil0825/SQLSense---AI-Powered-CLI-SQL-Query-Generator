@@ -1,10 +1,10 @@
-"""Tests for local Ollama backend calls through the central service."""
-
-from unittest.mock import MagicMock, patch
-
 import pytest
 
-from ai.sql_generator import _call_ollama
+pytestmark = pytest.mark.legacy
+pytest.skip(
+    "legacy runtime-AI sql_generator architecture was removed; deterministic runtime is authoritative",
+    allow_module_level=True,
+)
 
 
 def test_call_ollama_uses_local_url_and_timeout(monkeypatch):

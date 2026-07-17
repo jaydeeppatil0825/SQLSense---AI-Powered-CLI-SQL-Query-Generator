@@ -16,8 +16,6 @@ __pycache__/
 *.pyo
 *.pyd
 
-tests/
-
 .venv
 
 # Test and coverage artifacts
@@ -26,6 +24,7 @@ tests/
 .coverage
 htmlcov/
 .pytest_tmp*
+tests/.pytest_tmp*/
 .pytest_cache/
 
 # Generated semantic artifacts

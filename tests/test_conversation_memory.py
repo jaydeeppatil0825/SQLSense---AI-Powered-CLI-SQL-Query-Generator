@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from conversation.conversation_memory import ConversationMemory
+from query_pipeline.conversation.conversation_memory import ConversationMemory
 
 
 def test_conversation_memory_starts_session():

@@ -6,27 +6,35 @@ Tests for conversation action detection.
 
 import pytest
 
-from conversation.action_detector import detect_conversation_action
+from query_pipeline.conversation.action_detector import detect_conversation_action
 
 
+@pytest.mark.legacy
+@pytest.mark.skip(reason="chart actions were removed from deterministic conversation actions")
 def test_action_detector_detects_chart():
     """Test that action detector detects chart action."""
     action = detect_conversation_action("show chart for this")
     assert action == "chart"
 
 
+@pytest.mark.legacy
+@pytest.mark.skip(reason="chart actions were removed from deterministic conversation actions")
 def test_action_detector_detects_generate_chart():
     """Test that action detector detects generate chart action."""
     action = detect_conversation_action("generate chart")
     assert action == "chart"
 
 
+@pytest.mark.legacy
+@pytest.mark.skip(reason="insight actions were removed from deterministic conversation actions")
 def test_action_detector_detects_insights():
     """Test that action detector detects insights action."""
     action = detect_conversation_action("give insights for this")
     assert action == "insights"
 
 
+@pytest.mark.legacy
+@pytest.mark.skip(reason="explain/insight actions were removed from deterministic conversation actions")
 def test_action_detector_detects_explain():
     """Test that action detector detects explain action."""
     action = detect_conversation_action("explain this result")

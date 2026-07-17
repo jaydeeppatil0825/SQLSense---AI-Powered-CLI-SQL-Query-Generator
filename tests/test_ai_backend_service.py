@@ -10,6 +10,7 @@ def test_backend_defaults_to_local_when_backend_env_is_missing(monkeypatch):
     monkeypatch.delenv("LLM_BACKEND", raising=False)
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
     monkeypatch.delenv("NVIDIA_MODEL", raising=False)
+    monkeypatch.delenv("LOCAL_MODEL", raising=False)
 
     service = AIBackendService()
 
@@ -53,6 +54,7 @@ def test_backend_uses_nvidia_when_env_requests_it(monkeypatch):
 
 def test_local_backend_connection_status_running(monkeypatch):
     monkeypatch.setenv("AI_BACKEND", "local")
+    monkeypatch.setenv("LOCAL_MODEL", "llama3")
     service = AIBackendService()
     response = MagicMock(status_code=200)
     response.json.return_value = {"models": [{"name": "llama3"}]}

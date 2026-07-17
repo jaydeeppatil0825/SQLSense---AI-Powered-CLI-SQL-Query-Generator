@@ -6,8 +6,8 @@ Tests for follow-up question rewriting.
 
 import pytest
 
-from conversation.question_rewriter import rewrite_follow_up_question
-from conversation.conversation_memory import ConversationMemory
+from query_pipeline.conversation.question_rewriter import rewrite_follow_up_question
+from query_pipeline.conversation.conversation_memory import ConversationMemory
 
 
 def test_rewriter_fallback_converts_where_do_they_live():

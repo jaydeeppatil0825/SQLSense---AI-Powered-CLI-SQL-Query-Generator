@@ -1,16 +1,10 @@
-"""
-Phase 11: Basic Natural Language Testing
-========================================
-Tests basic natural language questions against the AI SQL Query Generator.
-"""
+import pytest
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from ai.simple_query_generator import generate_simple_sql
-from ai.sql_generator import generate_sql
-from utils.sql_validator import validate_sql, add_limit_if_missing
+pytestmark = pytest.mark.legacy
+pytest.skip(
+    "legacy Phase 11 runtime-AI/basic-NL architecture was removed; current deterministic suites replace it",
+    allow_module_level=True,
+)
 
 # Knowledge base that mirrors ai_sales_demo structure
 DEMO_KB = {

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from calendar import monthrange
+from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from typing import Any, Dict, Optional
 from utils.logger import get_logger
@@ -18,6 +19,34 @@ from query_pipeline.question_normalizer import normalize_question
 
 logger = get_logger()
 INTENT_CONTRACT_VERSION = "1.0"
+SHAPE_CLASSIFICATION_PRECEDENCE = [
+    "unsafe_request",
+    "unsupported_construct",
+    "joined_aggregate",
+    "grouped_aggregate_having",
+    "grouped_aggregate",
+    "aggregate_ranking",
+    "row_ranking",
+    "ordered_list",
+    "filtered_aggregate",
+    "aggregate",
+    "joined_lookup",
+    "filtered_lookup",
+    "simple_count",
+    "simple_lookup",
+]
+
+
+@dataclass(frozen=True)
+class IntentShapeDecision:
+    selected_shape: str
+    status: str
+    priority: int
+    positive_evidence: list[str]
+    conflicting_evidence: list[str]
+    rejected_shapes: list[str]
+    reason_code: str
+    ambiguity_group_key: str = ""
 _ALLOWED_INTENT_TYPES = {
     "list",
     "count",
@@ -181,6 +210,22 @@ _GENERIC_METRIC_TERMS = {
     "count",
 }
 _IMPLICIT_SUM_METRIC_NOUNS = {"sale", "sales", "revenue", "revenues", "amount", "value"}
+_ROW_RANKING_ENTITY_NOUNS = {
+    "bill",
+    "bills",
+    "invoice",
+    "invoices",
+    "item",
+    "items",
+    "order",
+    "orders",
+    "payment",
+    "payments",
+    "record",
+    "records",
+    "transaction",
+    "transactions",
+}
 _AGGREGATE_KEYWORD_MAP = {
     "total": "sum",
     "sum": "sum",
@@ -292,6 +337,9 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str, *, today: date
     structured_having = _extract_structured_having(question)
     keyword_markers = _extract_keyword_markers(question)
     intent_type = str(normalized.get("intent_type") or "unknown").strip().lower()
+    shape_decision = normalized.get("shape_decision")
+    if not isinstance(shape_decision, dict):
+        shape_decision = _shape_decision_payload(_classify_intent_shape(normalized, question))
     confidence_reasons = ["deterministic_pattern_match"]
     missing_phrases: list[str] = []
     ambiguous_phrases: list[str] = []
@@ -364,9 +412,13 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str, *, today: date
         unsupported_constructs.append("multi_metric_having_not_supported")
     if normalized.get("having_aggregate_conflict"):
         unsupported_constructs.append("multi_aggregate_having_not_supported")
+    if str(shape_decision.get("status") or "") == "unsupported":
+        unsupported_constructs.append(str(shape_decision.get("reason_code") or "unsupported_intent"))
     if len([part for part in str(question or "").split(";") if part.strip()]) > 1:
         unsupported_constructs.append("multiple_statements")
     normalized["intent_contract_version"] = INTENT_CONTRACT_VERSION
+    normalized["shape_decision"] = shape_decision
+    normalized["classification_precedence"] = list(SHAPE_CLASSIFICATION_PRECEDENCE)
     normalized["keyword_markers"] = keyword_markers
     normalized["structured_filters"] = structured_filters
     normalized["structured_intervals"] = structured_intervals
@@ -449,6 +501,134 @@ def _sanitize_intent(payload: Dict[str, Any], question: str) -> Dict[str, Any]:
         "limit_phrase": _clean_scalar(payload.get("limit_phrase")),
     }
     return _normalize_simple_target_entity_usage(sanitized, question)
+
+
+def _shape_decision_payload(decision: IntentShapeDecision) -> dict[str, Any]:
+    payload = asdict(decision)
+    payload["precedence"] = list(SHAPE_CLASSIFICATION_PRECEDENCE)
+    return payload
+
+
+def _classify_intent_shape(intent: dict[str, Any], question: str) -> IntentShapeDecision:
+    intent_type = str(intent.get("intent_type") or "").strip().lower()
+    ranking_mode = str((intent.get("ranking_diagnostics") or {}).get("mode_hint") or "").strip()
+    has_ranking = bool((intent.get("ranking_diagnostics") or {}).get("requested"))
+    has_grouping = bool(intent.get("explicit_grouping") or intent.get("grouping_phrase"))
+    has_aggregate = bool(intent.get("aggregate_function"))
+    has_filters = bool(intent.get("requested_filters") or intent.get("structured_filters"))
+    has_having = bool(intent.get("structured_having"))
+    has_join_lookup = bool((intent.get("join_lookup_request") or {}).get("requested"))
+    positive: list[str] = []
+    conflicts: list[str] = []
+    rejected: list[str] = []
+
+    def decision(shape: str, status: str, priority: int, reason: str) -> IntentShapeDecision:
+        return IntentShapeDecision(
+            selected_shape=shape,
+            status=status,
+            priority=priority,
+            positive_evidence=_merge_unique(positive),
+            conflicting_evidence=_merge_unique(conflicts),
+            rejected_shapes=_merge_unique(rejected),
+            reason_code=reason,
+            ambiguity_group_key=reason if status == "ambiguous" else "",
+        )
+
+    if intent.get("unsafe"):
+        positive.append("explicit_unsafe_operation")
+        return decision("unsafe_request", "resolved", 100, "unsafe_request")
+
+    if re.search(r"\bdistinct\b", question, re.IGNORECASE):
+        positive.append("distinct_keyword")
+        return decision("unsupported_construct", "unsupported", 90, "distinct_not_supported")
+
+    if has_join_lookup and has_aggregate:
+        conflicts.extend(["join_lookup_evidence", "aggregate_evidence"])
+        return decision("joined_aggregate", "ambiguous", 80, "join_lookup_aggregate_conflict")
+
+    if has_ranking or intent_type == "ranking":
+        positive.append("ranking_keyword")
+        if ranking_mode == "ordered_list":
+            positive.append("sort_clause")
+            return decision("ordered_list", "resolved", 68, "ordered_list")
+        if ranking_mode == "grouped_aggregate":
+            positive.append("aggregate_ranking_target")
+            return decision("aggregate_ranking", "resolved", 70, "aggregate_ranking")
+        if not intent.get("metric_phrase") or not intent.get("target_entity_phrase"):
+            conflicts.append("ranking_target_incomplete")
+            return decision("row_ranking", "ambiguous", 69, "ranking_target_incomplete")
+        rejected.append("aggregate_ranking")
+        return decision("row_ranking", "resolved", 69, "row_ranking")
+
+    if has_having:
+        positive.append("having_condition")
+        if not (has_grouping or intent.get("requested_dimensions")):
+            conflicts.append("having_without_grouping")
+            return decision("grouped_aggregate_having", "unsupported", 60, "having_without_grouping")
+        return decision("grouped_aggregate_having", "resolved", 60, "grouped_aggregate_having")
+
+    if intent_type == "grouped_summary" and intent.get("requested_dimensions"):
+        positive.append("grouped_summary_intent")
+        if has_aggregate:
+            positive.append("aggregate_function")
+        return decision("grouped_aggregate", "resolved", 55, "grouped_aggregate")
+
+    if has_grouping and has_aggregate:
+        positive.extend(["grouping_phrase", "aggregate_function"])
+        return decision("grouped_aggregate", "resolved", 55, "grouped_aggregate")
+
+    if intent_type == "count":
+        positive.append("count_phrase")
+        return decision("simple_count", "resolved", 50, "simple_count")
+
+    if has_aggregate and has_filters:
+        positive.extend(["aggregate_function", "filter_condition"])
+        return decision("filtered_aggregate", "resolved", 45, "filtered_aggregate")
+
+    if has_aggregate:
+        positive.append("aggregate_function")
+        return decision("aggregate", "resolved", 40, "aggregate")
+
+    if has_join_lookup:
+        positive.append("join_lookup_phrase")
+        return decision("joined_lookup", "resolved", 35, "joined_lookup")
+
+    if intent_type == "filter" or has_filters:
+        positive.append("filter_condition")
+        return decision("filtered_lookup", "resolved", 25, "filtered_lookup")
+
+    if intent_type == "sorted_list":
+        positive.append("sort_clause")
+        return decision("ordered_list", "resolved", 24, "ordered_list")
+
+    return decision("simple_lookup", "resolved", 10, "simple_lookup")
+
+
+def _apply_shape_decision(intent: dict[str, Any], question: str) -> IntentShapeDecision:
+    decision = _classify_intent_shape(intent, question)
+    shape = decision.selected_shape
+    if shape in {"grouped_aggregate", "grouped_aggregate_having"}:
+        intent["intent_type"] = "grouped_summary"
+        intent["business_operation"] = "summarize"
+    elif shape in {"aggregate_ranking", "row_ranking"}:
+        intent["intent_type"] = "ranking"
+        intent["business_operation"] = "rank"
+    elif shape in {"filtered_aggregate", "aggregate"}:
+        intent["intent_type"] = "aggregate"
+        intent["business_operation"] = "summarize"
+    elif shape == "ordered_list":
+        intent["intent_type"] = "sorted_list"
+        intent["business_operation"] = "sort"
+    elif shape == "filtered_lookup":
+        intent["intent_type"] = "filter"
+    elif shape == "simple_count":
+        intent["intent_type"] = "count"
+        intent["business_operation"] = "count"
+    elif shape in {"joined_lookup", "simple_lookup"}:
+        intent["intent_type"] = "list"
+        intent["business_operation"] = "browse"
+    intent["shape_decision"] = _shape_decision_payload(decision)
+    return decision
 
 
 def _build_fallback_intent(question: str) -> Dict[str, Any]:
@@ -610,9 +790,10 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         else:
             if intent_type in {"list", "filter"} and aggregate_function is None:
                 aggregate_function = _detect_implicit_grouped_sum_metric(left)
-            metric_phrase = _metric_phrase_from_segment(left, aggregate_function)
-            if metric_phrase:
-                requested_metrics = [metric_phrase]
+            if intent_type != "count":
+                metric_phrase = _metric_phrase_from_segment(left, aggregate_function)
+                if metric_phrase:
+                    requested_metrics = [metric_phrase]
             if right:
                 requested_dimensions = [right]
         if intent_type in {"list", "aggregate", "filter"}:
@@ -658,6 +839,38 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
                 implicit_dimension = _extract_implicit_having_dimension(body)
                 if implicit_dimension:
                     requested_dimensions = [implicit_dimension]
+
+    shape_ranking_diagnostics = ranking_diagnostics
+    if requested_sort and not shape_ranking_diagnostics.get("requested"):
+        shape_ranking_diagnostics = {
+            "requested": True,
+            "mode_hint": "ordered_list",
+            "direction_source": "explicit_order_by",
+            "limit_source": "explicit" if limit is not None else "not_requested",
+            "issues": [],
+        }
+
+    shape_seed = {
+        "intent_type": intent_type,
+        "business_operation": business_operation,
+        "requested_dimensions": requested_dimensions,
+        "requested_filters": requested_filters,
+        "aggregate_function": aggregate_function,
+        "structured_having": structured_having,
+        "explicit_grouping": _has_explicit_grouping_marker(body_without_sort),
+        "ranking_diagnostics": shape_ranking_diagnostics,
+        "join_lookup_request": join_lookup_request,
+        "metric_phrase": requested_metrics[0] if requested_metrics else "",
+        "target_entity_phrase": (
+            count_entity_phrase
+            or (str(ranking_request.get("entity_phrase") or "") if ranking_request else "")
+            or (source_scope[0] if source_scope else "")
+        ),
+        "unsafe": False,
+    }
+    shape_decision = _apply_shape_decision(shape_seed, normalized_question)
+    intent_type = shape_seed["intent_type"]
+    business_operation = shape_seed["business_operation"]
 
     if (_TOP_RE.search(normalized_question) or _FIRST_RE.search(normalized_question)) and not requested_sort:
         requested_sort = {"direction": "desc", "terms": requested_metrics[0] if requested_metrics else "ranking"}
@@ -778,6 +991,7 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         "ranking_phrase": ranking_phrase,
         "limit_phrase": limit_phrase,
         "ranking_diagnostics": ranking_diagnostics,
+        "shape_decision": _shape_decision_payload(shape_decision),
         "join_lookup_request": join_lookup_request,
         "requested_output_fields": list(join_lookup_request.get("requested_output_fields") or []),
         "source": "fallback",
@@ -1143,6 +1357,8 @@ def _extract_ranking_request(question: str) -> dict[str, Any]:
     target_phrase = _cleanup_phrase(match.group(4))
     direction = "asc" if keyword in {"bottom", "lowest", "smallest", "minimum"} else "desc"
     aggregate_function = _detect_ranking_aggregate_function(target_phrase)
+    if aggregate_function == "sum" and _ranking_total_target_is_row_metric(entity_phrase, target_phrase):
+        aggregate_function = None
     if (
         explicit_limit is None
         and keyword in {"highest", "largest", "maximum", "lowest", "smallest", "minimum"}
@@ -1165,6 +1381,21 @@ def _extract_ranking_request(question: str) -> dict[str, Any]:
         "limit": explicit_limit if explicit_limit is not None else 50,
         "limit_source": "explicit" if explicit_limit is not None else "default_top_n",
     }
+
+
+def _ranking_total_target_is_row_metric(entity_phrase: str, target_phrase: str) -> bool:
+    tokens = [token for token in re.split(r"[^a-z0-9_]+", _cleanup_phrase(target_phrase).lower()) if token]
+    if not tokens or tokens[0] != "total":
+        return False
+    entity_tokens = {
+        token
+        for token in re.split(r"[^a-z0-9_]+", _cleanup_phrase(entity_phrase).lower())
+        if token
+    }
+    return bool(
+        entity_tokens & _ROW_RANKING_ENTITY_NOUNS
+        and tokens[1:] in (["amount"], ["value"], ["quantity"], ["qty"], ["price"], ["cost"])
+    )
 
 
 def _empty_join_lookup_request() -> dict[str, Any]:
@@ -1425,14 +1656,14 @@ def _where_clause_is_having(question: str, match: re.Match[str], candidate: str)
 def _with_phrase_is_row_filter(phrase: str) -> bool:
     if not phrase:
         return False
+    if _parse_having_condition(phrase).get("aggregate_function"):
+        return False
     if re.search(
         r"\b(?:between|contains|equals?|is|not\s+equal|greater\s+than|more\s+than|less\s+than|at\s+least|at\s+most|above|below|over|under|null|=|!=|<>|>=|<=|>|<)\b",
         phrase,
         re.IGNORECASE,
     ):
         return True
-    if _parse_having_condition(phrase).get("aggregate_function"):
-        return False
     return bool(re.match(r"^\s*status\s+\S+", phrase, re.IGNORECASE))
 
 

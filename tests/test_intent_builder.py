@@ -485,3 +485,47 @@ def test_aggregate_condition_with_is_not_treated_as_join_lookup(question):
     assert intent["intent_type"] == "grouped_summary"
     assert intent["structured_having"]
 
+
+def test_shape_decision_marks_with_aggregate_condition_as_grouped_having():
+    intent = build_intent("show customer name with sum received amount greater than 10000 from service invoices")
+
+    assert intent["shape_decision"]["selected_shape"] == "grouped_aggregate_having"
+    assert intent["intent_type"] == "grouped_summary"
+    assert intent["requested_filters"] == []
+    assert intent["structured_filters"] == []
+    assert intent["structured_having"][0]["metric_phrase"] == "received amount"
+
+
+def test_shape_decision_keeps_grouped_count_count_only():
+    intent = build_intent("show count service invoices by invoice status")
+
+    assert intent["shape_decision"]["selected_shape"] == "grouped_aggregate"
+    assert intent["intent_type"] == "grouped_summary"
+    assert intent["aggregate_function"] == "count"
+    assert intent["requested_metrics"] == []
+    assert intent["requested_dimensions"] == ["invoice status"]
+    assert intent["structured_filters"] == []
+
+
+def test_shape_decision_distinguishes_row_and_aggregate_ranking():
+    row = build_intent("top 3 service orders by total amount")
+    grouped = build_intent("top cities by total order amount")
+    related_grouped = build_intent("top customers by total amount")
+
+    assert row["shape_decision"]["selected_shape"] == "row_ranking"
+    assert row["aggregate_function"] is None
+    assert row["ranking_diagnostics"]["mode_hint"] == "row"
+    assert grouped["shape_decision"]["selected_shape"] == "aggregate_ranking"
+    assert grouped["aggregate_function"] == "sum"
+    assert grouped["ranking_diagnostics"]["mode_hint"] == "grouped_aggregate"
+    assert related_grouped["shape_decision"]["selected_shape"] == "aggregate_ranking"
+    assert related_grouped["ranking_diagnostics"]["mode_hint"] == "grouped_aggregate"
+
+
+def test_shape_decision_marks_distinct_as_unsupported():
+    intent = build_intent("count distinct orders by customer city")
+
+    assert intent["shape_decision"]["selected_shape"] == "unsupported_construct"
+    assert intent["shape_decision"]["status"] == "unsupported"
+    assert "distinct_not_supported" in intent["unsupported_constructs"]
+

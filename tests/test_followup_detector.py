@@ -6,8 +6,8 @@ Tests for follow-up question detection.
 
 import pytest
 
-from conversation.followup_detector import detect_follow_up
-from conversation.conversation_memory import ConversationMemory
+from query_pipeline.conversation.followup_detector import detect_follow_up
+from query_pipeline.conversation.conversation_memory import ConversationMemory
 
 
 def test_followup_detector_returns_false_with_no_previous_context():

@@ -9,7 +9,7 @@ def test_main_menu_shows_backend_settings(capsys):
     main.display_menu(state)
 
     output = capsys.readouterr().out
-    assert "Ask a Question / Ask Business Question" in output
+    assert "Ask Question (auto-executes safe SQL)" in output
     assert "Semantic AI Settings" in output
     assert "Backend  :" in output
 

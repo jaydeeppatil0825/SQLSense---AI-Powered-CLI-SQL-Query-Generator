@@ -1,8 +1,10 @@
-"""Tests for the dynamic simple query generator."""
+import pytest
 
-from pathlib import Path
-
-from ai.simple_query_generator import generate_simple_sql
+pytestmark = pytest.mark.legacy
+pytest.skip(
+    "legacy ai.simple_query_generator path was removed; sql_pipeline tests cover the supported generator",
+    allow_module_level=True,
+)
 
 
 GENERIC_KB = {

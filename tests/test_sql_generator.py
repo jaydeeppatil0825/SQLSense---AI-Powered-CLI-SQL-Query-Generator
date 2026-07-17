@@ -2,7 +2,11 @@
 
 import pytest
 
-from ai.sql_generator import generate_sql, generate_sql_with_retry
+pytestmark = pytest.mark.legacy
+pytest.skip(
+    "legacy ai.sql_generator and SQL retry contract were removed; deterministic generator tests are authoritative",
+    allow_module_level=True,
+)
 
 
 def test_generate_sql_prompt_uses_pipeline_context(monkeypatch):
