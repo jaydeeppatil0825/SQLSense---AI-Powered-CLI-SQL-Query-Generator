@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from kb_pipeline.relationship_graph import (
@@ -511,6 +512,38 @@ def _infer_metric_from_glossary_matches(
     return ranked_semantics[0][1] if ranked_semantics else None
 
 
+@dataclass
+class RoleCandidateScore:
+    table: str
+    column: str
+    role: str
+    score: float
+    score_reasons: list[str] = field(default_factory=list)
+    penalties: list[str] = field(default_factory=list)
+    evidence_tier: str = ""
+    source: str = ""
+    candidate_score: float = 0.0
+    ambiguity_group_key: str = ""
+    candidate: dict[str, Any] = field(default_factory=dict)
+
+    def as_ranked_entry(self) -> dict[str, Any]:
+        return {
+            "candidate": dict(self.candidate),
+            "table": self.table,
+            "column": self.column,
+            "role": self.role,
+            "tier": self.evidence_tier,
+            "evidence_tier": self.evidence_tier,
+            "score": round(float(self.score or 0.0), 4),
+            "candidate_score": round(float(self.candidate_score or 0.0), 4),
+            "reasons": list(self.score_reasons),
+            "score_reasons": list(self.score_reasons),
+            "penalties": list(self.penalties),
+            "source": self.source,
+            "ambiguity_group_key": self.ambiguity_group_key,
+        }
+
+
 def _role_candidate_match_score(phrase: str, entry: dict[str, Any]) -> float:
     phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
     column_name = str(entry.get("column") or "")
@@ -538,26 +571,6 @@ def _role_candidate_match_score(phrase: str, entry: dict[str, Any]) -> float:
         elif phrase_tokens <= term_tokens:
             lexical_score = max(lexical_score, 0.82)
     return round(lexical_score, 4)
-
-
-def _resolve_role_candidate(
-    phrase: str,
-    candidates: list[dict[str, Any]],
-    *,
-    allowed_tables: set[str] | None = None,
-    role: str = "generic",
-) -> tuple[list[dict[str, Any]], str]:
-    result = _rank_role_candidates(
-        phrase,
-        candidates,
-        role=role,
-        allowed_tables=allowed_tables,
-    )
-    if result.get("status") != "resolved":
-        return [], str(result.get("status") or "missing")
-    selected = result.get("selected") or {}
-    candidate = dict(selected.get("candidate") or {})
-    return [candidate], "resolved"
 
 
 def _candidate_is_numeric_metric(entry: dict[str, Any]) -> bool:
@@ -591,12 +604,12 @@ def _candidate_is_dimension(entry: dict[str, Any], phrase: str) -> bool:
     )
 
 
-def _role_candidate_scoring_entry(
+def score_role_candidate(
     phrase: str,
     entry: dict[str, Any],
     *,
     role: str = "generic",
-) -> dict[str, Any] | None:
+) -> RoleCandidateScore | None:
     phrase_tokens = _field_tokens(phrase)
     table_name = str(entry.get("table") or "").strip()
     column_name = str(entry.get("column") or "").strip()
@@ -661,16 +674,41 @@ def _role_candidate_scoring_entry(
         reasons.append(f"{tier.replace('_', ' ')} supported by candidate evidence")
 
     evidence_score = _safe_float(entry.get("score") or entry.get("confidence"), 0.0)
-    return {
-        "candidate": dict(entry),
-        "tier": tier,
-        "score": round(min(score, 1.0), 4),
-        "candidate_score": round(evidence_score, 4),
-        "reasons": reasons,
-    }
+    return RoleCandidateScore(
+        table=table_name,
+        column=column_name,
+        role=role,
+        score=round(min(score, 1.0), 4),
+        score_reasons=reasons,
+        penalties=[],
+        evidence_tier=tier,
+        source=str(entry.get("source") or ""),
+        candidate_score=round(evidence_score, 4),
+        ambiguity_group_key=f"{role}:{tier}:{round(min(score, 1.0), 4)}",
+        candidate=dict(entry),
+    )
 
 
-def _rank_role_candidates(
+def _role_candidate_scoring_entry(
+    phrase: str,
+    entry: dict[str, Any],
+    *,
+    role: str = "generic",
+) -> dict[str, Any] | None:
+    scored = score_role_candidate(phrase, entry, role=role)
+    return scored.as_ranked_entry() if scored else None
+
+
+def _role_rank_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        -_safe_float(item.get("score")),
+        -_safe_float(item.get("candidate_score")),
+        str(item.get("candidate", {}).get("table") or item.get("table") or ""),
+        str(item.get("candidate", {}).get("column") or item.get("column") or ""),
+    )
+
+
+def rank_role_candidates(
     phrase: str,
     candidates: list[dict[str, Any]],
     *,
@@ -688,18 +726,11 @@ def _rank_role_candidates(
         if allowed_tables is not None and table_name not in allowed_tables:
             continue
         seen.add(signature)
-        scored = _role_candidate_scoring_entry(phrase, candidate, role=role)
+        scored = score_role_candidate(phrase, candidate, role=role)
         if scored:
-            ranked.append(scored)
+            ranked.append(scored.as_ranked_entry())
 
-    ranked.sort(
-        key=lambda item: (
-            -_safe_float(item.get("score")),
-            -_safe_float(item.get("candidate_score")),
-            str(item.get("candidate", {}).get("table") or ""),
-            str(item.get("candidate", {}).get("column") or ""),
-        )
-    )
+    ranked.sort(key=_role_rank_sort_key)
     if not ranked:
         return {"status": "missing", "selected": None, "ranked": [], "tie_reason": ""}
 
@@ -727,6 +758,71 @@ def _rank_role_candidates(
             "tie_reason": f"multiple candidates tied at tier {top.get('tier')}",
         }
     return {"status": "resolved", "selected": top, "ranked": ranked, "tie_reason": ""}
+
+
+def _rank_role_candidates(
+    phrase: str,
+    candidates: list[dict[str, Any]],
+    *,
+    role: str = "generic",
+    allowed_tables: set[str] | None = None,
+) -> dict[str, Any]:
+    return rank_role_candidates(
+        phrase,
+        candidates,
+        role=role,
+        allowed_tables=allowed_tables,
+    )
+
+
+def build_role_candidate_debug(result: dict[str, Any]) -> dict[str, Any]:
+    selected = result.get("selected") or {}
+    return {
+        "status": result.get("status"),
+        "selected": {
+            "table": selected.get("table") or selected.get("candidate", {}).get("table"),
+            "column": selected.get("column") or selected.get("candidate", {}).get("column"),
+            "role": selected.get("role"),
+            "score": selected.get("score"),
+            "evidence_tier": selected.get("evidence_tier") or selected.get("tier"),
+            "score_reasons": list(selected.get("score_reasons") or selected.get("reasons") or []),
+            "penalties": list(selected.get("penalties") or []),
+        } if selected else None,
+        "ranked": [
+            {
+                "table": item.get("table") or item.get("candidate", {}).get("table"),
+                "column": item.get("column") or item.get("candidate", {}).get("column"),
+                "role": item.get("role"),
+                "score": item.get("score"),
+                "evidence_tier": item.get("evidence_tier") or item.get("tier"),
+                "score_reasons": list(item.get("score_reasons") or item.get("reasons") or []),
+                "penalties": list(item.get("penalties") or []),
+                "ambiguity_group_key": item.get("ambiguity_group_key"),
+            }
+            for item in (result.get("ranked") or [])
+        ],
+        "tie_reason": result.get("tie_reason", ""),
+    }
+
+
+def _resolve_role_candidate(
+    phrase: str,
+    candidates: list[dict[str, Any]],
+    *,
+    allowed_tables: set[str] | None = None,
+    role: str = "generic",
+) -> tuple[list[dict[str, Any]], str]:
+    result = rank_role_candidates(
+        phrase,
+        candidates,
+        role=role,
+        allowed_tables=allowed_tables,
+    )
+    if result.get("status") != "resolved":
+        return [], str(result.get("status") or "missing")
+    selected = result.get("selected") or {}
+    candidate = dict(selected.get("candidate") or {})
+    return [candidate], "resolved"
 
 
 def _selected_evidence_entry(result: dict[str, Any], *, selected: dict[str, Any] | None = None) -> dict[str, Any]:
