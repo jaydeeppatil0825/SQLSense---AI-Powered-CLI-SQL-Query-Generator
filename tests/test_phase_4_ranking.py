@@ -375,6 +375,30 @@ def test_generator_rejects_limit_contract_mismatch():
     assert "clause_plan_mismatch" in result.plan.missing_evidence
 
 
+def test_generator_rejects_missing_ranking_decision():
+    context = deepcopy(_context("top 5 service invoices by gross amount", metric="gross_amount"))
+    context.pop("ranking_decision", None)
+    context["clause_plan"].pop("ranking_decision", None)
+
+    result = generate_deterministic_sql(query_context=context, knowledge_base=RANKING_KB)
+
+    assert result.status == "cannot_plan_safely"
+    assert result.sql is None
+    assert "ranking_decision_missing" in result.plan.missing_evidence
+
+
+def test_generator_rejects_invalid_ranking_projection_mode():
+    context = deepcopy(_context("top 5 service invoices by gross amount", metric="gross_amount"))
+    context["ranking_decision"]["selected_projection_mode"] = "grouped_aggregate_projection"
+    context["clause_plan"]["ranking_decision"]["selected_projection_mode"] = "grouped_aggregate_projection"
+
+    result = generate_deterministic_sql(query_context=context, knowledge_base=RANKING_KB)
+
+    assert result.status == "cannot_plan_safely"
+    assert result.sql is None
+    assert "ranking_projection_mode_invalid" in result.plan.missing_evidence
+
+
 @pytest.mark.parametrize(
     "sql",
     [

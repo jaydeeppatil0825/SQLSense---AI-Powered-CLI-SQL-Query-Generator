@@ -915,6 +915,82 @@ def _cannot_plan_single_table(
     )
 
 
+def _ranking_decision_error(
+    context: dict[str, Any],
+    *,
+    table_name: str,
+    aggregate_function: str | None,
+    selected_order_by: dict[str, Any] | None,
+    selected_dimensions: list[dict[str, Any]],
+    metric_column: str,
+    limit: int | None,
+) -> str:
+    if str(context.get("query_shape") or "") != "ranking_query":
+        return ""
+    decision = context.get("ranking_decision")
+    if not isinstance(decision, dict):
+        return "ranking_decision_missing"
+    if decision.get("status") != "resolved":
+        return "ranking_decision_unresolved"
+    mode = str(decision.get("ranking_mode") or "").strip()
+    projection_mode = str(decision.get("selected_projection_mode") or "").strip()
+    expected_projection = {
+        "row_ranking": "row_projection",
+        "grouped_aggregate_ranking": "grouped_aggregate_projection",
+        "ordered_list": "ordered_list_projection",
+    }.get(mode)
+    if not expected_projection or projection_mode != expected_projection:
+        return "ranking_projection_mode_invalid"
+    if str(decision.get("target_table") or "").strip() != table_name:
+        return "ranking_target_table_mismatch"
+    direction = str(decision.get("direction") or "").strip().upper()
+    if direction not in {"ASC", "DESC"}:
+        return "ranking_direction_invalid"
+    if decision.get("limit") != limit:
+        return "clause_plan_mismatch"
+    if not isinstance(selected_order_by, dict):
+        return "ranking_order_by_missing"
+    if direction.lower() != str(selected_order_by.get("direction") or "").strip().lower():
+        return "ranking_direction_mismatch"
+
+    decision_metric = decision.get("ranking_metric") if isinstance(decision.get("ranking_metric"), dict) else {}
+    order_table = str(selected_order_by.get("table") or "").strip()
+    order_column = str(selected_order_by.get("column") or "").strip()
+    if str(decision_metric.get("table") or "").strip() != order_table:
+        return "ranking_metric_table_mismatch"
+    if str(decision_metric.get("column") or "").strip() != order_column:
+        return "ranking_metric_column_mismatch"
+
+    if mode == "grouped_aggregate_ranking":
+        if aggregate_function not in {"count", "sum", "avg", "min", "max"}:
+            return "ranking_aggregate_invalid"
+        if str(decision.get("aggregate_function") or "").strip().lower() != aggregate_function:
+            return "ranking_aggregate_mismatch"
+        if len(selected_dimensions) != 1:
+            return "ranking_dimension_invalid"
+        grouping_dimension = (
+            decision.get("grouping_dimension")
+            if isinstance(decision.get("grouping_dimension"), dict)
+            else {}
+        )
+        dimension_entry = selected_dimensions[0]
+        if (
+            str(grouping_dimension.get("table") or "").strip()
+            != str(dimension_entry.get("table") or "").strip()
+            or str(grouping_dimension.get("column") or "").strip()
+            != str(dimension_entry.get("column") or "").strip()
+        ):
+            return "ranking_dimension_mismatch"
+        if aggregate_function != "count" and order_column != metric_column:
+            return "ranking_metric_mismatch"
+    elif mode in {"row_ranking", "ordered_list"}:
+        if aggregate_function:
+            return "ranking_mode_aggregate_conflict"
+        if str(selected_order_by.get("target_type") or "").strip() != "column":
+            return "ranking_order_by_target_invalid"
+    return ""
+
+
 def _build_single_table_clause_plan(
     *,
     query_context: dict[str, Any],
@@ -1150,6 +1226,30 @@ def _build_single_table_clause_plan(
             reason="limit_out_of_safe_range",
         )
 
+    ranking_reason = _ranking_decision_error(
+        context,
+        table_name=table_name,
+        aggregate_function=aggregate_function,
+        selected_order_by=selected_order_by if isinstance(selected_order_by, dict) else None,
+        selected_dimensions=[
+            entry for entry in (context.get("selected_dimensions") or [])
+            if isinstance(entry, dict)
+        ],
+        metric_column=metric_column,
+        limit=limit,
+    )
+    if ranking_reason:
+        return _cannot_plan_single_table(
+            capability,
+            table_name=table_name,
+            reason=ranking_reason,
+            aggregation_type=aggregate_function,
+            metric_columns=[metric_column] if metric_column else [],
+            dimension_columns=[dimension_column] if dimension_column else [],
+            filter_columns=filter_columns,
+            having_columns=having_columns,
+        )
+
     if requires_grouping:
         select_items = [
             {"expression": dimension_column, "source_column": dimension_column, "kind": "dimension"},
@@ -1190,7 +1290,7 @@ def _build_single_table_clause_plan(
                 "kind": "column",
             }
             for entry in projected_outputs
-        ] or (_ranking_projection_columns(table_name, table_data, schema_columns, order_by) if order_by else []) or [
+        ] or (_ranking_projection_columns(table_data, schema_columns, context) if order_by else []) or [
             {"expression": column_name, "source_column": column_name, "kind": "column"}
             for column_name in schema_columns
         ]
@@ -1237,35 +1337,19 @@ def _build_single_table_clause_plan(
 
 
 def _ranking_projection_columns(
-    table_name: str,
     table_data: dict[str, Any],
     schema_columns: set[str],
-    order_by: list[str],
+    context: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    order_column = str(order_by[0]).split()[0] if order_by else ""
-    table_token = table_name[:-1] if table_name.endswith("s") else table_name
-    chosen: list[str] = []
-    for column in table_data.get("columns", []) or []:
-        column_name = str(column.get("name") or "")
-        if column_name in schema_columns and column_name == f"{table_token}_id":
-            chosen.append(column_name)
-            break
-    if not chosen:
-        for column in table_data.get("columns", []) or []:
-            column_name = str(column.get("name") or "")
-            if column_name in schema_columns and column_name.endswith("_id"):
-                chosen.append(column_name)
-                break
-    for suffix in ("_name", "_no", "_number", "name", "code"):
-        for column in table_data.get("columns", []) or []:
-            column_name = str(column.get("name") or "")
-            if column_name in schema_columns and column_name not in chosen and column_name.endswith(suffix):
-                chosen.append(column_name)
-                break
-        if len(chosen) >= 2:
-            break
-    if order_column in schema_columns and order_column not in chosen:
-        chosen.append(order_column)
+    decision = context.get("ranking_decision") if isinstance(context.get("ranking_decision"), dict) else {}
+    projection_mode = str(decision.get("selected_projection_mode") or "").strip()
+    if projection_mode not in {"row_projection", "ordered_list_projection"}:
+        return []
+    chosen = [
+        str(column.get("name") or "").strip()
+        for column in table_data.get("columns", []) or []
+        if str(column.get("name") or "").strip() in schema_columns
+    ]
     return [
         {"expression": column_name, "source_column": column_name, "kind": "column"}
         for column_name in chosen
