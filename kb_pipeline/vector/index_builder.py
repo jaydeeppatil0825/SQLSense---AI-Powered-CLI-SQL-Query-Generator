@@ -151,6 +151,9 @@ class VectorIndexBuilder:
         """Create a vector document for a table."""
         purpose = table_data.get("business_purpose", "")
         description = table_data.get("business_description", "")
+        ai_metadata = table_data.get("ai_metadata", {}) if isinstance(table_data.get("ai_metadata"), dict) else {}
+        business_terms = list(table_data.get("business_terms", []) or []) + list(ai_metadata.get("business_terms", []) or [])
+        business_terms = list(dict.fromkeys(str(term).strip() for term in business_terms if str(term).strip()))
         
         # Build searchable text
         text_parts = [
@@ -158,6 +161,8 @@ class VectorIndexBuilder:
             f"Purpose: {purpose}",
             f"Description: {description}",
         ]
+        if business_terms:
+            text_parts.append(f"Business terms: {', '.join(business_terms)}")
         
         # Add column names for context
         column_names = [col.get("name", "") for col in table_data.get("columns", [])]
@@ -176,6 +181,8 @@ class VectorIndexBuilder:
             "semantic_type": "table",
             "description": description,
             "business_purpose": purpose,
+            "business_terms": business_terms,
+            "table_role": table_data.get("table_role", ai_metadata.get("table_role", "")),
             "row_count": table_data.get("row_count"),
             "column_names": column_names[:20],
         }

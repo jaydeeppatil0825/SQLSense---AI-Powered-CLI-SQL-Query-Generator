@@ -189,6 +189,25 @@ def _owner_qualified_column_terms(table_name: str, column_name: str) -> list[str
     )
 
 
+def _owner_qualified_business_terms(table_terms: list[str], column_terms: list[str]) -> list[str]:
+    owner_terms = _unique_preserve_order(
+        [
+            term
+            for table_term in table_terms
+            for term in [table_term, *_humanize(table_term).split()]
+            if term and len(term) > 1
+        ]
+    )
+    return _unique_preserve_order(
+        [
+            f"{table_term} {column_term}"
+            for table_term in owner_terms
+            for column_term in column_terms[:6]
+            if table_term and column_term and table_term != column_term
+        ]
+    )[:40]
+
+
 def _clean_ai_terms(values: list[str]) -> list[str]:
     cleaned: list[str] = []
     for value in values:
@@ -492,8 +511,11 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
         )
         table_mappings = _representative_mappings(table_name, table_data)
         relationship_terms, related_tables, relationship_sources = _relationship_context(table_name, table_data)
-        table_ai_terms = _clean_ai_terms(table_data.get("business_terms", []))
         table_ai_metadata = table_data.get("ai_metadata", {}) if isinstance(table_data.get("ai_metadata"), dict) else {}
+        table_ai_terms = _clean_ai_terms(
+            list(table_data.get("business_terms", []) or [])
+            + list(table_ai_metadata.get("business_terms", []) or [])
+        )
         table_ai_confidence = float(table_ai_metadata.get("confidence", 0.0) or 0.0)
         table_terms = _unique_preserve_order(
             _schema_terms_for_table(table_name) + table_ai_terms
@@ -626,6 +648,26 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                     allow_mapping_merge=False,
                     usage_scope="column_lookup",
                     confidence=0.95,
+                )
+
+            for term in _owner_qualified_business_terms(table_ai_terms, validated_column_terms):
+                _add_entry(
+                    glossary,
+                    term,
+                    description=column_description,
+                    mapped_tables=[table_name],
+                    mappings=[mapping],
+                    example_questions=[],
+                    primary_terms=[term, *validated_column_terms],
+                    related_terms=column_related_terms,
+                    related_tables=column_related_tables,
+                    sources=column_sources,
+                    relationship_sources=column_relationship_sources,
+                    mapping_kind="column",
+                    structural_facts=structural_facts,
+                    allow_mapping_merge=False,
+                    usage_scope="column_lookup",
+                    confidence=0.92,
                 )
 
     logger.info(f"Generated glossary with {len(glossary)} terms")

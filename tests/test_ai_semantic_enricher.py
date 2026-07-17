@@ -14,8 +14,13 @@ from semantic.ai_semantic_enricher import (
     _clean_ai_response,
     _parse_column_enrichment,
     _parse_table_summary,
+    _sanitize_table_terms,
     get_last_enrichment_report,
 )
+from kb_pipeline.business_glossary import generate_business_glossary
+from kb_pipeline.schema_facts import enrich_knowledge_base_schema_facts
+from kb_pipeline.vector.embedding_service import EmbeddingService
+from kb_pipeline.vector.index_builder import VectorIndexBuilder
 
 
 def test_clean_ai_response_removes_markdown():
@@ -83,6 +88,17 @@ def test_enrichment_parsers_validate_required_keys_and_types():
                 }
             )
         )
+
+
+def test_table_terms_reject_short_identifier_fragments():
+    terms = _sanitize_table_terms(
+        {"business_terms": ["mst so hdr", "customer master", "customer"]},
+        "Customer master table",
+        "Stores customer records",
+    )
+
+    assert "mst so hdr" not in terms
+    assert "customer" in terms
 
 
 def test_table_parser_accepts_valid_json_inside_extra_text():
@@ -856,3 +872,102 @@ def test_ai_identifier_like_metadata_is_rewritten_into_useful_terms(monkeypatch)
     assert units_available["ai_metadata"]["business_terms"] == ["units available"]
     assert units_available["ai_metadata"]["reason"] == "Candidate evidence: numeric-like type or numeric-style column meaning."
     assert units_available["planner_roles"]["measure_candidate"] is True
+
+
+def test_ai_business_vocabulary_propagates_to_glossary_and_vector_docs(monkeypatch):
+    knowledge_base = {
+        "c_mst": {
+            "table_name": "c_mst",
+            "primary_keys": ["c_id"],
+            "foreign_keys": [],
+            "columns": [
+                {"name": "c_id", "type": "INTEGER", "semantic_type": "id"},
+                {"name": "c_nm", "type": "VARCHAR(100)", "semantic_type": "text_candidate"},
+                {"name": "net_val", "type": "DECIMAL(12,2)", "semantic_type": "numeric_candidate"},
+                {"name": "st_cd", "type": "VARCHAR(20)", "semantic_type": "category_candidate"},
+            ],
+        }
+    }
+
+    def fake_call_ai_backend(messages, backend, response_format=None):
+        if "q" in response_format.get("required", []):
+            return json.dumps(
+                {
+                    "d": "Customer master table",
+                    "p": "Stores customer master records",
+                    "b": ["customer", "client", "buyer"],
+                    "tr": "master",
+                    "cf": 0.91,
+                    "r": "abbreviated table name and columns indicate customers",
+                    "q": ["Show customers"],
+                }
+            )
+        return json.dumps(
+            {
+                "c": {
+                    "c_nm": {
+                        "d": "Customer company name",
+                        "b": ["customer name", "company name"],
+                        "s": "name",
+                        "cf": 0.89,
+                        "r": "name column belongs to customer master",
+                        "me": False,
+                        "di": True,
+                        "dt": False,
+                    },
+                    "net_val": {
+                        "d": "Order net amount",
+                        "b": ["order value", "net amount"],
+                        "s": "quantity",
+                        "cf": 0.9,
+                        "r": "decimal value column represents money",
+                        "me": True,
+                        "di": False,
+                        "dt": False,
+                    },
+                    "st_cd": {
+                        "d": "Order status code",
+                        "b": ["order status"],
+                        "s": "status",
+                        "cf": 0.86,
+                        "r": "status code describes order state",
+                        "me": False,
+                        "di": True,
+                        "dt": False,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("semantic.ai_semantic_enricher._call_ai_backend", fake_call_ai_backend)
+
+    enriched = enrich_knowledge_base_schema_facts(enrich_knowledge_base_with_ai(knowledge_base, backend="local"))
+    glossary = generate_business_glossary(enriched, use_ai_enrichment=True)
+    documents = VectorIndexBuilder(EmbeddingService()).build_from_knowledge_base(enriched)
+
+    c_mst = enriched["c_mst"]
+    c_nm = c_mst["columns"][1]["ai_metadata"]
+    net_val = c_mst["columns"][2]["ai_metadata"]
+
+    assert {"customer", "client", "buyer"} <= set(c_mst["ai_metadata"]["business_terms"])
+    assert "customer name" in c_nm["business_terms"]
+    assert "company name" in c_nm["business_terms"]
+    assert net_val["ai_semantic_type"] == "money"
+    assert net_val["accepted"] is True
+    assert net_val["confidence"] > 0
+    assert net_val["reason"]
+
+    assert "client" in glossary
+    assert "order value" in glossary
+    assert glossary["client"]["mapped_tables"] == ["c_mst"]
+    assert glossary["order value"]["mapped_columns"][0]["column"] == "net_val"
+
+    table_doc = next(doc for doc in documents if doc["metadata"].get("type") == "table")
+    net_val_doc = next(
+        doc
+        for doc in documents
+        if doc["metadata"].get("type") == "column"
+        and doc["metadata"].get("column_name") == "net_val"
+    )
+    assert "client" in table_doc["text"]
+    assert "order value" in net_val_doc["metadata"]["business_terms"]

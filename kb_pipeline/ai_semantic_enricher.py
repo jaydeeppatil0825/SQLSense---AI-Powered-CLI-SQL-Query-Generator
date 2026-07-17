@@ -127,6 +127,12 @@ _TABLE_JSON_FORMAT = {
             "items": {"type": "string"},
             "maxItems": 1,
         },
+        "b": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 4,
+        },
+        "tr": {"type": "string"},
     },
     "required": ["d", "p", "q"],
 }
@@ -543,16 +549,45 @@ def _sanitize_column_description(text: str, column: dict, semantic_type: str) ->
     return cleaned
 
 
-def _sanitize_business_terms(terms: list[str], column: dict, semantic_type: str) -> list[str]:
+def _semantic_terms_from_text(*values: str) -> list[str]:
+    stopwords = _SAMPLE_STOPWORDS | {
+        "record", "records", "table", "field", "column", "detail", "details",
+        "data", "store", "stores", "stored", "linked", "used",
+    }
+    terms: list[str] = []
+    for value in values:
+        tokens = [
+            token
+            for token in _identifier_tokens(value)
+            if token not in stopwords and len(token) > 1
+        ]
+        if not tokens:
+            continue
+        phrase = " ".join(tokens[:3])
+        terms.extend([phrase, *tokens])
+    return list(dict.fromkeys(term for term in terms if term))[:4]
+
+
+def _sanitize_business_terms(
+    terms: list[str],
+    column: dict,
+    semantic_type: str,
+    *,
+    description: str = "",
+) -> list[str]:
     table_data = column.get("_table_context", {})
-    context_tokens = _column_context_tokens(column, semantic_type)
+    context_tokens = _column_context_tokens(column, semantic_type) | _tokenize_text(description) | _tokenize_text(semantic_type)
     sample_texts = {
         _normalize_free_text(value)
         for value in column_sample_values(column)
         if _normalize_free_text(value)
     }
     clean_terms: list[str] = []
-    for term in terms[:2]:
+    trusted_description_for_terms = bool(description and not description.lower().startswith("description for "))
+    candidate_terms = list(terms[:2])
+    if trusted_description_for_terms:
+        candidate_terms.extend(_semantic_terms_from_text(description))
+    for term in candidate_terms:
         cleaned = sanitize_short_text(term)
         if not cleaned or _looks_like_literal_value(cleaned):
             continue
@@ -560,7 +595,8 @@ def _sanitize_business_terms(terms: list[str], column: dict, semantic_type: str)
             continue
         if _looks_like_technical_phrase(cleaned):
             continue
-        if not (_tokenize_text(cleaned) & context_tokens):
+        term_tokens = _tokenize_text(cleaned)
+        if not (term_tokens & context_tokens) and not trusted_description_for_terms:
             continue
         if len(cleaned.split()) > 4:
             continue
@@ -570,6 +606,29 @@ def _sanitize_business_terms(terms: list[str], column: dict, semantic_type: str)
     if clean_terms:
         return clean_terms
     return _fallback_business_terms(str(column.get("name", "")), semantic_type, table_data)
+
+
+def _sanitize_table_terms(enrichment: dict, table_description: str, business_purpose: str) -> list[str]:
+    raw_terms = list(enrichment.get("business_terms", []) or [])
+    raw_terms.extend(_semantic_terms_from_text(table_description, business_purpose))
+    terms: list[str] = []
+    for term in raw_terms:
+        cleaned = sanitize_short_text(term)
+        if not cleaned or _looks_like_literal_value(cleaned) or _looks_like_technical_phrase(cleaned):
+            continue
+        tokens = _tokenize_text(cleaned)
+        if tokens and all(len(token) <= 3 for token in tokens):
+            continue
+        if not (_tokenize_text(cleaned) - {
+            "record", "records", "table", "field", "column", "detail", "details",
+            "data", "store", "stores", "stored", "linked", "used",
+        }):
+            continue
+        if len(cleaned.split()) > 4:
+            continue
+        if cleaned not in terms:
+            terms.append(cleaned)
+    return terms[:6]
 
 
 def _sanitize_reason(text: str, fallback: str, column: dict) -> str:
@@ -592,9 +651,11 @@ def _table_summary_prompt(table_name: str, table_data: dict) -> str:
     """Build a compact table-only prompt."""
     lines = [
         f"Table: {table_name}",
-        "Return JSON only using keys d, p, q.",
+        "Return JSON only using keys d, p, q, b, tr.",
         "Describe schema meaning only, not literal sample values.",
         "Do not copy names, labels, cities, dates, amounts, or codes from rows.",
+        "b must contain 2-4 natural user search terms or common synonyms, not raw identifiers.",
+        "Prefer business nouns users would type over abbreviations from table or column names.",
         "If unsure, keep descriptions neutral and generic.",
         "Only add q when confidence is high; otherwise return an empty list.",
         "Keep every description under 10 words.",
@@ -607,7 +668,7 @@ def _table_summary_prompt(table_name: str, table_data: dict) -> str:
     return (
         "\n".join(lines)
         + "\n\nReturn JSON in exactly this shape:\n"
-        + '{"d":"...","p":"...","q":["..."]}'
+        + '{"d":"...","p":"...","q":["..."],"b":["..."],"tr":"..."}'
     )
 
 
@@ -742,7 +803,7 @@ def _column_batch_prompt(table_name: str, table_data: dict, columns: list[dict])
     return (
         "\n".join(lines)
         + "\n\nReturn JSON in exactly this shape:\n"
-        + '{"c":{"column_name":{"d":"...","b":["..."],"s":"quantity","cf":0.84,"r":"sample values and nearby columns indicate units","me":true,"di":false,"dt":false,"pr":{"measure_candidate":true,"dimension_candidate":false,"filter_candidate":false,"join_candidate":false,"date_candidate":false,"sort_candidate":true}}}}\n'
+        + '{"c":{"column_name":{"d":"...","b":["..."],"s":"money","cf":0.84,"r":"schema evidence supports this meaning","me":true,"di":false,"dt":false,"pr":{"measure_candidate":true,"dimension_candidate":false,"filter_candidate":false,"join_candidate":false,"date_candidate":false,"sort_candidate":true}}}}\n'
         + "Only include columns from this table."
     )
 
@@ -755,14 +816,21 @@ def _parse_table_summary(response: str) -> dict:
         raise _AIEnrichmentResponseError("Invalid enrichment structure: table response has invalid value types")
     if any(not isinstance(item, str) for item in data["q"]):
         raise _AIEnrichmentResponseError("Invalid enrichment structure: q must contain strings")
+    raw_terms = data.get("b", data.get("business_terms", data.get("synonyms", []))) or []
+    if not isinstance(raw_terms, list):
+        raw_terms = [raw_terms]
+    if any(not isinstance(item, str) for item in raw_terms):
+        raise _AIEnrichmentResponseError("Invalid enrichment structure: b must contain strings")
     if "cf" in data and (isinstance(data["cf"], bool) or not isinstance(data["cf"], (int, float))):
         raise _AIEnrichmentResponseError("Invalid enrichment structure: cf must be numeric")
     return {
         "table_description": data["d"].strip(),
         "business_description": data["d"].strip(),
         "business_purpose": data["p"].strip(),
-        "confidence": float(data.get("cf", 0.0) or 0.0),
-        "reason": str(data.get("r", "")).strip(),
+        "table_role": str(data.get("tr", data.get("table_role", ""))).strip(),
+        "business_terms": [item.strip() for item in raw_terms if item.strip()][:4],
+        "confidence": float(data.get("cf", 0.75) or 0.75),
+        "reason": str(data.get("r", data.get("reason", "AI semantic summary accepted after validation."))).strip(),
         "possible_business_questions": [item.strip() for item in data["q"] if item.strip()][:1],
     }
 
@@ -862,6 +930,10 @@ def _apply_table_enrichment(table_name: str, table_data: dict, enrichment: dict)
     if table_data["business_purpose"] == fallback_purpose:
         logger.info(f"AI business purpose for '{table_name}' was invalid; using rule-based fallback.")
 
+    table_terms = _sanitize_table_terms(enrichment, table_description, table_data["business_purpose"])
+    table_data["business_terms"] = table_terms
+    if enrichment.get("table_role"):
+        table_data["table_role"] = sanitize_short_text(enrichment.get("table_role", ""), fallback="")
     table_data["possible_business_questions"] = _sanitize_business_questions(
         enrichment.get("possible_business_questions", []),
         table_name,
@@ -871,9 +943,11 @@ def _apply_table_enrichment(table_name: str, table_data: dict, enrichment: dict)
     table_data["ai_metadata"] = {
         "table_description": table_description,
         "business_purpose": table_data["business_purpose"],
+        "table_role": table_data.get("table_role", ""),
+        "business_terms": list(table_terms),
         "possible_business_questions": list(table_data["possible_business_questions"]),
         "confidence": min(max(float(enrichment.get("confidence", 0.0) or 0.0), 0.0), 1.0),
-        "reason": sanitize_short_text(enrichment.get("reason", ""), fallback=""),
+        "reason": sanitize_short_text(enrichment.get("reason", ""), fallback="AI semantic summary accepted after validation."),
         "accepted": bool(table_description or table_data["business_purpose"]),
     }
 
@@ -902,6 +976,13 @@ def _finalize_candidate_semantic_type(column: dict, col_info: dict, semantic_typ
 
     if semantic_type == "name" and {"reason", "description", "comment", "note", "text", "message"} & tokens:
         return "text"
+    if (
+        semantic_type == "quantity"
+        and any(token in column_type for token in ("decimal", "numeric", "float", "double", "real"))
+        and {"amount", "value", "money", "price", "cost", "total", "net", "gross", "payment", "receipt"} & tokens
+        and not {"unit", "units", "qty", "quantity", "count", "volume"} & tokens
+    ):
+        return "money"
     if semantic_type not in _CANDIDATE_TYPES | {"general"}:
         return semantic_type
 
@@ -942,6 +1023,7 @@ def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
         col["_table_context"] = table_data
         col_info = col_map[col_name]
         core_semantic_type = column_core_semantic_type(col)
+        ai_confidence = min(max(float(col_info.get("confidence", 0.0) or 0.0), 0.0), 1.0)
         semantic_type = _normalize_ai_semantic_type(col_info.get("semantic_type", core_semantic_type), core_semantic_type)
         semantic_type = _finalize_candidate_semantic_type(col, col_info, semantic_type)
         planner_roles = dict(col_info.get("planner_roles", {})) if isinstance(col_info.get("planner_roles", {}), dict) else {}
@@ -955,9 +1037,14 @@ def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
                 "sort_candidate": bool(col_info.get("is_measure", False) or col_info.get("is_dimension", False) or col_info.get("is_date", False)),
             }
         col["business_description"] = _sanitize_column_description(col_info.get("business_description", ""), col, semantic_type)
-        col["business_terms"] = _sanitize_business_terms(list(col_info.get("business_terms", [])), col, semantic_type)
+        col["business_terms"] = _sanitize_business_terms(
+            list(col_info.get("business_terms", [])),
+            col,
+            semantic_type,
+            description=col["business_description"],
+        )
         col["semantic_type"] = core_semantic_type if core_semantic_type in CORE_SEMANTIC_TYPES else "unknown"
-        col["confidence"] = max(float(col.get("confidence", 0.0) or 0.0), min(max(float(col_info.get("confidence", 0.0) or 0.0), 0.0), 1.0))
+        col["confidence"] = max(float(col.get("confidence", 0.0) or 0.0), ai_confidence)
         col["reason"] = _sanitize_reason(col_info.get("reason", ""), str(col.get("reason", "")), col)
         col["metric_type"] = semantic_type if semantic_type in {"money", "quantity", "percentage"} else "general"
         col["is_measure"] = semantic_type in {"money", "quantity", "percentage"} and bool(col_info.get("is_measure", False))
@@ -966,11 +1053,11 @@ def _apply_column_enrichment(table_data: dict, col_map: dict) -> None:
         col["planner_roles"] = planner_roles
         col["ai_metadata"] = {
             "ai_semantic_type": semantic_type,
-            "confidence": min(max(float(col_info.get("confidence", 0.0) or 0.0), 0.0), 1.0),
+            "confidence": ai_confidence,
             "reason": col["reason"],
             "business_description": col["business_description"],
             "business_terms": list(col["business_terms"]),
-            "accepted": bool(semantic_type and semantic_type != core_semantic_type),
+            "accepted": bool(ai_confidence > 0 and col["reason"] and semantic_type and semantic_type != core_semantic_type),
             "planner_roles": dict(planner_roles),
             "is_measure": bool(col["is_measure"]),
             "is_dimension": bool(col["is_dimension"]),
