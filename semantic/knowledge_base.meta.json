@@ -2,9 +2,9 @@
     "db_engine": "mysql",
     "db_host": "localhost",
     "db_port": "3306",
-    "db_name": "sqlsense_ai_semantic_lab",
+    "db_name": "sqlsense_full_small_lab",
     "database_type": "mysql",
-    "database_name": "sqlsense_ai_semantic_lab",
-    "schema_hash": "e1aeec2f2eefc51d869bd5673de5f0eaf188390d26d9ddfa445e529aea8a6660",
-    "schema_fingerprint": "e1aeec2f2eefc51d869bd5673de5f0eaf188390d26d9ddfa445e529aea8a6660"
+    "database_name": "sqlsense_full_small_lab",
+    "schema_hash": "6e9abbf0965210195466362e81247e6bcea3db9e949b4d0e6f5a43a513210ef7",
+    "schema_fingerprint": "6e9abbf0965210195466362e81247e6bcea3db9e949b4d0e6f5a43a513210ef7"
 }

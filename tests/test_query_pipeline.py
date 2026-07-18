@@ -1,7 +1,13 @@
 import importlib
 from pathlib import Path
 
-from query_pipeline.query_pipeline import QueryPipeline
+from query_pipeline.query_pipeline import (
+    PIPELINE_RESULT_CONTRACT_VERSION,
+    PLANNER_INPUT_CONTRACT_VERSION,
+    QueryPipeline,
+    RETRIEVAL_CONTRACT_VERSION,
+    cached_retrieve_context,
+)
 from core.question_service import QuestionService
 from query_pipeline.query_planner import build_query_context
 
@@ -201,6 +207,64 @@ def test_query_pipeline_reports_cannot_plan_safely_without_calling_question_serv
     assert result.route == "cannot_plan_safely"
     assert result.route_reason == "table evidence is missing or ambiguous"
     assert result.query_shape == "unknown"
+
+
+def test_query_pipeline_accepts_retrieval_provider_without_monkeypatch(monkeypatch):
+    built_intent = {"intent_type": "list", "requested_dimensions": ["accounts"]}
+    retrieved_context = {"retrieval_sources": ["fake_provider"]}
+    preview_context = {
+        "plan": {"question": "show accounts", "intent": "list"},
+        "route_recommendation": "cannot_plan_safely",
+        "query_shape": "unknown",
+        "route_reason": "fake provider reached planner",
+        "can_plan": False,
+    }
+    calls = {}
+
+    def fake_retrieval_provider(**kwargs):
+        calls.update(kwargs)
+        return retrieved_context
+
+    pipeline = QueryPipeline(_FailingQuestionService(), retrieval_provider=fake_retrieval_provider)
+    monkeypatch.setattr("query_pipeline.query_pipeline.build_intent", lambda *args, **kwargs: built_intent)
+    monkeypatch.setattr("query_pipeline.query_pipeline.build_query_context", lambda *args, **kwargs: preview_context)
+
+    result = pipeline.run("show accounts", KNOWLEDGE_BASE, business_glossary={})
+
+    assert result.retrieved_context == retrieved_context
+    assert result.route == "cannot_plan_safely"
+    assert calls["normalized_question"] == "show accounts"
+    assert calls["knowledge_base"] == KNOWLEDGE_BASE
+    assert result.retrieval_contract_version == RETRIEVAL_CONTRACT_VERSION
+    assert result.planner_input_contract_version == PLANNER_INPUT_CONTRACT_VERSION
+    assert result.pipeline_result_contract_version == PIPELINE_RESULT_CONTRACT_VERSION
+    assert result.to_pipeline_context()["retrieval_contract_version"] == RETRIEVAL_CONTRACT_VERSION
+
+
+def test_cached_retrieve_context_wrapper_delegates_to_official_boundary(monkeypatch):
+    expected = {"retrieval_sources": ["wrapper"]}
+    calls = {}
+
+    def fake_retrieve_context(**kwargs):
+        calls.update(kwargs)
+        return expected
+
+    monkeypatch.setattr("query_pipeline.query_pipeline.retrieve_context", fake_retrieve_context)
+
+    actual = cached_retrieve_context(
+        cache_store=None,
+        database_identity=None,
+        normalized_question="show accounts",
+        intent={"intent_type": "list"},
+        knowledge_base=KNOWLEDGE_BASE,
+        business_glossary={},
+        vector_retriever=None,
+        require_normalized_vector_evidence=True,
+    )
+
+    assert actual == expected
+    assert calls["normalized_question"] == "show accounts"
+    assert calls["require_normalized_vector_evidence"] is True
 
 
 def test_query_pipeline_debug_reraises_planner_exception(monkeypatch):

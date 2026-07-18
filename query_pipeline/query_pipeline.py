@@ -20,10 +20,48 @@ from typing import Any, Dict, Optional
 from query_pipeline.intent_builder import build_intent
 from query_pipeline.planner.phase9c_cache import (
     cached_planner_evidence_summary,
-    cached_retrieve_context,
+    cached_retrieve_context as _cached_retrieve_context,
 )
 from query_pipeline.query_planner import build_query_context
 from query_pipeline.question_normalizer import normalize_question
+
+
+RETRIEVAL_CONTRACT_VERSION = "phase3c-retrieval-v1"
+PLANNER_INPUT_CONTRACT_VERSION = "phase3c-planner-input-v1"
+PIPELINE_RESULT_CONTRACT_VERSION = "phase3c-pipeline-result-v1"
+
+
+def retrieve_context(
+    *,
+    cache_store: Any | None,
+    database_identity: dict[str, Any] | None,
+    normalized_question: str,
+    intent: dict[str, Any],
+    knowledge_base: dict[str, Any],
+    business_glossary: dict[str, Any] | None,
+    vector_retriever: Any | None,
+    require_normalized_vector_evidence: bool,
+) -> dict[str, Any]:
+    """Official retrieval boundary for QueryPipeline callers and tests.
+
+    Caching is an implementation detail of the retrieval boundary. Callers get
+    the same evidence contract for cache hit, miss, disabled, or fallback.
+    """
+    return _cached_retrieve_context(
+        cache_store=cache_store,
+        database_identity=database_identity,
+        normalized_question=normalized_question,
+        intent=intent,
+        knowledge_base=knowledge_base,
+        business_glossary=business_glossary,
+        vector_retriever=vector_retriever,
+        require_normalized_vector_evidence=require_normalized_vector_evidence,
+    )
+
+
+def cached_retrieve_context(**kwargs: Any) -> dict[str, Any]:
+    """Compatibility wrapper; use retrieve_context for new callers."""
+    return retrieve_context(**kwargs)
 
 
 @dataclass
@@ -50,6 +88,9 @@ class QueryPipelineResult:
     clause_plan: Dict[str, Any]
     route_reason: str
     can_plan: bool
+    retrieval_contract_version: str
+    planner_input_contract_version: str
+    pipeline_result_contract_version: str
 
     def to_process_tuple(self) -> tuple[bool, str, Optional[str], Optional[str]]:
         """Return a legacy-compatible tuple without performing SQL generation."""
@@ -69,6 +110,9 @@ class QueryPipelineResult:
             "complex_sql_plan": dict(self.complex_sql_plan or {}),
             "formula_evidence": list(self.formula_evidence or []),
             "evidence_sources": list(self.evidence_sources or []),
+            "retrieval_contract_version": self.retrieval_contract_version,
+            "planner_input_contract_version": self.planner_input_contract_version,
+            "pipeline_result_contract_version": self.pipeline_result_contract_version,
         }
 
     def to_dict(self) -> Dict[str, Any]:
@@ -79,9 +123,10 @@ class QueryPipelineResult:
 class QueryPipeline:
     """Stage-oriented planning wrapper that returns deterministic planner output."""
 
-    def __init__(self, question_service: Any | None = None):
+    def __init__(self, question_service: Any | None = None, retrieval_provider: Any | None = None):
         # Retained for backward compatibility with existing constructors.
         self.question_service = question_service
+        self.retrieval_provider = retrieval_provider
 
     def run(
         self,
@@ -99,7 +144,8 @@ class QueryPipeline:
 
         normalized_question, _ = normalize_question(question)
         intent = build_intent(normalized_question, today=_fixed_today_from_env())
-        retrieved_context = cached_retrieve_context(
+        retrieval_provider = self.retrieval_provider or retrieve_context
+        retrieved_context = retrieval_provider(
             cache_store=cache_store,
             database_identity=cache_database_identity,
             normalized_question=normalized_question,
@@ -161,6 +207,9 @@ class QueryPipeline:
             clause_plan=dict(query_context.get("clause_plan") or {}),
             route_reason=route_reason,
             can_plan=can_plan,
+            retrieval_contract_version=RETRIEVAL_CONTRACT_VERSION,
+            planner_input_contract_version=PLANNER_INPUT_CONTRACT_VERSION,
+            pipeline_result_contract_version=PIPELINE_RESULT_CONTRACT_VERSION,
         )
 
     def _build_context_preview(
