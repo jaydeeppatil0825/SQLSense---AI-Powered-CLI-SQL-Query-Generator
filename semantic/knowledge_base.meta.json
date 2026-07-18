@@ -2,9 +2,9 @@
     "db_engine": "mysql",
     "db_host": "localhost",
     "db_port": "3306",
-    "db_name": "sqlsense_full_small_lab",
+    "db_name": "sqlsense_real_business_lab",
     "database_type": "mysql",
-    "database_name": "sqlsense_full_small_lab",
-    "schema_hash": "6e9abbf0965210195466362e81247e6bcea3db9e949b4d0e6f5a43a513210ef7",
-    "schema_fingerprint": "6e9abbf0965210195466362e81247e6bcea3db9e949b4d0e6f5a43a513210ef7"
+    "database_name": "sqlsense_real_business_lab",
+    "schema_hash": "471e091db32380f048a6026c4bd8dbac51b92ae6277c94eaacdc7c9351d65922",
+    "schema_fingerprint": "471e091db32380f048a6026c4bd8dbac51b92ae6277c94eaacdc7c9351d65922"
 }

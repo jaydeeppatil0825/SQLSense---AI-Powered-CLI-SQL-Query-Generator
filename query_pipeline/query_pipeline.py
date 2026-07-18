@@ -17,6 +17,7 @@ from datetime import date
 import os
 from typing import Any, Dict, Optional
 
+from infrastructure.observability.events import event as observe_event, timed_stage
 from query_pipeline.intent_builder import build_intent
 from query_pipeline.planner.phase9c_cache import (
     cached_planner_evidence_summary,
@@ -142,29 +143,39 @@ class QueryPipeline:
         # Query pipeline must not call AI or SQL runtime orchestration.
         del ai_backend
 
-        normalized_question, _ = normalize_question(question)
-        intent = build_intent(normalized_question, today=_fixed_today_from_env())
+        with timed_stage("question_normalized", component="query_pipeline", stage="question.normalize", span_name="question.normalize"):
+            normalized_question, _ = normalize_question(question)
+        with timed_stage("intent_completed", component="query_pipeline", stage="intent.build", span_name="intent.build") as obs:
+            intent = build_intent(normalized_question, today=_fixed_today_from_env())
+            obs["intent_type"] = str(intent.get("intent_type") or "")
+            obs["query_shape"] = str(intent.get("query_shape") or intent.get("intent_shape") or "")
         retrieval_provider = self.retrieval_provider or retrieve_context
-        retrieved_context = retrieval_provider(
-            cache_store=cache_store,
-            database_identity=cache_database_identity,
-            normalized_question=normalized_question,
-            intent=intent,
-            knowledge_base=knowledge_base,
-            business_glossary=business_glossary,
-            vector_retriever=vector_retriever,
-            require_normalized_vector_evidence=True,
-        )
-        query_context = self._build_context_preview(
-            normalized_question,
-            knowledge_base,
-            intent=intent,
-            retrieved_context=retrieved_context,
-            business_glossary=business_glossary,
-            vector_retriever=vector_retriever,
-            cache_store=cache_store,
-            cache_database_identity=cache_database_identity,
-        )
+        with timed_stage("retrieval_completed", component="query_pipeline", stage="context.retrieve", span_name="context.retrieve") as obs:
+            retrieved_context = retrieval_provider(
+                cache_store=cache_store,
+                database_identity=cache_database_identity,
+                normalized_question=normalized_question,
+                intent=intent,
+                knowledge_base=knowledge_base,
+                business_glossary=business_glossary,
+                vector_retriever=vector_retriever,
+                require_normalized_vector_evidence=True,
+            )
+            obs["table_candidate_count"] = len(retrieved_context.get("matched_tables") or [])
+            obs["column_candidate_count"] = len(retrieved_context.get("matched_columns") or [])
+        with timed_stage("planner_completed", component="query_pipeline", stage="planner.plan", span_name="planner.plan") as obs:
+            query_context = self._build_context_preview(
+                normalized_question,
+                knowledge_base,
+                intent=intent,
+                retrieved_context=retrieved_context,
+                business_glossary=business_glossary,
+                vector_retriever=vector_retriever,
+                cache_store=cache_store,
+                cache_database_identity=cache_database_identity,
+            )
+            obs["route"] = str(query_context.get("route_recommendation") or "")
+            obs["query_shape"] = str(query_context.get("query_shape") or "")
         cached_planner_evidence_summary(
             cache_store=cache_store,
             database_identity=cache_database_identity,
@@ -183,6 +194,15 @@ class QueryPipeline:
         query_shape = str(query_context.get("query_shape") or "unknown").strip()
         can_plan = bool(query_context.get("can_plan"))
         success = route_recommendation == "deterministic_sql_required"
+        observe_event(
+            "planner_completed" if success else "planner_failed_closed",
+            component="query_pipeline",
+            stage="planner.route",
+            status="success" if success else "blocked",
+            reason_code=route_reason,
+            route=route_recommendation,
+            query_shape=query_shape,
+        )
         message = self._pipeline_message(route_recommendation, route_reason)
         error = None if success else message
 

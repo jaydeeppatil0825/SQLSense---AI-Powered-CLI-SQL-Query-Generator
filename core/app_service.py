@@ -10,6 +10,7 @@ from copy import deepcopy
 from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.engine import Engine
 
+from infrastructure.observability.events import event as observe_event, timed_stage
 from kb_pipeline.database_service import DatabaseService
 from query_pipeline.query_pipeline import QueryPipeline
 from sql_pipeline.question_service import QuestionService
@@ -113,12 +114,30 @@ class AppService:
     ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
         """Build knowledge base."""
         self.cache_service.clear()
-        success, message, knowledge_base = self.database_service.build_knowledge_base(
-            use_ai_enrichment=use_ai_enrichment,
-            ai_backend=ai_backend,
-            force_rebuild=force_rebuild,
-        )
+        with timed_stage(
+            "kb_build_completed",
+            component="kb_pipeline",
+            stage="kb.build",
+            span_name="kb.build",
+            ai_enrichment=bool(use_ai_enrichment),
+            force_rebuild=bool(force_rebuild),
+        ) as obs:
+            success, message, knowledge_base = self.database_service.build_knowledge_base(
+                use_ai_enrichment=use_ai_enrichment,
+                ai_backend=ai_backend,
+                force_rebuild=force_rebuild,
+            )
+            obs["status"] = "success" if success else "failed"
+            obs["table_count"] = len(knowledge_base or {})
         self.database_ready = bool(success and knowledge_base)
+        observe_event(
+            "kb_build_completed" if success else "kb_build_failed",
+            component="kb_pipeline",
+            stage="kb.build",
+            status="success" if success else "failed",
+            reason_code="" if success else str(message),
+            table_count=len(knowledge_base or {}),
+        )
         return success, message, knowledge_base
 
     def connect_database_and_prepare(
@@ -319,15 +338,20 @@ class AppService:
         vector_retriever = self.database_service.get_vector_retriever()
         backend = ai_backend or self.ai_backend_service.get_active_backend()
         
-        pipeline_result = self.query_pipeline.run(
-            question=question,
-            knowledge_base=knowledge_base,
-            business_glossary=business_glossary,
-            vector_retriever=vector_retriever,
-            ai_backend=backend,
-            cache_store=self.cache_service,
-            cache_database_identity=self.database_service._connected_database_identity(),
-        )
+        with timed_stage("request_planned", component="app_service", stage="question.plan", span_name="sqlsense.question") as obs:
+            pipeline_result = self.query_pipeline.run(
+                question=question,
+                knowledge_base=knowledge_base,
+                business_glossary=business_glossary,
+                vector_retriever=vector_retriever,
+                ai_backend=backend,
+                cache_store=self.cache_service,
+                cache_database_identity=self.database_service._connected_database_identity(),
+            )
+            if hasattr(pipeline_result, "to_dict"):
+                payload_for_obs = pipeline_result.to_dict()
+                obs["route"] = str(payload_for_obs.get("route") or payload_for_obs.get("route_recommendation") or "")
+                obs["query_shape"] = str(payload_for_obs.get("query_shape") or "")
         self.last_pipeline_result = pipeline_result
 
         query_context: Dict[str, Any] = {}
@@ -419,19 +443,38 @@ class AppService:
         )
         query_context = _safe_dict(self.question_service.get_last_query_context() or query_context)
         route = route or str(query_context.get("route_used") or query_context.get("route") or "")
+        observe_event(
+            "sql_generated" if generated_sql else "planner_failed_closed",
+            component="sql_pipeline",
+            stage="sql.generate",
+            status="success" if generated_sql else "blocked",
+            reason_code=str(error or message or ""),
+            route=route,
+            query_shape=str(query_context.get("query_shape") or ""),
+        )
         if generated_sql:
             validation_kb = knowledge_base or query_context.get("selected_knowledge_base") or {}
             selected_join_path = query_context.get("selected_join_path")
-            if selected_join_path:
-                is_valid, reason = self.question_service.validate_sql(
-                    generated_sql,
-                    validation_kb,
-                    selected_join_path=selected_join_path,
-                    query_context=query_context,
-                )
-            else:
-                is_valid, reason = self.question_service.validate_sql(generated_sql, validation_kb)
+            with timed_stage("sql_validation_completed", component="sql_pipeline", stage="sql.validate", span_name="sql.validate") as obs:
+                if selected_join_path:
+                    is_valid, reason = self.question_service.validate_sql(
+                        generated_sql,
+                        validation_kb,
+                        selected_join_path=selected_join_path,
+                        query_context=query_context,
+                    )
+                else:
+                    is_valid, reason = self.question_service.validate_sql(generated_sql, validation_kb)
+                obs["status"] = "success" if is_valid else "rejected"
+                obs["reason_code"] = str(reason or "")
             validation_result = {"is_valid": is_valid, "reason": reason}
+            observe_event(
+                "sql_validation_passed" if is_valid else "sql_validation_rejected",
+                component="sql_pipeline",
+                stage="sql.validate",
+                status="success" if is_valid else "rejected",
+                reason_code=str(reason or ""),
+            )
         elif error or message:
             validation_result = {"is_valid": False, "reason": error or message}
 
@@ -505,21 +548,32 @@ class AppService:
         knowledge_base = self.database_service.get_knowledge_base()
         exact_stored_sql = sql == self.result_service.get_last_sql()
         
-        success, message, rows = self.result_service.execute_sql(
-            sql=sql,
-            engine=engine,
-            knowledge_base=knowledge_base,
-            revalidate=revalidate,
-            selected_join_path=(
-                self.result_service.get_last_selected_join_path()
-                if exact_stored_sql
-                else None
-            ),
-            query_context=(
-                self.result_service.get_last_query_context()
-                if exact_stored_sql
-                else None
-            ),
+        with timed_stage("execution_completed", component="sql_pipeline", stage="sql.execute", span_name="sql.execute") as obs:
+            success, message, rows = self.result_service.execute_sql(
+                sql=sql,
+                engine=engine,
+                knowledge_base=knowledge_base,
+                revalidate=revalidate,
+                selected_join_path=(
+                    self.result_service.get_last_selected_join_path()
+                    if exact_stored_sql
+                    else None
+                ),
+                query_context=(
+                    self.result_service.get_last_query_context()
+                    if exact_stored_sql
+                    else None
+                ),
+            )
+            obs["status"] = "success" if success else "failed"
+            obs["row_count"] = len(rows or [])
+        observe_event(
+            "execution_completed" if success else "execution_failed",
+            component="sql_pipeline",
+            stage="sql.execute",
+            status="success" if success else "failed",
+            reason_code="" if success else str(message),
+            row_count=len(rows or []),
         )
         
         return success, message, rows

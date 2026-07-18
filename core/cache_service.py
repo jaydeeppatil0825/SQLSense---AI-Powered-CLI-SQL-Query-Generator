@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Protocol
 
+from infrastructure.observability.metrics import safe_increment
+
 CACHE_CONTRACT_VERSION = "sqlsense-cache-v1"
 DEFAULT_CACHE_PREFIX = "sqlsense"
 DEFAULT_MEMORY_CACHE_MAX_ENTRIES = 256
@@ -163,9 +165,11 @@ class DisabledCacheStore:
         self.config = config or CacheConfig(backend="disabled", enabled=False)
 
     def get(self, key: CacheKey, *, artifact_version: str) -> CacheRead:
+        safe_increment("sqlsense_cache_reads_total", state=DISABLED, artifact_type=key.artifact_type)
         return CacheRead(DISABLED, reason="cache disabled")
 
     def set(self, key: CacheKey, *, artifact_version: str, value: Any) -> CacheWrite:
+        safe_increment("sqlsense_cache_writes_total", state=DISABLED, artifact_type=key.artifact_type)
         return CacheWrite(DISABLED, reason="cache disabled")
 
     def delete(self, key: CacheKey) -> None:
@@ -195,6 +199,7 @@ class MemoryCacheStore:
             if raw is None:
                 self._stats["misses"] += 1
                 _record_artifact_event(self._artifact_stats, key.artifact_type, "miss")
+                safe_increment("sqlsense_cache_reads_total", state=MISS, artifact_type=key.artifact_type)
                 return CacheRead(MISS)
             self._entries.move_to_end(key.key_hash)
         read = _decode_envelope(raw, key=key, artifact_version=artifact_version, config=self.config)
@@ -203,13 +208,16 @@ class MemoryCacheStore:
 
     def set(self, key: CacheKey, *, artifact_version: str, value: Any) -> CacheWrite:
         if _contains_sensitive_value(value):
+            safe_increment("sqlsense_cache_writes_total", state=INVALID, artifact_type=key.artifact_type)
             return CacheWrite(INVALID, reason="cache value contains sensitive data")
         try:
             raw = _encode_envelope(key=key, artifact_version=artifact_version, value=value, config=self.config)
             self._write_entry(key.key_hash, raw, key.artifact_type)
         except Exception as exc:
             self._stats["write_failures"] += 1
+            safe_increment("sqlsense_cache_writes_total", state=WRITE_FAILED, artifact_type=key.artifact_type)
             return CacheWrite(WRITE_FAILED, reason=str(exc))
+        safe_increment("sqlsense_cache_writes_total", state=STORED, artifact_type=key.artifact_type)
         return CacheWrite(STORED)
 
     def delete(self, key: CacheKey) -> None:
@@ -259,6 +267,7 @@ class MemoryCacheStore:
             self._stats["corrupt"] += 1
             _record_artifact_event(self._artifact_stats, key.artifact_type, "corrupt")
             self.delete(key)
+        safe_increment("sqlsense_cache_reads_total", state=read.state, artifact_type=key.artifact_type)
 
 
 class RedisCacheStore:
@@ -291,10 +300,12 @@ class RedisCacheStore:
         except Exception:
             self._stats["misses"] += 1
             _record_artifact_event(self._artifact_stats, key.artifact_type, "miss")
+            safe_increment("sqlsense_cache_reads_total", state=MISS, artifact_type=key.artifact_type)
             return CacheRead(MISS, reason="redis unavailable")
         if raw is None:
             self._stats["misses"] += 1
             _record_artifact_event(self._artifact_stats, key.artifact_type, "miss")
+            safe_increment("sqlsense_cache_reads_total", state=MISS, artifact_type=key.artifact_type)
             return CacheRead(MISS)
         read = _decode_envelope(raw, key=key, artifact_version=artifact_version, config=self.config)
         if read.state == CORRUPT:
@@ -304,15 +315,18 @@ class RedisCacheStore:
 
     def set(self, key: CacheKey, *, artifact_version: str, value: Any) -> CacheWrite:
         if _contains_sensitive_value(value):
+            safe_increment("sqlsense_cache_writes_total", state=INVALID, artifact_type=key.artifact_type)
             return CacheWrite(INVALID, reason="cache value contains sensitive data")
         try:
             raw = _encode_envelope(key=key, artifact_version=artifact_version, value=value, config=self.config)
             self.client.setex(self._redis_key(key), self.config.ttl_seconds, raw)
             self._stats["writes"] += 1
             _record_artifact_event(self._artifact_stats, key.artifact_type, "write")
+            safe_increment("sqlsense_cache_writes_total", state=STORED, artifact_type=key.artifact_type)
             return CacheWrite(STORED)
         except Exception as exc:
             self._stats["write_failures"] += 1
+            safe_increment("sqlsense_cache_writes_total", state=WRITE_FAILED, artifact_type=key.artifact_type)
             return CacheWrite(WRITE_FAILED, reason=exc.__class__.__name__)
 
     def delete(self, key: CacheKey) -> None:
@@ -366,6 +380,7 @@ class RedisCacheStore:
         elif read.state == CORRUPT:
             self._stats["corrupt"] += 1
             _record_artifact_event(self._artifact_stats, key.artifact_type, "corrupt")
+        safe_increment("sqlsense_cache_reads_total", state=read.state, artifact_type=key.artifact_type)
 
 
 def _encode_envelope(*, key: CacheKey, artifact_version: str, value: Any, config: CacheConfig) -> str:

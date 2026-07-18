@@ -21,6 +21,7 @@ except ImportError:  # pragma: no cover - pydantic v1 fallback
     ConfigDict = None
 
 from core.app_service import AppService
+from infrastructure.observability import bind_context, event as observe_event, new_context
 
 
 SESSION_COOKIE = "sqlsense_session"
@@ -396,6 +397,24 @@ def gateway(request_payload: GatewayRequest, request: Request, response: Respons
     request_id = uuid4().hex
     session_id, service = store.get(request, response)
     action = request_payload.action
+    context = new_context(
+        request_id=request_id,
+        session_id=session_id,
+        database_identity=service.database_service.get_db_config(),
+        schema_fingerprint=str(service.database_service.knowledge_base_metadata.get("schema_fingerprint", "") or ""),
+    )
+    with bind_context(context):
+        observe_event("request_received", component="api_gateway", stage="gateway", status="received", action=action)
+        return _gateway_with_context(request_id, session_id, service, action, request_payload)
+
+
+def _gateway_with_context(
+    request_id: str,
+    session_id: str,
+    service: AppService,
+    action: str,
+    request_payload: GatewayRequest,
+) -> dict[str, Any]:
     try:
         handler = HANDLERS.get(action)
         if handler is None:
@@ -404,6 +423,7 @@ def gateway(request_payload: GatewayRequest, request: Request, response: Respons
         if action == "query.ask":
             question = str(request_payload.payload.get("question", ""))
             store.add_history(session_id, _history_entry_from_success(request_id, question, data))
+        observe_event("request_completed", component="api_gateway", stage="gateway", status="success", action=action)
         return {
             "ok": True,
             "request_id": request_id,
@@ -412,6 +432,7 @@ def gateway(request_payload: GatewayRequest, request: Request, response: Respons
             "error": None,
         }
     except ValidationError as exc:
+        observe_event("request_rejected", component="api_gateway", stage="gateway", status="failed", reason_code="invalid_payload", action=action)
         return {
             "ok": False,
             "request_id": request_id,
@@ -423,6 +444,7 @@ def gateway(request_payload: GatewayRequest, request: Request, response: Respons
         if action == "query.ask":
             question = str(request_payload.payload.get("question", ""))
             store.add_history(session_id, _history_entry_from_error(request_id, question, exc))
+        observe_event("request_rejected", component="api_gateway", stage="gateway", status="failed", reason_code=exc.code, action=action)
         return {
             "ok": False,
             "request_id": request_id,
@@ -431,6 +453,7 @@ def gateway(request_payload: GatewayRequest, request: Request, response: Respons
             "error": _error(exc.code, exc.message, exc.details),
         }
     except Exception:
+        observe_event("request_failed", component="api_gateway", stage="gateway", status="failed", reason_code="internal_error", action=action)
         return {
             "ok": False,
             "request_id": request_id,
