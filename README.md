@@ -611,6 +611,11 @@ This is rejected before SQL execution.
 
 ## Architecture
 
+The authoritative package boundaries are documented in
+[`PIPELINE_ARCHITECTURE.md`](PIPELINE_ARCHITECTURE.md), with supported Python
+entry points and compatibility imports in
+[`ARCHITECTURE_CONTRACTS.md`](ARCHITECTURE_CONTRACTS.md).
+
 ### SQL Generation Strategy
 
 The tool uses a **deterministic approach** for SQL generation with a structured query pipeline contract:

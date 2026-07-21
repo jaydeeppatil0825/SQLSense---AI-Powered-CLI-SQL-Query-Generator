@@ -18,6 +18,7 @@ import os
 from typing import Any, Dict, Optional
 
 from infrastructure.observability.events import event as observe_event, timed_stage
+from infrastructure.contracts import PIPELINE_CONTRACTS
 from query_pipeline.intent_builder import build_intent
 from query_pipeline.planner.phase9c_cache import (
     cached_planner_evidence_summary,
@@ -27,9 +28,9 @@ from query_pipeline.query_planner import build_query_context
 from query_pipeline.question_normalizer import normalize_question
 
 
-RETRIEVAL_CONTRACT_VERSION = "phase3c-retrieval-v1"
-PLANNER_INPUT_CONTRACT_VERSION = "phase3c-planner-input-v1"
-PIPELINE_RESULT_CONTRACT_VERSION = "phase3c-pipeline-result-v1"
+RETRIEVAL_CONTRACT_VERSION = PIPELINE_CONTRACTS.retrieval
+PLANNER_INPUT_CONTRACT_VERSION = PIPELINE_CONTRACTS.planner_input
+PIPELINE_RESULT_CONTRACT_VERSION = PIPELINE_CONTRACTS.pipeline_result
 
 
 def retrieve_context(

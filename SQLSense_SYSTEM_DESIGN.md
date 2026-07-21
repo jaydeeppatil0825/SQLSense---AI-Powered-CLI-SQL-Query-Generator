@@ -1173,8 +1173,8 @@ A focused test run covering the API gateway, QueryPipeline, Phase 9A cache and o
 
 ### P0 — Correctness and safety
 
-1. **Missing root `main.py` source**  
-   The archive contains compiled `main.py` bytecode but not the source file. The CLI implementation cannot be fully reviewed, maintained or reliably packaged from this archive.
+1. **Resolved in SD-1: root `main.py` source restored**
+   The CLI source is versioned and packaged through the `sqlsense` project script.
 
 2. **Modified SQL is not categorically rejected at the AppService boundary**  
    Planner context is supplied only for exact stored SQL, but modified SQL may still undergo generic validation. Production execution should accept only an immutable planned query artifact.
@@ -1207,8 +1207,8 @@ A focused test run covering the API gateway, QueryPipeline, Phase 9A cache and o
 10. **Compatibility packages duplicate module names**  
     Active and legacy paths increase the chance of importing the wrong implementation.
 
-11. **No root dependency manifest was included**  
-    The archive does not include `pyproject.toml`, `requirements.txt`, or equivalent Python packaging metadata.
+11. **Resolved in SD-1: root dependency manifest added**
+    `pyproject.toml` defines pinned runtime and development dependencies; the existing requirements files remain compatible installation inputs.
 
 12. **Profiling is potentially expensive**  
     Full counts and distinct counts can be unsafe for large operational tables.
@@ -1233,6 +1233,9 @@ A focused test run covering the API gateway, QueryPipeline, Phase 9A cache and o
 - document all public contracts.
 
 **Do not change:** planner behavior, graph authority, SQL coverage or fail-closed rules.
+
+The active public boundaries and compatibility paths are documented in
+`ARCHITECTURE_CONTRACTS.md` and enforced by architecture import tests.
 
 ### Phase SD-2 — Execution artifact hardening
 

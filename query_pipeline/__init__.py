@@ -22,7 +22,7 @@ _MODULE_MAP = {
     "QueryPipeline": "query_pipeline.query_pipeline",
     "QueryPipelineResult": "query_pipeline.query_pipeline",
     "build_intent": "query_pipeline.intent_builder",
-    "retrieve_context": "query_pipeline.context_retriever",
+    "retrieve_context": "query_pipeline.query_pipeline",
     "build_query_context": "query_pipeline.query_planner",
     "normalize_question": "query_pipeline.question_normalizer",
     "is_too_ambiguous": "query_pipeline.question_normalizer",

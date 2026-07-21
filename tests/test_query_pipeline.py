@@ -1,6 +1,13 @@
 import importlib
+import inspect
 from pathlib import Path
 
+from infrastructure.contracts import (
+    ACTIVE_BOUNDARIES,
+    COMPATIBILITY_MODULES,
+    PIPELINE_CONTRACTS,
+    active_module_for,
+)
 from query_pipeline.query_pipeline import (
     PIPELINE_RESULT_CONTRACT_VERSION,
     PLANNER_INPUT_CONTRACT_VERSION,
@@ -291,6 +298,30 @@ def test_query_pipeline_debug_reraises_planner_exception(monkeypatch):
 
 def test_pipeline_architecture_document_exists():
     assert Path("PIPELINE_ARCHITECTURE.md").exists()
+
+
+def test_query_pipeline_contract_versions_come_from_architecture_registry():
+    assert RETRIEVAL_CONTRACT_VERSION == PIPELINE_CONTRACTS.retrieval
+    assert PLANNER_INPUT_CONTRACT_VERSION == PIPELINE_CONTRACTS.planner_input
+    assert PIPELINE_RESULT_CONTRACT_VERSION == PIPELINE_CONTRACTS.pipeline_result
+
+
+def test_query_pipeline_package_exports_official_retrieval_boundary():
+    package = importlib.import_module("query_pipeline")
+    official = importlib.import_module("query_pipeline.query_pipeline").retrieve_context
+
+    assert package.retrieve_context is official
+    assert "cache_store" in inspect.signature(package.retrieve_context).parameters
+
+
+def test_architecture_registry_tracks_active_and_compatibility_modules():
+    for module_name in ACTIVE_BOUNDARIES.values():
+        assert importlib.import_module(module_name)
+
+    for legacy_module, active_module in COMPATIBILITY_MODULES.items():
+        assert active_module_for(legacy_module) == active_module
+        assert importlib.import_module(legacy_module)
+        assert importlib.import_module(active_module)
 
 
 def test_primary_pipeline_modules_import_from_new_paths():

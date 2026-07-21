@@ -48,7 +48,7 @@ class AppService:
     def __init__(self):
         self.database_service = DatabaseService()
         self.question_service = QuestionService()
-        self.query_pipeline = QueryPipeline(self.question_service)
+        self.query_pipeline = QueryPipeline()
         self.last_pipeline_result = None
         self.result_service = ResultService()
         self.cache_service = build_cache_store()
@@ -433,7 +433,7 @@ class AppService:
                 query_context=query_context,
             )
 
-        success, message, generated_sql, error = self.question_service.process_question(
+        success, message, generated_sql, error = self.question_service.generate_from_pipeline(
             question=question,
             knowledge_base=knowledge_base,
             business_glossary=business_glossary,

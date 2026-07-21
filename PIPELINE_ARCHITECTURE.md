@@ -215,7 +215,7 @@ DatabaseService
 
 ### CLI
 
-The uploaded archive contains compiled `main.py` bytecode but does not include the root `main.py` source. CLI behavior therefore cannot be fully reviewed from source in this archive.
+`main.py` is the source-controlled CLI entry point and delegates application work to `core.app_service.AppService`.
 
 ---
 
@@ -232,4 +232,4 @@ The uploaded archive contains compiled `main.py` bytecode but does not include t
 - no runtime AI repair/retry;
 - stale KB/schema evidence fails closed.
 
-For the complete code-derived architecture, security model, deployment target and implementation roadmap, see `SYSTEM_DESIGN.md`.
+For the complete code-derived architecture, security model, deployment target and implementation roadmap, see `SQLSense_SYSTEM_DESIGN.md`. Public Python boundaries are listed in `ARCHITECTURE_CONTRACTS.md`.

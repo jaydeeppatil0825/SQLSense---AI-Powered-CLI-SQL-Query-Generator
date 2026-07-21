@@ -4,6 +4,15 @@ SQLSense test runs are split between supported deterministic suites and legacy
 diagnostics for removed architectures. Runtime SQL behavior should not be
 changed only to satisfy legacy expectations.
 
+Architecture and public-boundary checks:
+
+```powershell
+pytest tests/test_architecture_boundaries.py
+```
+
+These checks enforce the dependency direction and compatibility-module rules
+documented in `ARCHITECTURE_CONTRACTS.md`.
+
 ## Dependencies
 
 Install development test dependencies with:

@@ -1461,6 +1461,31 @@ class QuestionService:
     def __init__(self):
         self.conversation_memory = ConversationMemory() 
         self.last_query_context: dict[str, Any] | None = None
+
+    def generate_from_pipeline(
+        self,
+        *,
+        question: str,
+        knowledge_base: Dict[str, Any],
+        pipeline_context: Dict[str, Any],
+        business_glossary: Optional[Dict[str, Any]] = None,
+        vector_retriever: Optional[VectorRetriever] = None,
+        ai_backend: str = "local",
+    ) -> Tuple[bool, str, Optional[str], Optional[str]]:
+        """Generate SQL from the official QueryPipeline handoff."""
+        if not isinstance(pipeline_context, dict) or not isinstance(
+            pipeline_context.get("query_context"), dict
+        ):
+            self.last_query_context = None
+            return False, "Query pipeline returned an invalid handoff contract.", None, None
+        return self.process_question(
+            question=question,
+            knowledge_base=knowledge_base,
+            business_glossary=business_glossary,
+            vector_retriever=vector_retriever,
+            ai_backend=ai_backend,
+            pipeline_context=pipeline_context,
+        )
     
     def process_question(
         self,
@@ -1472,7 +1497,11 @@ class QuestionService:
         pipeline_context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         """
-        Process a natural language question and generate SQL.
+        Compatibility entry point that can plan and generate SQL.
+
+        Active runtime orchestration uses :meth:`generate_from_pipeline` so
+        planning remains owned by QueryPipeline. Direct planning is retained
+        here only for supported callers that have not migrated yet.
         
         Args:
             question: User's natural language question
