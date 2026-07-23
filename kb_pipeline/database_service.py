@@ -22,7 +22,6 @@ from kb_pipeline.schema_facts import column_business_terms
 from kb_pipeline.business_glossary import load_business_glossary, generate_business_glossary, save_business_glossary
 from kb_pipeline.ai_semantic_enricher import (
     enrich_knowledge_base_with_ai,
-    _describe_ai_enrichment_failure,
     get_last_enrichment_reason,
     get_last_enrichment_report,
 )
@@ -35,6 +34,7 @@ from kb_pipeline.vector.persistence import VectorIndexPersistence
 from kb_pipeline.vector.retriever import VectorRetriever
 from semantic_learning.candidate_store import FileCandidateStore
 from semantic_learning.promotion_policy import apply_promotion_policy, approved_aliases_for_schema
+from kb_pipeline.semantic_providers.provider_chain import build_default_provider_chain
 
 logger = get_logger()
 
@@ -62,6 +62,24 @@ def _generate_business_glossary(
             knowledge_base,
             use_ai_enrichment=use_ai_enrichment,
         )
+
+
+def _semantic_fallback_message(reason: str) -> str:
+    normalized = str(reason or "").strip()
+    lowered = normalized.lower()
+    if "ollama" in lowered and ("not running" in lowered or "connection" in lowered or "unreachable" in lowered):
+        return "Ollama is not running. Using rule-based enrichment."
+    if "nvidia" in lowered and "timeout" in lowered:
+        return "NVIDIA backend timed out. Using rule-based enrichment."
+    if "nvidia" in lowered and "empty response" in lowered:
+        return "NVIDIA backend returned an empty response. Using rule-based enrichment."
+    if "nvidia" in lowered and ("disabled" in lowered or "connected" in lowered or "unreachable" in lowered):
+        return "NVIDIA backend is not connected. Using rule-based enrichment."
+    if "timed out" in lowered or "timeout" in lowered:
+        return "Local AI timed out. Using rule-based fallback."
+    if normalized:
+        return f"{normalized}. Using rule-based fallback."
+    return "AI enrichment unavailable. Using rule-based fallback."
 
 
 class DatabaseService:
@@ -534,80 +552,45 @@ class DatabaseService:
         # AI semantic enrichment — failure must NEVER stop KB generation
         if use_ai_enrichment:
             try:
-                if ai_backend == "local":
-                    ollama_ok, _ = check_ollama_status()
-                    if not ollama_ok:
-                        self.last_ai_enrichment_status = "fallback"
-                        self.last_ai_enrichment_message = "Ollama is not running. Using rule-based enrichment."
-                        logger.info(self.last_ai_enrichment_message)
-                        enriched_kb = knowledge_base
-                    else:
-                        enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
-                elif ai_backend == "nvidia":
-                    backend_ok, backend_message = get_ai_backend_service().test_backend_connection("nvidia")
-                    if not backend_ok:
-                        self.last_ai_enrichment_status = "fallback"
-                        backend_message_lower = str(backend_message or "").lower()
-                        if "timed out" in backend_message_lower or "timeout" in backend_message_lower:
-                            self.last_ai_enrichment_message = "NVIDIA backend timed out. Using rule-based enrichment."
-                        elif "empty response" in backend_message_lower:
-                            self.last_ai_enrichment_message = "NVIDIA backend returned an empty response. Using rule-based enrichment."
-                        else:
-                            self.last_ai_enrichment_message = "NVIDIA backend is not connected. Using rule-based enrichment."
-                        logger.info(f"{self.last_ai_enrichment_message} Probe result: {backend_message}")
-                        enriched_kb = knowledge_base
-                    else:
-                        enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
-                else:
-                    enriched_kb = enrich_knowledge_base_with_ai(knowledge_base, backend=ai_backend)
-                
-                if enriched_kb is not knowledge_base:
-                    final_knowledge_base = enrich_knowledge_base_schema_facts(enriched_kb)
+                preferred_order = ai_backend if ai_backend == "nvidia" else None
+                chain = build_default_provider_chain(
+                    ai_enabled=True,
+                    provider_order=preferred_order,
+                    allow_cloud_provider=ai_backend == "nvidia",
+                    enrich_func=enrich_knowledge_base_with_ai,
+                    local_health_check=check_ollama_status,
+                    nvidia_health_check=lambda: get_ai_backend_service().test_backend_connection("nvidia"),
+                )
+                semantic_result = chain.map_schema_semantics(knowledge_base)
+                self.knowledge_base_metadata["semantic_enrichment"] = semantic_result.as_metadata()
+
+                if semantic_result.status == "enriched":
+                    final_knowledge_base = enrich_knowledge_base_schema_facts(semantic_result.knowledge_base)
                     enriched_tables, fallback_tables = get_last_enrichment_report()
-                    if fallback_tables:
-                        self.last_ai_enrichment_status = "partial"
-                        self.last_ai_enrichment_message = (
-                            f"AI enrichment completed for {len(enriched_tables)} table(s); "
-                            f"fallback used for {len(fallback_tables)} table(s)."
-                        )
-                    else:
-                        self.last_ai_enrichment_status = "completed"
-                        self.last_ai_enrichment_message = "AI enrichment completed successfully."
+                    self.last_ai_enrichment_status = "partial" if fallback_tables else "completed"
+                    self.last_ai_enrichment_message = (
+                        f"AI enrichment completed for {len(enriched_tables)} table(s); "
+                        f"fallback used for {len(fallback_tables)} table(s)."
+                        if fallback_tables
+                        else "AI enrichment completed successfully."
+                    )
                     try:
                         save_json(final_knowledge_base, KNOWLEDGE_BASE_PATH)
+                        self._save_knowledge_base_metadata_file(self.knowledge_base_metadata)
                         logger.info(f"Enriched knowledge base saved to {KNOWLEDGE_BASE_PATH}")
                     except Exception as e:
                         logger.error(f"Failed to save enriched knowledge base: {e}")
-                        # Fall back silently — rule-based KB is already saved
                         final_knowledge_base = knowledge_base
                         self.last_ai_enrichment_status = "fallback"
                         self.last_ai_enrichment_message = "Could not save enriched knowledge base. Using rule-based enrichment."
                 else:
-                    # enrich_knowledge_base_with_ai returned the original dict — enrichment failed
-                    if self.last_ai_enrichment_message not in {
-                        "Ollama is not running. Using rule-based enrichment.",
-                        "NVIDIA backend timed out. Using rule-based enrichment.",
-                        "NVIDIA backend returned an empty response. Using rule-based enrichment.",
-                        "NVIDIA backend is not connected. Using rule-based enrichment.",
-                    }:
-                        reason = get_last_enrichment_reason() or "AI enrichment returned no changes"
-                        self.last_ai_enrichment_status = "fallback"
-                        if "timed out" in reason.lower():
-                            self.last_ai_enrichment_message = "Local AI timed out. Using rule-based fallback."
-                        elif reason == "Ollama is not running":
-                            self.last_ai_enrichment_message = "Ollama is not running. Using rule-based enrichment."
-                        else:
-                            self.last_ai_enrichment_message = f"{reason}. Using rule-based fallback."
+                    self.last_ai_enrichment_status = "fallback"
+                    self.last_ai_enrichment_message = _semantic_fallback_message(semantic_result.reason)
+                    logger.info(self.last_ai_enrichment_message)
             except Exception as e:
                 # Catch everything so a timeout or network error never stops KB generation
-                reason = _describe_ai_enrichment_failure(e, ai_backend)
                 self.last_ai_enrichment_status = "fallback"
-                if reason == "Ollama is not running":
-                    self.last_ai_enrichment_message = "Ollama is not running. Using rule-based enrichment."
-                elif "timed out" in reason.lower():
-                    self.last_ai_enrichment_message = "Local AI timed out. Using rule-based fallback."
-                else:
-                    self.last_ai_enrichment_message = f"{reason}. Using rule-based fallback."
+                self.last_ai_enrichment_message = _semantic_fallback_message(str(e))
                 logger.info(self.last_ai_enrichment_message)
                 logger.debug("AI enrichment technical details", exc_info=True)
         
