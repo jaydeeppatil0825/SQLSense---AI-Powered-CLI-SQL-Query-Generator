@@ -13,6 +13,14 @@ def _sql_hash(sql: str) -> str:
     return hashlib.sha256(str(sql or "").encode("utf-8")).hexdigest()
 
 
+def _safe_item(value: Any) -> Any:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, tuple):
+        return list(value)
+    return value
+
+
 @dataclass(frozen=True)
 class SQLValidationViolation:
     code: str
@@ -72,10 +80,10 @@ class SQLValidationResult:
             "graph_fingerprint": self.graph_fingerprint,
             "validated_tables": list(self.validated_tables),
             "validated_columns": list(self.validated_columns),
-            "validated_joins": [dict(item) for item in self.validated_joins],
-            "validated_filters": [dict(item) for item in self.validated_filters],
-            "validated_grouping": [dict(item) for item in self.validated_grouping],
-            "validated_having": [dict(item) for item in self.validated_having],
+            "validated_joins": [_safe_item(item) for item in self.validated_joins],
+            "validated_filters": [_safe_item(item) for item in self.validated_filters],
+            "validated_grouping": [_safe_item(item) for item in self.validated_grouping],
+            "validated_having": [_safe_item(item) for item in self.validated_having],
             "validated_ordering": dict(self.validated_ordering),
             "validated_limit": self.validated_limit,
             "selected_join_path_verified": self.selected_join_path_verified,

@@ -13,8 +13,10 @@ from typing import Optional, List, Dict, Any
 from uuid import uuid4
 from sqlalchemy.engine import Engine
 
-from sql_pipeline.query_executor import execute_query
-from sql_pipeline.sql_validator import validate_sql
+from sql_pipeline.execution_artifact import build_validated_sql_artifact
+from sql_pipeline.query_executor import execute_query, execute_validated_artifact
+from sql_pipeline.query_plan import build_deterministic_query_plan
+from sql_pipeline.sql_validator import validate_sql, validate_sql_contract
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -39,6 +41,7 @@ class ResultService:
         self.last_selected_join_path: Optional[Dict[str, Any]] = None
         self.last_query_context: Optional[Dict[str, Any]] = None
         self.last_planned_query_artifact: Optional[Dict[str, Any]] = None
+        self.last_validated_sql_artifact: Optional[Dict[str, Any]] = None
 
     def create_planned_query_artifact(
         self,
@@ -93,6 +96,27 @@ class ResultService:
         if not isinstance(context, dict):
             return False, "planned query artifact context is invalid", None
         return True, "planned query artifact accepted", artifact
+
+    def create_validated_sql_artifact(
+        self,
+        *,
+        sql: str,
+        knowledge_base: Dict[str, Any],
+        query_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build and store the validator-backed execution artifact."""
+        context = query_context if isinstance(query_context, dict) else {}
+        plan = build_deterministic_query_plan(context)
+        validation = validate_sql_contract(
+            sql,
+            knowledge_base or {},
+            deterministic_query_plan=plan,
+            selected_join_path=context.get("selected_join_path"),
+            query_context=context,
+        )
+        artifact = build_validated_sql_artifact(sql, plan, validation).to_dict()
+        self.last_validated_sql_artifact = artifact if artifact.get("safe_for_execution") else None
+        return artifact
     
     def execute_sql(
         self,
@@ -115,6 +139,24 @@ class ResultService:
         Returns:
             (success, message, rows)
         """
+        artifact = self.last_validated_sql_artifact
+        if artifact:
+            if artifact.get("sql") != sql:
+                return False, "Validated SQL artifact rejected: SQL does not match approved artifact", None
+            artifact_result = execute_validated_artifact(
+                artifact,
+                engine,
+                options={"knowledge_base": knowledge_base or {}},
+            )
+            if not artifact_result.success:
+                return False, artifact_result.message, None
+            rows = artifact_result.rows
+            self.last_sql = sql
+            self.last_rows = rows
+            self.last_row_count = artifact_result.row_count
+            self.last_columns = list(rows[0].keys()) if rows else []
+            return True, artifact_result.message, rows
+
         # Revalidate SQL if requested
         if revalidate:
             is_valid, reason = validate_sql(sql)
@@ -159,6 +201,10 @@ class ResultService:
     def get_last_planned_query_artifact(self) -> Optional[Dict[str, Any]]:
         """Get execution artifact stored with the last generated SQL."""
         return self.last_planned_query_artifact
+
+    def get_last_validated_sql_artifact(self) -> Optional[Dict[str, Any]]:
+        """Get the validator-backed SQL execution artifact."""
+        return self.last_validated_sql_artifact
     
     def get_last_rows(self) -> Optional[List[Dict[str, Any]]]:
         """Get last query results."""
@@ -190,3 +236,4 @@ class ResultService:
         self.last_selected_join_path = None
         self.last_query_context = None
         self.last_planned_query_artifact = None
+        self.last_validated_sql_artifact = None

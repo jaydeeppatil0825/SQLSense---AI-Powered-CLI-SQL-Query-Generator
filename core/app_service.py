@@ -486,6 +486,11 @@ class AppService:
             self.result_service.last_selected_join_path = query_context.get("selected_join_path")
             self.result_service.last_query_context = deepcopy(query_context)
             metadata = dict(self.database_service.knowledge_base_metadata or {})
+            self.result_service.create_validated_sql_artifact(
+                sql=generated_sql,
+                knowledge_base=knowledge_base or {},
+                query_context=deepcopy(query_context),
+            )
             self.result_service.create_planned_query_artifact(
                 sql=generated_sql,
                 database_identity=self.database_service._connected_database_identity(),
