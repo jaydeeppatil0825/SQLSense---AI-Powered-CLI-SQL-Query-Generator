@@ -58,7 +58,37 @@ class FakeAppService:
         return self.ready
 
     def get_knowledge_base(self):
-        return {"orders": {}} if self.ready else None
+        if not self.ready:
+            return None
+        return {
+            "orders": {
+                "columns": [
+                    {"name": "order_id", "type": "int", "nullable": False, "is_primary_key": True},
+                    {"name": "customer_id", "type": "int", "nullable": False, "is_foreign_key": True},
+                    {
+                        "name": "order_date",
+                        "type": "date",
+                        "nullable": True,
+                        "planner_roles": {"date_eligible": True},
+                    },
+                    {
+                        "name": "total_amount",
+                        "type": "decimal",
+                        "nullable": False,
+                        "planner_roles": {"numeric_metric_eligible": True},
+                        "sample_values": [10, 20],
+                    },
+                ],
+                "primary_keys": ["order_id"],
+                "foreign_keys": [
+                    {
+                        "column": "customer_id",
+                        "referenced_table": "customers",
+                        "referenced_column": "customer_id",
+                    }
+                ],
+            }
+        }
 
     def get_vector_status(self):
         return {"index_status": "ready", "retriever": {"document_count": 3}, "chroma": {"ready": True}}
@@ -165,6 +195,7 @@ def test_health_without_database(client):
         "database.status",
         "knowledge.status",
         "knowledge.rebuild",
+        "schema.list",
         "query.last",
         "history.list",
         "history.clear",
@@ -307,6 +338,24 @@ def test_missing_database_and_kb_not_ready_state(client):
     knowledge = post(client, "knowledge.status")
     assert knowledge["ok"] is True
     assert knowledge["data"]["kb_status"] == "not_ready"
+
+
+def test_schema_list_returns_frontend_schema_contract(client):
+    post(client, "database.connect", {"username": "root", "password": "secret", "database": "demo"})
+
+    response = post(client, "schema.list")
+
+    assert response["ok"] is True
+    table = response["data"]["tables"][0]
+    assert table["name"] == "orders"
+    assert table["type"] == "table"
+    assert table["columnCount"] == 4
+    columns = {column["name"]: column for column in table["columns"]}
+    assert columns["order_id"]["primaryKey"] is True
+    assert columns["customer_id"]["foreignKey"] == {"table": "customers", "column": "customer_id"}
+    assert columns["order_date"]["plannerRole"] == "date"
+    assert columns["total_amount"]["plannerRole"] == "metric"
+    assert columns["total_amount"]["samples"] == ["10", "20"]
 
 
 def test_disconnect_and_session_reset_cleanup(client):

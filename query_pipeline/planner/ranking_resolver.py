@@ -5,27 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
-def _planner():
-    from query_pipeline import query_planner as _qp
-
-    return _qp
-
-
-def _normalize(text: str) -> str:
-    return _planner()._normalize(text)
-
-
-def _humanize(text: str) -> str:
-    return _planner()._humanize(text)
-
-
-def _tokenize(text: str) -> list[str]:
-    return _planner()._tokenize(text)
-
-
-def _merge_candidate_columns(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return _planner()._merge_candidate_columns(*groups)
+from query_pipeline.planner.query_predicates import _merge_candidate_columns
+from query_pipeline.planner.text_utils import _humanize, _normalize, _tokenize
 
 
 def _resolve_limit_for_contract(

@@ -11,6 +11,19 @@ from kb_pipeline.schema_facts import (
     column_sample_values,
     resolved_semantic_type,
 )
+from query_pipeline.planner.query_predicates import (
+    _extract_limit,
+    _merge_candidate_columns,
+    _resolve_join_table,
+    _table_phrase_score,
+)
+from query_pipeline.planner.role_resolver import _resolve_role_candidate
+from query_pipeline.planner.text_utils import (
+    _humanize,
+    _normalize,
+    _singularize_token,
+    _tokenize,
+)
 
 _LOCATION_FILTER_TOKENS = {"city", "country", "location", "region", "area", "province"}
 _STATUS_FILTER_TOKENS = {"status"}
@@ -29,28 +42,6 @@ _STATUS_VALUE_TOKENS = {
     "shipped",
     "refunded",
 }
-
-
-def _planner():
-    from query_pipeline import query_planner as _qp
-
-    return _qp
-
-
-def _normalize(text: str) -> str:
-    return _planner()._normalize(text)
-
-
-def _humanize(text: str) -> str:
-    return _planner()._humanize(text)
-
-
-def _singularize_token(token: str) -> str:
-    return _planner()._singularize_token(token)
-
-
-def _tokenize(text: str) -> list[str]:
-    return _planner()._tokenize(text)
 
 
 def _sample_value_matches(value: str, sample: Any) -> bool:
@@ -84,7 +75,7 @@ def _column_supports_sample_filter(column: dict[str, Any]) -> bool:
 def _detect_runtime_filters(question: str, candidate_tables: dict[str, Any]) -> list[dict[str, Any]]:
     normalized_question = _normalize(question)
     question_terms = set(_tokenize(question))
-    requested_limit = _planner()._extract_limit(question)
+    requested_limit = _extract_limit(question)
     filters: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
 
@@ -734,7 +725,7 @@ def _joined_aggregate_filter_contract(
                 selected.append(selected_clause)
                 continue
             return [], "joined WHERE field evidence is missing"
-        resolved, status = _planner()._resolve_role_candidate(
+        resolved, status = _resolve_role_candidate(
             field_phrase,
             filter_candidates,
             allowed_tables=allowed_tables,
@@ -952,7 +943,7 @@ def _source_scope_as_filter(
         table_tokens = {_singularize_token(token) for token in _tokenize(table_name)}
         if not table_tokens or not table_tokens <= phrase_tokens:
             continue
-        score = _planner()._table_phrase_score(source_phrase, table_name)
+        score = _table_phrase_score(source_phrase, table_name)
         if score > 0:
             owner_matches.append((score, table_name, table_tokens))
     owner_matches.sort(key=lambda item: (-item[0], item[1]))
@@ -1155,7 +1146,7 @@ def _apply_implicit_sample_filter_contract(
     if not phrase:
         return context
     if len(selected_table_names) != 1:
-        resolved_table, resolved_status = _planner()._resolve_join_table(phrase, knowledge_base, [])
+        resolved_table, resolved_status = _resolve_join_table(phrase, knowledge_base, [])
         if resolved_status != "resolved" or not resolved_table:
             return context
         selected_table_names = [resolved_table]
@@ -1214,11 +1205,11 @@ def _apply_implicit_sample_filter_contract(
             "selected_tables": narrowed_selected_tables,
             "selected_table_names": [selected_table],
             "selected_filters": planned_filters,
-            "filter_candidates": _planner()._merge_candidate_columns(
+            "filter_candidates": _merge_candidate_columns(
                 implicit_filters,
                 [entry for entry in (context.get("filter_candidates") or []) if isinstance(entry, dict)],
             ),
-            "selected_columns": _planner()._merge_candidate_columns(
+            "selected_columns": _merge_candidate_columns(
                 narrowed_selected_columns,
                 implicit_filters,
             ),

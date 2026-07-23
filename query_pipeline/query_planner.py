@@ -56,11 +56,6 @@ from query_pipeline.planner.having_resolver import _selected_having_for_contract
 from query_pipeline.planner.phase7_bfs_join_resolver import resolve_safe_multi_hop_path
 from query_pipeline.planner.phase9b_cache import cached_multi_hop_path
 from query_pipeline.planner.join_resolver import (
-    _DIMENSION_SEMANTIC_TYPES,
-    _GENERIC_ROLE_TERMS,
-    _NON_METRIC_SEMANTIC_TYPES,
-    _NUMERIC_METRIC_SEMANTIC_TYPES,
-    _SCORING_TIERS,
     _WEAK_CONTEXT_WARNING,
     _all_table_outputs,
     _apply_join_lookup_contract,
@@ -72,10 +67,29 @@ from query_pipeline.planner.join_resolver import (
     _joined_aggregate_failure_context,
     _qualified_output,
     _remove_weak_context_warning,
-    _required_join_predicates,
     _resolve_join_output_field,
+)
+from query_pipeline.planner.query_predicates import (
+    _DIMENSION_SEMANTIC_TYPES,
+    _GENERIC_ROLE_TERMS,
+    _NON_METRIC_SEMANTIC_TYPES,
+    _NUMERIC_METRIC_SEMANTIC_TYPES,
+    _SCORING_TIERS,
+    _aggregate_function_hint,
+    _explicit_metric_candidate_count,
+    _expand_selected_tables,
+    _extract_limit,
+    _glossary_alias_hits_question,
+    _glossary_mapped_tables,
+    _has_strong_glossary_table_match,
+    _is_simple_primary_table_question,
+    _merge_candidate_columns,
+    _primary_table_for_simple_question_from_entries,
+    _question_requests_multiple_metrics,
+    _required_join_predicates,
     _resolve_join_table,
     _table_phrase_score,
+    classify_query_shape,
 )
 from query_pipeline.planner.ranking_resolver import (
     _build_ranking_decision_for_contract,
@@ -99,12 +113,11 @@ from query_pipeline.planner.role_resolver import (
     _exact_table_column_candidates,
     _fallback_metric_candidates_from_selected_columns,
     _graph_selected_evidence_entry,
-    _is_simple_primary_table_question,
-    _primary_table_for_simple_question_from_entries,
     _prune_single_table_aggregate_context,
     _rank_role_candidates,
     _resolve_count_base_table,
     _resolve_entity_display_dimension,
+    _resolve_metric_with_modifier,
     _resolve_owned_monetary_metric_from_schema,
     _resolve_related_sales_amount_metric,
     _resolve_role_candidate,
@@ -119,152 +132,6 @@ _UNSAFE_QUERY_RE = re.compile(
     r"\b(insert|update|delete|drop|alter|truncate|create|grant|revoke)\b",
     re.IGNORECASE,
 )
-
-
-def _aggregate_function_hint(question: str) -> str | None:
-    normalized = _normalize(question)
-    if re.search(r"\b(average|avg|mean)\b", normalized):
-        return "avg"
-    if re.search(r"\b(total|sum)\b", normalized):
-        return "sum"
-    if re.search(r"\b(highest|maximum|max|largest|most)\b", normalized):
-        return "max"
-    if re.search(r"\b(lowest|minimum|min|smallest|least)\b", normalized):
-        return "min"
-    return None
-
-
-def _explicit_metric_candidate_count(
-    question: str,
-    metric_candidates: list[dict[str, Any]],
-) -> int:
-    normalized_question = _normalize(question)
-    question_tokens = set(_content_terms(question))
-    explicit_count = 0
-    seen: set[tuple[str, str]] = set()
-
-    for candidate in metric_candidates or []:
-        table_name = str(candidate.get("table") or "").strip()
-        column_name = str(candidate.get("column") or "").strip()
-        if not column_name:
-            continue
-        signature = (table_name, column_name)
-        if signature in seen:
-            continue
-
-        matched_terms = [
-            str(value).strip().lower()
-            for value in (candidate.get("matched_terms") or [])
-            if str(value).strip()
-        ]
-        candidate_tokens = set(_tokenize(column_name))
-        explicit = False
-        for term in matched_terms:
-            term_tokens = set(_tokenize(term))
-            if term and term in normalized_question:
-                explicit = True
-                break
-            if term_tokens and term_tokens <= question_tokens:
-                explicit = True
-                break
-        if not explicit and candidate_tokens and candidate_tokens <= question_tokens:
-            explicit = True
-        if explicit:
-            explicit_count += 1
-            seen.add(signature)
-
-    return explicit_count
-
-
-def _question_requests_multiple_metrics(question: str) -> bool:
-    normalized_question = _normalize(question)
-    normalized_question = re.sub(
-        r"\bbetween\s+.+?\s+and\s+.+?(?=\s+(?:by|per|each|group(?:ed)?\s+by|sorted|ordered|where|with|for|from|limit\b)|$)",
-        "",
-        normalized_question,
-        flags=re.IGNORECASE,
-    )
-    return bool(re.search(r"\b(and|,)\b", normalized_question))
-
-
-def classify_query_shape(
-    *,
-    question: str,
-    intent: dict[str, Any] | None,
-    retrieved_context: dict[str, Any] | None,
-    plan: dict[str, Any],
-    selected_tables: list[dict[str, Any]],
-    selected_columns: list[dict[str, Any]],
-    metric_candidates: list[dict[str, Any]],
-    dimension_candidates: list[dict[str, Any]],
-    filter_candidates: list[dict[str, Any]],
-    join_paths: list[dict[str, Any]],
-    formula_evidence: list[dict[str, Any]],
-) -> str:
-    """Centralized planner query-shape classifier used before route selection."""
-    del retrieved_context, selected_columns  # Reserved for future expansion without changing the contract.
-
-    table_count = len([entry for entry in selected_tables if entry.get("table")])
-    requested_dimensions = list((intent or {}).get("requested_dimensions") or plan.get("requested_dimensions") or [])
-    requested_metrics = list((intent or {}).get("requested_metrics") or plan.get("requested_metrics") or [])
-    requested_filters = list((intent or {}).get("requested_filters") or plan.get("requested_filters") or [])
-    has_grouping = bool(plan.get("grouping") or plan.get("dimension") or requested_dimensions)
-    has_filters = bool(filter_candidates or plan.get("filters") or plan.get("date_range") or requested_filters)
-    has_join_paths = bool(join_paths)
-    has_join = has_join_paths or table_count > 1
-    intent_type = str((intent or {}).get("intent_type") or "").strip().lower()
-    planner_intent = str(plan.get("intent") or "").strip().lower()
-    aggregate_hint = _aggregate_function_hint(question)
-    is_count = (
-        planner_intent == "count"
-        or intent_type == "count"
-        or str((intent or {}).get("aggregate_function") or "").strip().lower() == "count"
-    )
-    is_ranking = bool(
-        planner_intent == "top_n"
-        or intent_type in {"ranking", "sorted_list"}
-        or (intent or {}).get("requested_sort")
-        or plan.get("sorting")
-    )
-    has_explicit_rank_count = bool(
-        re.search(r"\b(?:top|bottom|lowest|highest|first|last)\s+\d+\b", question, re.IGNORECASE)
-    )
-    explicit_metric_count = _explicit_metric_candidate_count(question, metric_candidates)
-    has_metric = bool(metric_candidates or requested_metrics)
-
-    if bool((intent or {}).get("unsafe")) or _UNSAFE_QUERY_RE.search(question):
-        return "blocked_unsafe"
-    if explicit_metric_count > 1 and _question_requests_multiple_metrics(question):
-        return "multi_metric_aggregate"
-    if is_ranking and has_explicit_rank_count:
-        return "ranking_query"
-    if is_ranking:
-        return "ranking_query"
-    if has_grouping and (has_metric or is_count):
-        return "grouped_aggregate"
-    if has_filters:
-        return "filtered_query"
-    if aggregate_hint and table_count == 1 and not has_grouping and not has_join:
-        return "single_table_aggregate"
-    if has_join_paths:
-        return "joined_lookup"
-    if is_count and table_count == 1:
-        return "single_table_count"
-    if planner_intent == "list" and table_count == 1:
-        return "single_table_list"
-    return "unknown"
-
-
-def _extract_limit(question: str) -> int | None:
-    match = re.search(
-        r"\b(?:top|first|last|latest|recent|limit|show|get|fetch)\s+(\d+)\b"
-        r"|\b(\d+)\s+(?:rows?|records?|results?|items?)\b",
-        question,
-        re.IGNORECASE,
-    )
-    if match:
-        return int(match.group(1) or match.group(2))
-    return None
 
 
 def _detect_sorting(question: str) -> dict[str, str] | None:
@@ -566,52 +433,6 @@ def _glossary_matches(question: str, glossary: dict | None) -> list[tuple[str, d
     return matches
 
 
-def _glossary_alias_hits_question(question: str, term: str, term_data: dict[str, Any]) -> bool:
-    normalized_question = _normalize(question)
-    question_terms = set(_content_terms(question))
-    normalized_term = _normalize(term)
-    term_tokens = set(_tokenize(term))
-
-    if normalized_term and normalized_term in normalized_question:
-        return True
-    if term_tokens and term_tokens <= question_terms:
-        return True
-
-    for alias in (term_data.get("primary_terms", []) or term_data.get("business_terms", []) or []):
-        normalized_alias = _normalize(alias)
-        alias_tokens = set(_tokenize(alias))
-        if normalized_alias and normalized_alias in normalized_question:
-            return True
-        if alias_tokens and alias_tokens <= question_terms:
-            return True
-
-    return False
-
-
-def _glossary_mapped_tables(term_data: dict[str, Any]) -> set[str]:
-    return {
-        str(mapping.get("table", "")).strip()
-        for mapping in term_data.get("mapped_columns", []) or []
-        if str(mapping.get("table", "")).strip()
-    }
-
-
-def _has_strong_glossary_table_match(
-    question: str,
-    table_name: str,
-    glossary_matches: list[tuple[str, dict[str, Any]]],
-) -> bool:
-    for term, term_data in glossary_matches:
-        mapped_tables = _glossary_mapped_tables(term_data)
-        if table_name not in mapped_tables:
-            continue
-        if len(mapped_tables) != 1:
-            continue
-        if _glossary_alias_hits_question(question, term, term_data):
-            return True
-    return False
-
-
 def _enriched_kb(knowledge_base: dict) -> dict:
     if not knowledge_base:
         return {}
@@ -619,35 +440,6 @@ def _enriched_kb(knowledge_base: dict) -> dict:
         deepcopy(knowledge_base),
         infer_relationships=False,
     )
-
-
-def _expand_selected_tables(
-    knowledge_base: dict,
-    selected_names: list[str],
-    dimension: str | None,
-    plan: dict[str, Any] | None = None,
-) -> list[str]:
-    selected = list(selected_names)
-    if plan and _is_simple_primary_table_question(plan):
-        return selected
-
-    dimension_tokens = set(_tokenize(dimension or ""))
-
-    for table_name in list(selected_names):
-        table_data = knowledge_base.get(table_name, {})
-        for relationship in table_data.get("relationships", []):
-            target_table = relationship.get("from_table") if relationship.get("direction") == "incoming" else relationship.get("to_table")
-            if target_table not in knowledge_base or target_table in selected:
-                continue
-
-            target_tokens = set(_tokenize(target_table))
-            target_tokens.update(knowledge_base[target_table].get("table_tokens", []))
-            if dimension_tokens and dimension_tokens & target_tokens:
-                selected.append(target_table)
-            elif relationship.get("confidence", 0) >= 0.92 and len(selected) < 4:
-                selected.append(target_table)
-
-    return selected
 
 
 def _candidate_tables_for_filters(
@@ -720,29 +512,6 @@ def _structured_sorting(intent: dict[str, Any] | None, planner_intent: str) -> d
     if planner_intent == "top_n":
         return {"direction": "desc", "by": "metric"}
     return None
-
-
-def _merge_candidate_columns(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[tuple[str, str], dict[str, Any]] = {}
-    for group in groups:
-        for entry in group:
-            table_name = str(entry.get("table", "")).strip()
-            column_name = str(entry.get("column", "")).strip()
-            if not table_name or not column_name:
-                continue
-            key = (table_name, column_name)
-            existing = merged.get(key)
-            if not existing:
-                merged[key] = dict(entry)
-                continue
-            existing["score"] = max(float(existing.get("score") or 0.0), float(entry.get("score") or 0.0))
-            existing["matched_terms"] = list(dict.fromkeys(list(existing.get("matched_terms") or []) + list(entry.get("matched_terms") or [])))
-            existing["is_measure"] = bool(existing.get("is_measure")) or bool(entry.get("is_measure"))
-            existing["is_dimension"] = bool(existing.get("is_dimension")) or bool(entry.get("is_dimension"))
-            existing["source"] = existing.get("source") if existing.get("source") == "vector" else entry.get("source", existing.get("source"))
-    results = list(merged.values())
-    results.sort(key=lambda item: (-float(item.get("score") or 0.0), str(item.get("table") or ""), str(item.get("column") or "")))
-    return results
 
 
 def _column_selection_from_retrieved_context(
@@ -1198,43 +967,6 @@ def _build_query_context_from_retrieved_context(
         cache_store=cache_store,
         cache_database_identity=cache_database_identity,
     )
-
-
-def _resolve_metric_with_modifier(
-    metric_phrase: str,
-    metric_candidates: list[dict[str, Any]],
-) -> tuple[dict[str, Any] | None, str | None, str]:
-    tokens = _tokenize(metric_phrase)
-    if len(tokens) < 2:
-        return None, None, "missing"
-    for split_at in range(1, len(tokens)):
-        modifier_phrase = " ".join(tokens[:split_at]).strip()
-        residual_phrase = " ".join(tokens[split_at:]).strip()
-        resolved, status = _resolve_role_candidate(residual_phrase, metric_candidates)
-        if status == "resolved" and len(resolved) == 1:
-            return dict(resolved[0]), modifier_phrase, "resolved"
-        if status == "ambiguous":
-            residual_tokens = {_singularize_token(token) for token in _tokenize(residual_phrase)}
-            owner_tables = {
-                str(candidate.get("table") or "").strip()
-                for candidate in metric_candidates
-                if str(candidate.get("table") or "").strip()
-                and {
-                    _singularize_token(token)
-                    for token in _tokenize(str(candidate.get("table") or ""))
-                }
-                <= residual_tokens
-            }
-            if len(owner_tables) == 1:
-                narrowed, narrowed_status = _resolve_role_candidate(
-                    residual_phrase,
-                    metric_candidates,
-                    allowed_tables=owner_tables,
-                )
-                if narrowed_status == "resolved" and len(narrowed) == 1:
-                    return dict(narrowed[0]), modifier_phrase, "resolved"
-            return None, None, "ambiguous"
-    return None, None, "missing"
 
 
 def _apply_multi_hop_join_lookup_contract(
@@ -1739,7 +1471,6 @@ def _normalize_planner_output(
     has_explicit_non_interval_filter_request = bool(
         [entry for entry in structured_filter_entries if entry.get("filter_kind") != "date_interval"]
         or structured_intent.get("requested_filters")
-        or [entry for entry in (plan.get("filters") or []) if entry.get("filter_kind") != "date_interval"]
     )
     if (
         query_shape in {"single_table_list", "single_table_count", "filtered_query", "grouped_aggregate", "ranking_query", "joined_lookup"}
@@ -2223,7 +1954,7 @@ def _normalize_planner_output(
     ):
         implicit_filters, implicit_filter_status = _source_scope_as_filters(
             implicit_filter_phrase,
-            schema_for_resolution,
+            full_knowledge_base,
             source_filter_allowed_tables,
         )
         if implicit_filter_status == "resolved" and implicit_filters:
@@ -2280,6 +2011,43 @@ def _normalize_planner_output(
         }
         join_paths = []
         matched_relationships = []
+    late_filter_phrase = implicit_filter_phrase or target_filter_phrase
+    late_filter_allowed_tables = source_filter_allowed_tables or {
+        str(name).strip()
+        for name in selected_table_names
+        if str(name).strip()
+    }
+    if selected_filters and late_filter_phrase and late_filter_allowed_tables:
+        implicit_filters, implicit_filter_status = _source_scope_as_filters(
+            late_filter_phrase,
+            full_knowledge_base,
+            late_filter_allowed_tables,
+        )
+        if implicit_filter_status == "resolved" and implicit_filters:
+            implicit_by_signature = {
+                (
+                    str(entry.get("table") or "").strip(),
+                    str(entry.get("column") or "").strip(),
+                    str(entry.get("value") or "").strip(),
+                ): dict(entry)
+                for entry in implicit_filters
+            }
+            normalized_filters = [
+                implicit_by_signature.get(
+                    (
+                        str(entry.get("table") or "").strip(),
+                        str(entry.get("column") or "").strip(),
+                        str(entry.get("value") or "").strip(),
+                    ),
+                    dict(entry),
+                )
+                for entry in selected_filters
+            ]
+            if normalized_filters != selected_filters:
+                selected_filters = normalized_filters
+                plan["filters"] = [dict(entry) for entry in selected_filters]
+                filter_candidates = _merge_candidate_columns(selected_filters, filter_candidates)
+                selected_columns = _merge_candidate_columns(selected_columns, selected_filters)
     if selected_filters:
         structured_signatures = {
             (

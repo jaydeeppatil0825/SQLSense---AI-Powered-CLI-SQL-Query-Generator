@@ -98,29 +98,23 @@ Removed `ai.*` runtime-AI modules are not shimmed.
 
 ## Current Baseline
 
-Last refreshed: 2026-07-17.
+Last refreshed: 2026-07-21.
 
-- Collection: `1029 tests collected`, no collection/import errors.
-- Fast authoritative suite: `973 passed, 40 failed, 8 skipped, 16 deselected`.
-- Regression suite: `365 passed, 29 failed, 8 skipped, 635 deselected`.
-- Live suite: `4 passed, 8 skipped, 1025 deselected`.
-- Legacy suite: pending rerun after local Python approval.
-- Full supported suite: pending rerun after local Python approval.
+- Architecture + QueryPipeline focused suite: `21 passed`.
+- Gateway, CLI, QuestionService and Phase 9 focused suite: `96 passed, 1 failed`.
+- Regression suite: `398 passed, 1 failed, 8 skipped, 678 deselected`.
+- Full supported non-live/non-legacy suite: `1054 passed, 7 failed, 8 skipped, 16 deselected`.
 
 Known supported failures are currently classified before runtime fixes as:
 
-- Full-small-lab regression tests: current semantic artifact / planner evidence
-  mismatch; verify against the intended lab artifacts before changing runtime.
-- Phase 3 grouped/HAVING and Phase 4 ranking failures: current regression
-  candidates around aggregate intent, filter extraction, projection shape, and
-  ranking ambiguity.
-- Phase 6/8 joined aggregate failures: current regression candidates around
-  source-scope filters, metric resolution, safe fail-closed behavior, and grain
-  planner context.
-- Query pipeline monkeypatch failures: infrastructure compatibility issue caused
-  by the current `cached_retrieve_context` boundary replacing the older
-  `retrieve_context` symbol.
-- Conversation rewrite/follow-up failures: obsolete expected-output candidates
-  for current deterministic conversation behavior.
-- Single-table `SELECT *` projection failure: obsolete expected-output candidate
-  after the approved projection-format cleanup.
+- API gateway / CLI display expectation drift: CLI menu text assertion expects
+  the older `Backend  :` spacing.
+- Semantic artifact identity mismatch: committed metadata names
+  `sqlsense_realistic_business_lab` while the AI semantic lab test expects
+  `sqlsense_ai_semantic_lab`.
+- Query planner payload expectation drift: one test still expects the older
+  filter source shape.
+- Conversation rewrite/follow-up expectation drift: two tests expect older
+  wording for location and sorting rewrites.
+- Single-table `SELECT *` projection expectation drift: one test still expects
+  explicit columns after the approved single-table full-row projection cleanup.

@@ -478,10 +478,18 @@ class AppService:
         elif error or message:
             validation_result = {"is_valid": False, "reason": error or message}
 
-        if success and generated_sql:
+        if success and generated_sql and validation_result.get("is_valid") is True:
             self.result_service.last_sql = generated_sql
             self.result_service.last_selected_join_path = query_context.get("selected_join_path")
             self.result_service.last_query_context = deepcopy(query_context)
+            metadata = dict(self.database_service.knowledge_base_metadata or {})
+            self.result_service.create_planned_query_artifact(
+                sql=generated_sql,
+                database_identity=self.database_service._connected_database_identity(),
+                schema_fingerprint=str(metadata.get("schema_fingerprint") or metadata.get("schema_hash") or ""),
+                kb_fingerprint=str(metadata.get("kb_fingerprint") or metadata.get("knowledge_base_hash") or ""),
+                query_context=deepcopy(query_context),
+            )
             self.result_service.set_last_question(question)
 
         return self._build_question_result(
@@ -546,7 +554,10 @@ class AppService:
             return False, "Database not connected", None
         
         knowledge_base = self.database_service.get_knowledge_base()
-        exact_stored_sql = sql == self.result_service.get_last_sql()
+        artifact_ok, artifact_reason, artifact = self.result_service.validate_planned_query_artifact(sql)
+        if not artifact_ok or artifact is None:
+            return False, f"Planned query artifact rejected: {artifact_reason}", None
+        query_context = artifact.get("query_context") or {}
         
         with timed_stage("execution_completed", component="sql_pipeline", stage="sql.execute", span_name="sql.execute") as obs:
             success, message, rows = self.result_service.execute_sql(
@@ -554,16 +565,8 @@ class AppService:
                 engine=engine,
                 knowledge_base=knowledge_base,
                 revalidate=revalidate,
-                selected_join_path=(
-                    self.result_service.get_last_selected_join_path()
-                    if exact_stored_sql
-                    else None
-                ),
-                query_context=(
-                    self.result_service.get_last_query_context()
-                    if exact_stored_sql
-                    else None
-                ),
+                selected_join_path=query_context.get("selected_join_path"),
+                query_context=query_context,
             )
             obs["status"] = "success" if success else "failed"
             obs["row_count"] = len(rows or [])

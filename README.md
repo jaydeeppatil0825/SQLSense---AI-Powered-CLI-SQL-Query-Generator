@@ -25,8 +25,10 @@ SQL-Sense/
 ├── .env                             # Your credentials (not committed)
 ├── .env.template                    # Template — copy this to .env
 ├── requirements.txt                 # Python dependencies
+├── pyproject.toml                   # Pinned runtime/dev dependency metadata
 ├── README.md                        # Main documentation
 ├── PIPELINE_ARCHITECTURE.md        # Pipeline architecture documentation
+├── ARCHITECTURE_CONTRACTS.md       # Supported Python boundaries
 ├── SECURITY.md                      # Security recommendations
 ├── LICENSE                          # MIT License
 ├── api_gateway/                     # FastAPI backend for web UI
@@ -82,12 +84,11 @@ SQL-Sense/
 │   ├── sql_validator.py             # SQL validation
 │   ├── query_executor.py            # Safe SELECT execution
 │   └── result_service.py            # Result storage and retrieval
-├── frontend/                        # React 19 + TypeScript frontend
+├── forentendNew/                    # Current React 19 + TypeScript frontend
 │   ├── src/                         # React source code
 │   ├── package.json                 # Node.js dependencies
 │   ├── vite.config.ts              # Vite configuration
-│   ├── tailwind.config.ts          # TailwindCSS configuration
-│   └── README.md                    # Frontend documentation
+│   └── tsconfig.json                # TypeScript configuration
 ├── db/                              # Legacy database utilities (compatibility)
 │   ├── __init__.py
 │   ├── connection.py
@@ -150,14 +151,14 @@ copy .env.template .env
 ### Frontend Setup (Optional - for Web UI)
 
 ```bash
-# Navigate to frontend directory
-cd frontend
+# Navigate to the current frontend directory
+cd forentendNew
 
 # Install Node.js dependencies
 npm install
 
-# Copy environment template
-cp .env.example .env.local
+# Optional: point local dev to the FastAPI backend
+echo VITE_API_BASE_URL=http://localhost:8000 > .env.local
 
 # Return to project root
 cd ..
@@ -177,7 +178,7 @@ Open `.env` and set the values that apply to you:
 | `LOCAL_MODEL` | No | `llama3` | Ollama model to use |
 | `LOCAL_API_URL` | No | `http://localhost:11434` | Ollama API URL |
 | `LOCAL_TIMEOUT` | No | `120` | Local AI timeout in seconds |
-| `ENABLE_AI_INSIGHTS` | No | `true` | Enable AI-powered insights after query execution |
+| `ENABLE_AI_INSIGHTS` | No | `false` | Deprecated compatibility setting; runtime insights are disabled in the active deterministic service |
 | `DEBUG_MODE` | No | `false` | Enable verbose debug logging to logs/app.log |
 
 > `.env` values are only used as a **fallback**. You can also connect from the CLI menu without touching `.env`.
@@ -240,7 +241,7 @@ You will see:
 python -m uvicorn api_gateway.app:app --reload --host 0.0.0.0 --port 8000
 
 # In a new terminal, start the React frontend
-cd frontend
+cd forentendNew
 npm run dev
 ```
 
@@ -264,12 +265,28 @@ python -m uvicorn api_gateway.app:app --reload --host 0.0.0.0 --port 8000
 ```
 
 **API Endpoints:**
-- `POST /api/action` - Main action endpoint for all operations
-- `GET /api/health` - Health check endpoint
-- `GET /api/system/status` - System status (database, KB, AI backend)
+- `GET /health` - Health check endpoint
+- `POST /api/v1/gateway` - Main gateway endpoint for all supported actions
+
+Supported gateway actions:
+
+```text
+session.status
+session.reset
+database.connect
+database.disconnect
+database.status
+knowledge.status
+knowledge.rebuild
+schema.list
+query.ask
+query.last
+history.list
+history.clear
+```
 
 **API Features:**
-- Session-based authentication
+- Cookie-scoped session state
 - CORS support for web UI
 - Structured JSON responses
 - Error handling and validation
@@ -327,7 +344,7 @@ A `SELECT 1` test is run immediately. If it passes, the connection is stored for
 
 ## How to Build the Knowledge Base
 
-The knowledge base is automatically built when you connect to a database (option 1). You can also manually rebuild it using option 6.
+The knowledge base is automatically built when you connect to a database (option 1). You can also manually rebuild it from the CLI menu.
 
 The tool will:
 
@@ -483,7 +500,7 @@ The business glossary maps plain-English business terms to actual database table
 
 ### Search Business Glossary
 
-Select **option 6** to search the business glossary:
+Select **Search Business Glossary** from the CLI menu to search the business glossary:
 
 ```
   Enter search term (or 'back' to return): sales
@@ -533,7 +550,7 @@ The tool supports conversational features that remember your previous questions 
 You can use these commands at any time:
 
 - **"chart"** or **"generate chart"**: Generate a chart for the last result
-- **"insights"**: Generate insights for the last result (rule-based only)
+- **"insights"**: Currently reports that runtime insights are disabled
 - **"new chat"** or **"clear chat"**: Start a new conversation session
 - **"show last sql"** or **"repeat last sql"**: Show the last generated SQL
 - **"show history"** or **"show conversation history"**: Show recent conversation turns
@@ -555,18 +572,10 @@ Conversation sessions are automatically saved to `output/conversations/session_Y
 
 ## Example Questions
 
-**Supported (simple list/count):**
+**Supported examples:**
 ```
 Show all customers
 Count total orders
-Show all partners
-Count partners
-Show all bills
-Count bill
-```
-
-**Supported (grouped/aggregated with intent builder):**
-```
 Show sales by region
 Top 5 customers by revenue
 Deal value by account
@@ -574,7 +583,7 @@ Pending billed amount by account
 Show current stock by storage point
 ```
 
-**Partially supported (complex queries):**
+**Fail-closed when evidence is incomplete or unsafe:**
 ```
 Show total sales by city
 Show sales by product category
@@ -582,7 +591,7 @@ Show payment details with customer names
 Show customers with pending payments
 ```
 
-Complex queries requiring joins, aggregations, or business reasoning will use the structured query pipeline contract with route recommendation. If evidence is insufficient, the system will return: "Cannot plan safely - missing required evidence."
+Joins and aggregations are supported only when the deterministic planner can prove table, column, Relationship Graph path, grain and filter evidence. If evidence is insufficient, the system returns: "Cannot plan safely - missing required evidence."
 
 ---
 
@@ -627,11 +636,11 @@ The tool uses a **deterministic approach** for SQL generation with a structured 
 | Complex joins/aggregations | Deterministic route recommendation with join paths | Multi-table queries with join paths |
 
 **Query Pipeline Architecture:**
-- **Intent Builder**: Schema-agnostic deterministic intent detection that extracts query shape (list, count, ranking, grouped_summary) without hardcoded semantic mappings
+- **Intent Builder**: Schema-agnostic deterministic intent detection that extracts query shape without hardcoded semantic mappings
 - **Structured Contract**: Returns normalized question, intent, retrieved context, plan, missing evidence, confidence, route recommendation, and debug trace
 - **Missing Evidence Detection**: Identifies missing metrics, dimensions, join paths, filter columns, and formula evidence
 - **Route Recommendation**: Categorizes queries as `deterministic_sql_required` or `cannot_plan_safely` based on evidence strength
-- **Context Retrieval**: Uses vector search, business glossary, and schema facts for evidence gathering
+- **Context Retrieval**: Uses vector search, business glossary, and schema facts for suggestive evidence gathering
 - **Vector Index**: ChromaDB-based vector store for semantic similarity search
 
 **Why?** Deterministic SQL generation is safer, faster, and more predictable. AI/LLM is used only during knowledge base build for semantic enrichment, not at runtime for SQL generation. The schema-agnostic intent builder preserves raw business terms for context retrieval without mapping to specific database tables or columns.
@@ -721,7 +730,6 @@ python -m pytest -v --basetemp=temp_pytest_full
 
 ## Future Improvements
 
-- Deterministic complex SQL generation (joins, aggregations, business reasoning)
 - PostgreSQL support
 - SQLite support
 - Schema diffing between saved knowledge base and live database

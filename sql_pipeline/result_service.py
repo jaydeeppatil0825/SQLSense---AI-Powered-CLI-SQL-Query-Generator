@@ -6,7 +6,11 @@ Result service for SQL execution.
 This service handles CLI SQL execution and result processing.
 """
 
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 from typing import Optional, List, Dict, Any
+from uuid import uuid4
 from sqlalchemy.engine import Engine
 
 from sql_pipeline.query_executor import execute_query
@@ -14,6 +18,13 @@ from sql_pipeline.sql_validator import validate_sql
 from utils.logger import get_logger
 
 logger = get_logger()
+
+PLANNED_QUERY_ARTIFACT_VERSION = "planned-query-artifact-v1"
+
+
+def _stable_hash(value: Any) -> str:
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 class ResultService:
@@ -27,6 +38,61 @@ class ResultService:
         self.last_question: Optional[str] = None
         self.last_selected_join_path: Optional[Dict[str, Any]] = None
         self.last_query_context: Optional[Dict[str, Any]] = None
+        self.last_planned_query_artifact: Optional[Dict[str, Any]] = None
+
+    def create_planned_query_artifact(
+        self,
+        *,
+        sql: str,
+        database_identity: Dict[str, Any],
+        schema_fingerprint: str = "",
+        kb_fingerprint: str = "",
+        query_context: Optional[Dict[str, Any]] = None,
+        ttl_seconds: int = 3600,
+    ) -> Dict[str, Any]:
+        """Store the immutable SQL artifact required for execution."""
+        now = datetime.now(timezone.utc)
+        artifact = {
+            "artifact_type": "planned_query",
+            "artifact_version": PLANNED_QUERY_ARTIFACT_VERSION,
+            "query_id": uuid4().hex,
+            "sql": sql,
+            "sql_hash": _stable_hash(sql),
+            "database_identity_hash": _stable_hash(database_identity or {}),
+            "schema_fingerprint": str(schema_fingerprint or ""),
+            "kb_fingerprint": str(kb_fingerprint or ""),
+            "planner_contract_version": str((query_context or {}).get("planner_contract_version") or ""),
+            "query_context": dict(query_context or {}),
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(seconds=max(1, int(ttl_seconds or 3600)))).isoformat(),
+        }
+        self.last_planned_query_artifact = artifact
+        return artifact
+
+    def validate_planned_query_artifact(
+        self,
+        sql: str,
+    ) -> tuple[bool, str, Optional[Dict[str, Any]]]:
+        """Return the stored artifact only when the requested SQL is exactly approved."""
+        artifact = self.last_planned_query_artifact
+        if not artifact:
+            return False, "planned query artifact is missing", None
+        if artifact.get("artifact_type") != "planned_query":
+            return False, "planned query artifact type is invalid", None
+        if artifact.get("artifact_version") != PLANNED_QUERY_ARTIFACT_VERSION:
+            return False, "planned query artifact version is invalid", None
+        if artifact.get("sql") != sql or artifact.get("sql_hash") != _stable_hash(sql):
+            return False, "SQL does not match the planned query artifact", None
+        try:
+            expires_at = datetime.fromisoformat(str(artifact.get("expires_at") or ""))
+        except ValueError:
+            return False, "planned query artifact expiry is invalid", None
+        if expires_at <= datetime.now(timezone.utc):
+            return False, "planned query artifact has expired", None
+        context = artifact.get("query_context")
+        if not isinstance(context, dict):
+            return False, "planned query artifact context is invalid", None
+        return True, "planned query artifact accepted", artifact
     
     def execute_sql(
         self,
@@ -89,6 +155,10 @@ class ResultService:
     def get_last_query_context(self) -> Optional[Dict[str, Any]]:
         """Get planner context stored with the last generated SQL."""
         return self.last_query_context
+
+    def get_last_planned_query_artifact(self) -> Optional[Dict[str, Any]]:
+        """Get execution artifact stored with the last generated SQL."""
+        return self.last_planned_query_artifact
     
     def get_last_rows(self) -> Optional[List[Dict[str, Any]]]:
         """Get last query results."""
@@ -119,3 +189,4 @@ class ResultService:
         self.last_question = None
         self.last_selected_join_path = None
         self.last_query_context = None
+        self.last_planned_query_artifact = None

@@ -25,6 +25,7 @@ type GatewayAction =
   | "database.status"
   | "knowledge.status"
   | "knowledge.rebuild"
+  | "schema.list"
   | "query.ask"
   | "query.last"
   | "history.list"
@@ -305,8 +306,8 @@ export const api = {
   },
 
   async listTables(): Promise<SchemaTable[]> {
-    await gateway<Record<string, unknown>>("knowledge.status");
-    return [];
+    const data = await gateway<{ tables?: SchemaTable[] }>("schema.list");
+    return data.tables ?? [];
   },
 
   async knowledgeBaseStatus(): Promise<KnowledgeBaseStatus> {

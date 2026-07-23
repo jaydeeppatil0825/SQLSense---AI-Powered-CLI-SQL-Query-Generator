@@ -17,6 +17,7 @@ from query_pipeline.planner.filter_resolver import (
     _source_scope_as_filter,
     _source_scope_as_filters,
 )
+from query_pipeline.planner.contract_builder import _build_clause_plan_for_contract
 from query_pipeline.planner.role_resolver import (
     build_dimension_decision_contract,
     build_metric_decision_contract,
@@ -26,6 +27,7 @@ from query_pipeline.planner.role_resolver import (
     _rank_role_candidates,
     _resolve_count_base_table,
     _resolve_entity_display_dimension,
+    _resolve_metric_with_modifier,
     _resolve_owned_monetary_metric_from_schema,
     _resolve_related_sales_amount_metric,
     _resolve_role_candidate,
@@ -38,24 +40,23 @@ from query_pipeline.planner.phase9b_cache import (
     cached_grain_analysis,
     cached_multi_hop_path,
 )
-
-
-def _planner():
-    from query_pipeline import query_planner as _qp
-
-    return _qp
-
-
-def _normalize(text: str) -> str:
-    return _planner()._normalize(text)
-
-
-def _humanize(text: str) -> str:
-    return _planner()._humanize(text)
-
-
-def _tokenize(text: str) -> list[str]:
-    return _planner()._tokenize(text)
+from query_pipeline.planner.query_predicates import (
+    _DIMENSION_SEMANTIC_TYPES,
+    _GENERIC_ROLE_TERMS,
+    _NON_METRIC_SEMANTIC_TYPES,
+    _NUMERIC_METRIC_SEMANTIC_TYPES,
+    _SCORING_TIERS,
+    _required_join_predicates,
+    _resolve_join_table,
+    _table_phrase_score,
+)
+from query_pipeline.planner.text_utils import (
+    _humanize,
+    _normalize,
+    _safe_float,
+    _singularize_token,
+    _tokenize,
+)
 
 
 def _field_tokens(text: str) -> set[str]:
@@ -65,15 +66,6 @@ def _field_tokens(text: str) -> set[str]:
     if "no" in tokens:
         tokens.add("number")
     return tokens
-
-
-def _singularize_token(token: str) -> str:
-    return _planner()._singularize_token(token)
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    return _planner()._safe_float(value, default)
-
 
 def _metric_modifier_value_phrase(prefix: str, base_table: str) -> str:
     phrase = re.sub(
@@ -124,16 +116,6 @@ def _metric_resolution_phrase(metric_phrase: str) -> str:
     return phrase
 
 
-def _remove_weak_context_warning(warnings: list[Any]) -> list[Any]:
-    return _planner()._remove_weak_context_warning(warnings)
-
-
-def _resolve_metric_with_modifier(metric_phrase: str, metric_candidates: list[dict[str, Any]]):
-    return _planner()._resolve_metric_with_modifier(metric_phrase, metric_candidates)
-
-
-def _build_clause_plan_for_contract(*args, **kwargs):
-    return _planner()._build_clause_plan_for_contract(*args, **kwargs)
 _JOIN_DECISION_NODES = (
     "unsafe_check",
     "table_scope",
@@ -203,52 +185,6 @@ def _join_failure_context(
     )
     failed["missing_evidence"] = list(dict.fromkeys([*(failed.get("missing_evidence") or []), blocked_node]))
     return failed
-
-
-def _table_phrase_score(phrase: str, table_name: str) -> float:
-    phrase_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
-    table_tokens = {_singularize_token(token) for token in _tokenize(table_name)}
-    if not phrase_tokens or not table_tokens:
-        return 0.0
-    if phrase_tokens == table_tokens:
-        return 1.0
-    if phrase_tokens <= table_tokens or table_tokens <= phrase_tokens:
-        return 0.82
-    return round((len(phrase_tokens & table_tokens) / len(phrase_tokens)) * 0.6, 4)
-
-
-def _resolve_join_table(
-    phrase: str,
-    knowledge_base: dict[str, Any],
-    retrieved_tables: list[dict[str, Any]] | None = None,
-) -> tuple[str | None, str]:
-    requested_tokens = {_singularize_token(token) for token in _tokenize(phrase)}
-    retrieval_scores: dict[str, float] = {}
-    for candidate in retrieved_tables or []:
-        table_name = str(candidate.get("table") or "")
-        candidate_terms = [table_name, *(candidate.get("matched_terms") or [])]
-        if any(
-            {_singularize_token(token) for token in _tokenize(term)} == requested_tokens
-            for term in candidate_terms
-            if _tokenize(term)
-        ):
-            retrieval_scores[table_name] = max(
-                retrieval_scores.get(table_name, 0.0),
-                min(float(candidate.get("score") or 0.0), 0.96),
-            )
-    ranked = sorted(
-        (
-            (max(_table_phrase_score(phrase, table_name), retrieval_scores.get(table_name, 0.0)), table_name)
-            for table_name in knowledge_base
-        ),
-        key=lambda item: (-item[0], item[1]),
-    )
-    ranked = [item for item in ranked if item[0] > 0]
-    if not ranked:
-        return None, "missing"
-    if len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) < 0.08 and ranked[0][0] < 1.0:
-        return None, "ambiguous"
-    return ranked[0][1], "resolved"
 
 
 def _column_phrase_score(
@@ -368,65 +304,7 @@ _EXPLICIT_UNSUPPORTED_JOIN_RE = re.compile(
     re.IGNORECASE,
 )
 
-_GENERIC_ROLE_TERMS = {
-    "amount",
-    "value",
-    "status",
-    "type",
-    "category",
-    "total",
-}
-
 _WEAK_CONTEXT_WARNING = "Retrieved context is weak; planner confidence is low."
-
-_SCORING_TIERS = {
-    "exact_normalized_column": 1.0,
-    "owner_qualified_exact": 0.99,
-    "kb_glossary_semantic": 0.92,
-    "numeric_metric_eligible": 0.74,
-    "dimension_type_eligible": 0.7,
-    "sample_value_filter_match": 0.88,
-    "direct_graph_compatible": 0.96,
-    "selected_join_path_agreement": 1.0,
-    "aggregate_ranking_keyword_agreement": 0.93,
-    "source_phrase_agreement": 0.9,
-}
-
-_NUMERIC_METRIC_SEMANTIC_TYPES = {
-    "money",
-    "quantity",
-    "percentage",
-    "numeric_candidate",
-    "number",
-    "decimal",
-    "integer",
-    "float",
-}
-
-_NON_METRIC_SEMANTIC_TYPES = {
-    "status",
-    "text",
-    "text_candidate",
-    "category",
-    "category_candidate",
-    "date",
-    "name",
-    "code",
-    "id",
-    "reference",
-}
-
-_DIMENSION_SEMANTIC_TYPES = {
-    "status",
-    "text",
-    "text_candidate",
-    "category",
-    "category_candidate",
-    "date",
-    "name",
-    "code",
-    "reference",
-}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -2077,25 +1955,6 @@ def _apply_join_lookup_contract(
         "route_recommendation": "deterministic_sql_required",
     }
     return planned
-
-
-def _required_join_predicates(join_paths: list[dict[str, Any]]) -> list[str]:
-    predicates: list[str] = []
-    seen: set[str] = set()
-    for join_path in join_paths:
-        for edge in join_path.get("path", []) or []:
-            join_condition = str(edge.get("join_condition") or "").strip()
-            if not join_condition:
-                from_table = str(edge.get("from_table") or "").strip()
-                from_column = str(edge.get("from_column") or "").strip()
-                to_table = str(edge.get("to_table") or "").strip()
-                to_column = str(edge.get("to_column") or "").strip()
-                if from_table and from_column and to_table and to_column:
-                    join_condition = f"{from_table}.{from_column} = {to_table}.{to_column}"
-            if join_condition and join_condition not in seen:
-                seen.add(join_condition)
-                predicates.append(join_condition)
-    return predicates
 
 
 def _join_candidates_for_contract(

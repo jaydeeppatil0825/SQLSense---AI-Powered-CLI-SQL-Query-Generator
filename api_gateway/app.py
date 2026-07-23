@@ -243,6 +243,78 @@ def _handle_knowledge_rebuild(session_id: str, service: AppService, raw: dict[st
     return {"message": message, "knowledge": _knowledge_status(service)}
 
 
+def _planner_role(column: dict[str, Any]) -> str | None:
+    roles = column.get("planner_roles") if isinstance(column.get("planner_roles"), dict) else {}
+    if roles.get("date_eligible") or column.get("is_date"):
+        return "date"
+    if roles.get("numeric_metric_eligible") or column.get("is_measure"):
+        return "metric"
+    if roles.get("dimension_eligible") or column.get("is_dimension"):
+        return "dimension"
+    if column.get("is_primary_key") or column.get("is_foreign_key"):
+        return "identifier"
+    semantic_type = str(column.get("semantic_type") or "").lower()
+    if semantic_type in {"status", "state"}:
+        return "status"
+    if semantic_type in {"id", "identifier"}:
+        return "identifier"
+    return "text" if str(column.get("type") or column.get("data_type") or "") else None
+
+
+def _handle_schema_list(session_id: str, service: AppService, raw: dict[str, Any]) -> dict[str, Any]:
+    _payload(EmptyPayload, raw)
+    knowledge_base = service.get_knowledge_base() or {}
+    tables: list[dict[str, Any]] = []
+    for table_name in sorted(knowledge_base):
+        table = knowledge_base.get(table_name) or {}
+        primary_keys = {str(value) for value in table.get("primary_keys", [])}
+        foreign_keys = {
+            str(fk.get("column")): fk
+            for fk in table.get("foreign_keys", [])
+            if isinstance(fk, dict) and fk.get("column")
+        }
+        columns = []
+        for column in table.get("columns", []):
+            if not isinstance(column, dict):
+                continue
+            roles = column.get("planner_roles") if isinstance(column.get("planner_roles"), dict) else {}
+            name = str(column.get("name") or "")
+            if not name:
+                continue
+            fk = foreign_keys.get(name)
+            columns.append(
+                {
+                    "name": name,
+                    "dataType": str(column.get("type") or column.get("data_type") or ""),
+                    "nullable": bool(column.get("nullable", True)),
+                    "primaryKey": bool(column.get("is_primary_key") or name in primary_keys),
+                    "foreignKey": (
+                        {
+                            "table": str(fk.get("referenced_table") or fk.get("to_table") or ""),
+                            "column": str(fk.get("referenced_column") or fk.get("to_column") or ""),
+                        }
+                        if fk
+                        else None
+                    ),
+                    "unique": bool(column.get("unique", False)),
+                    "isDate": bool(column.get("is_date") or roles.get("date_eligible")),
+                    "isNumeric": bool(roles.get("numeric_metric_eligible")),
+                    "plannerRole": _planner_role(column),
+                    "samples": [str(value) for value in (column.get("sample_values") or [])[:5]],
+                }
+            )
+        tables.append(
+            {
+                "name": str(table.get("table_name") or table_name),
+                "type": "view" if table.get("is_view") else "table",
+                "description": str(table.get("business_description") or table.get("description") or ""),
+                "columnCount": len(columns),
+                "columns": columns,
+            }
+        )
+    return {"tables": _redact(tables), "count": len(tables)}
+
+
 def _query_context_summary(context: dict[str, Any]) -> dict[str, Any]:
     return _redact(
         {
@@ -366,6 +438,7 @@ HANDLERS: dict[str, Handler] = {
     "database.status": _handle_database_status,
     "knowledge.status": _handle_knowledge_status,
     "knowledge.rebuild": _handle_knowledge_rebuild,
+    "schema.list": _handle_schema_list,
     "query.ask": _handle_query_ask,
     "query.last": _handle_query_last,
     "history.list": _handle_history_list,

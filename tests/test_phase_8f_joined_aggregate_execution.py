@@ -157,7 +157,7 @@ def test_altered_sql_and_missing_path_fail_before_connect():
     success, message, rows = service.execute_sql(service.get_last_sql() + " ", revalidate=True)
 
     assert success is False
-    assert "Execution failed" in message
+    assert "planned query artifact rejected" in message.lower()
     assert rows is None
     service.database_service.engine.connect.assert_not_called()
 

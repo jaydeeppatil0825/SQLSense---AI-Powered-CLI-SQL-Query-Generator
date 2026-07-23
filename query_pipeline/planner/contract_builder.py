@@ -5,24 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from query_pipeline.planner.confidence import _has_close_role_ambiguity
-
-
-def _planner():
-    from query_pipeline import query_planner as _qp
-
-    return _qp
-
-
-def _normalize(text: str) -> str:
-    return _planner()._normalize(text)
-
-
-def classify_query_shape(*args, **kwargs):
-    return _planner().classify_query_shape(*args, **kwargs)
-
-
-def _required_join_predicates(join_paths: list[dict[str, Any]]) -> list[str]:
-    return _planner()._required_join_predicates(join_paths)
+from query_pipeline.planner.query_predicates import (
+    _required_join_predicates,
+    classify_query_shape,
+)
+from query_pipeline.planner.text_utils import _normalize
 
 
 def _detect_missing_evidence(

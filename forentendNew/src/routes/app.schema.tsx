@@ -50,7 +50,7 @@ function SchemaPage() {
             </div>
           ) : isError || tables.length === 0 ? (
             <div className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
-              Schema table listing is not exposed by the current gateway contract.
+              No schema tables found for the current connection.
             </div>
           ) : (
             <ul className="space-y-1">

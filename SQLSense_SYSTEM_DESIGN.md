@@ -1163,9 +1163,18 @@ The repository already contains broad deterministic tests across phases, includi
    - direct SQL oracle;
    - expected fail-closed cases.
 
-### Review verification performed on this archive
+### Review verification performed on the current project
 
-A focused test run covering the API gateway, QueryPipeline, Phase 9A cache and observability produced **47 passing tests and one failure**. The failure was only that `PIPELINE_ARCHITECTURE.md` was absent. This system-design delivery adds that required repository document.
+The latest architecture documentation refresh verified the current repository
+against focused and supported suites:
+
+- architecture + QueryPipeline focused suite: **21 passed**;
+- gateway, CLI, QuestionService and Phase 9 focused suite: **96 passed, 1 failed**;
+- regression suite: **398 passed, 1 failed, 8 skipped, 678 deselected**;
+- supported non-live/non-legacy suite: **1054 passed, 7 failed, 8 skipped, 16 deselected**.
+
+The remaining failures are documented in `TESTING.md` and are not caused by a
+missing architecture document.
 
 ---
 
@@ -1227,7 +1236,7 @@ A focused test run covering the API gateway, QueryPipeline, Phase 9A cache and o
 
 - restore the root `main.py` source;
 - add `pyproject.toml` with pinned runtime/dev dependencies;
-- keep `PIPELINE_ARCHITECTURE.md` and `SYSTEM_DESIGN.md` versioned;
+- keep `PIPELINE_ARCHITECTURE.md` and `SQLSense_SYSTEM_DESIGN.md` versioned;
 - mark active versus compatibility modules;
 - add import-boundary tests;
 - document all public contracts.

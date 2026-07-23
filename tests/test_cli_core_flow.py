@@ -70,6 +70,35 @@ def test_process_question_saves_sql_and_execute_last_sql_uses_same_sql(monkeypat
     assert service.get_last_sql() == expected_sql
 
 
+def test_modified_sql_is_rejected_before_execution(monkeypatch, tmp_path):
+    service = _service_with_orders(monkeypatch, tmp_path)
+    expected_sql = "SELECT order_id, final_amount FROM orders LIMIT 100;"
+    monkeypatch.setattr(
+        "core.question_service.generate_simple_sql",
+        lambda *args, **kwargs: expected_sql,
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql",
+        lambda user_question, knowledge_base, backend=None, query_plan=None, selected_tables=None: expected_sql,
+    )
+    monkeypatch.setattr(
+        "core.question_service.generate_sql_with_retry",
+        lambda user_question, knowledge_base, backend, first_attempt_sql, validation_reason, query_plan=None, selected_tables=None: expected_sql,
+    )
+
+    result = service.process_question("show all orders", ai_backend="local")
+    assert result["success"] is True
+
+    exec_success, exec_message, rows = service.execute_sql(
+        "SELECT final_amount FROM orders LIMIT 100;",
+        revalidate=True,
+    )
+
+    assert exec_success is False
+    assert rows is None
+    assert "planned query artifact rejected" in exec_message.lower()
+
+
 def test_process_question_revalidates_with_full_kb_not_incomplete_projection(monkeypatch, tmp_path):
     service = _service_with_orders(monkeypatch, tmp_path)
     expected_sql = "SELECT order_id, final_amount FROM orders LIMIT 50;"

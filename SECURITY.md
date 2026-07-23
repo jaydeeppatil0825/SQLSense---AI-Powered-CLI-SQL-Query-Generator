@@ -48,7 +48,7 @@ Current behavior:
 
 - Database credentials live in `.env`.
 - Local AI backend (Ollama) credentials are configured in `.env`.
-- Frontend configuration lives in `frontend/.env.local`.
+- Frontend configuration lives in `forentendNew/.env.local`.
 - `.env` and `.env.local` are ignored by git.
 - Password input in the CLI uses `getpass` and is not echoed.
 
@@ -85,7 +85,7 @@ The API Gateway (`api_gateway/app.py`) provides a REST API for the web UI and pr
 
 ### Frontend Security
 
-The React frontend (`frontend/`) should follow these security best practices:
+The React frontend (`forentendNew/`) should follow these security best practices:
 
 **Environment Variables:**
 - Store sensitive configuration in environment variables

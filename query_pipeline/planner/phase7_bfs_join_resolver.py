@@ -11,6 +11,7 @@ from collections import deque
 from typing import Any
 
 from kb_pipeline.schema_facts import resolved_semantic_type
+from query_pipeline.planner.query_predicates import _is_simple_primary_table_question
 
 PHASE7A_STATUSES = {
     "unique_safe_path",
@@ -328,8 +329,6 @@ def _promote_join_path_tables(
     join_paths: list[dict],
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """Promote bridge tables that are required by FK join paths into context."""
-    from query_pipeline.query_planner import _is_simple_primary_table_question
-
     if plan and _is_simple_primary_table_question(plan):
         return selected_names, selected_tables
 
