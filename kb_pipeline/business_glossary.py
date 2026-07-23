@@ -26,6 +26,7 @@ from kb_pipeline.schema_facts import (
 )
 from utils.file_utils import save_json
 from utils.logger import get_logger
+from semantic_learning.learned_aliases import LearnedAliasCandidate
 
 logger = get_logger()
 
@@ -483,7 +484,80 @@ def get_default_business_glossary() -> Dict[str, Any]:
     return {}
 
 
-def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = False) -> Dict[str, Any]:
+def _iter_learned_aliases(learned_aliases: list[Any] | None) -> list[dict[str, Any]]:
+    aliases: list[dict[str, Any]] = []
+    for alias in learned_aliases or []:
+        data = alias.to_dict() if isinstance(alias, LearnedAliasCandidate) else dict(alias or {})
+        if str(data.get("status") or "").lower() == "approved":
+            aliases.append(data)
+    return aliases
+
+
+def _add_learned_alias_entries(
+    glossary: dict[str, dict[str, Any]],
+    knowledge_base: dict[str, Any],
+    learned_aliases: list[Any] | None,
+) -> None:
+    for alias in _iter_learned_aliases(learned_aliases):
+        table_name = str(alias.get("table") or "").strip()
+        column_name = str(alias.get("column") or "").strip()
+        phrase = str(alias.get("normalized_phrase") or alias.get("phrase") or "").strip()
+        if not phrase or table_name not in knowledge_base:
+            continue
+        target_type = str(alias.get("target_type") or "").strip().lower()
+        if target_type == "table":
+            _add_entry(
+                glossary,
+                phrase,
+                description=f"Learned alias for table {_humanize(table_name)}.",
+                mapped_tables=[table_name],
+                mappings=[],
+                primary_terms=[phrase],
+                sources=["learned_alias"],
+                mapping_kind="table",
+                usage_scope="table_lookup",
+                confidence=min(float(alias.get("confidence_score") or 0.75), 0.9),
+            )
+            continue
+        column = next(
+            (
+                item for item in knowledge_base.get(table_name, {}).get("columns", []) or []
+                if str(item.get("name") or "") == column_name
+            ),
+            None,
+        )
+        if column is None:
+            continue
+        mapping = {
+            "table": table_name,
+            "column": column_name,
+            "type": column.get("type", ""),
+            "confidence": "learned",
+            "source": "learned_alias",
+            "authority": "non_authoritative_evidence",
+            "safe_for_join_authorization": False,
+        }
+        _add_entry(
+            glossary,
+            phrase,
+            description=f"Learned alias for {_humanize(table_name)}.{_humanize(column_name)}.",
+            mapped_tables=[table_name],
+            mappings=[mapping],
+            primary_terms=[phrase],
+            sources=["learned_alias"],
+            mapping_kind="column",
+            structural_facts=column_structural_facts(column),
+            allow_mapping_merge=True,
+            usage_scope="column_lookup",
+            confidence=min(float(alias.get("confidence_score") or 0.75), 0.9),
+        )
+
+
+def generate_business_glossary(
+    knowledge_base: dict,
+    use_ai_enrichment: bool = False,
+    learned_aliases: list[Any] | None = None,
+) -> Dict[str, Any]:
     """
     Generate a business glossary from the current knowledge base.
 
@@ -670,6 +744,7 @@ def generate_business_glossary(knowledge_base: dict, use_ai_enrichment: bool = F
                     confidence=0.92,
                 )
 
+    _add_learned_alias_entries(glossary, knowledge_base, learned_aliases)
     logger.info(f"Generated glossary with {len(glossary)} terms")
     return _strip_internal_fields(glossary)
 

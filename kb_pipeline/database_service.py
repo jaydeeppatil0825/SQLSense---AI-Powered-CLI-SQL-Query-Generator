@@ -12,7 +12,7 @@ It must not depend on user-question understanding or SQL generation logic.
 """
 
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from sqlalchemy.engine import Engine
 from kb_pipeline.connection import connect_engine, get_engine, list_accessible_databases, SUPPORTED_DB_TYPES
 from core.ai_backend_service import check_ollama_status, get_ai_backend_service
@@ -33,11 +33,35 @@ from kb_pipeline.vector.chroma_store import ChromaStore, HybridVectorRetriever
 from kb_pipeline.vector.index_builder import VectorIndexBuilder
 from kb_pipeline.vector.persistence import VectorIndexPersistence
 from kb_pipeline.vector.retriever import VectorRetriever
+from semantic_learning.candidate_store import FileCandidateStore
+from semantic_learning.promotion_policy import apply_promotion_policy, approved_aliases_for_schema
 
 logger = get_logger()
 
 KNOWLEDGE_BASE_PATH = "semantic/knowledge_base.json"
 KNOWLEDGE_BASE_META_PATH = "semantic/knowledge_base.meta.json"
+
+
+def _generate_business_glossary(
+    knowledge_base: Dict[str, Any],
+    *,
+    use_ai_enrichment: bool = False,
+    learned_aliases: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
+    """Call the glossary builder while preserving older test doubles."""
+    try:
+        return generate_business_glossary(
+            knowledge_base,
+            use_ai_enrichment=use_ai_enrichment,
+            learned_aliases=learned_aliases,
+        )
+    except TypeError as exc:
+        if "learned_aliases" not in str(exc):
+            raise
+        return generate_business_glossary(
+            knowledge_base,
+            use_ai_enrichment=use_ai_enrichment,
+        )
 
 
 class DatabaseService:
@@ -225,7 +249,7 @@ class DatabaseService:
                     for table_data in (self.knowledge_base or {}).values()
                     for column in table_data.get("columns", [])
                 )
-                self.business_glossary = generate_business_glossary(
+                self.business_glossary = _generate_business_glossary(
                     self.knowledge_base or {},
                     use_ai_enrichment=bool(has_ai_terms),
                 )
@@ -240,7 +264,7 @@ class DatabaseService:
                     for table_data in (self.knowledge_base or {}).values()
                     for column in table_data.get("columns", [])
                 )
-                self.business_glossary = generate_business_glossary(
+                self.business_glossary = _generate_business_glossary(
                     self.knowledge_base or {},
                     use_ai_enrichment=bool(has_ai_terms),
                 )
@@ -291,7 +315,7 @@ class DatabaseService:
 
         if mapped_terms == 0:
             logger.info("Loaded glossary does not match the active KB; regenerating glossary from the current KB.")
-            return generate_business_glossary(self.knowledge_base, use_ai_enrichment=False)
+            return _generate_business_glossary(self.knowledge_base, use_ai_enrichment=False)
 
         return aligned
     
@@ -589,7 +613,20 @@ class DatabaseService:
         
         # Generate business glossary
         try:
-            glossary = generate_business_glossary(final_knowledge_base, use_ai_enrichment=use_ai_enrichment)
+            schema_fingerprint = str(self.knowledge_base_metadata.get("schema_fingerprint") or "")
+            learned_store = FileCandidateStore()
+            learned_candidates = apply_promotion_policy(
+                learned_store.load(),
+                final_knowledge_base,
+                schema_fingerprint=schema_fingerprint,
+            )
+            learned_store.save(learned_candidates)
+            learned_aliases = approved_aliases_for_schema(learned_candidates, schema_fingerprint)
+            glossary = _generate_business_glossary(
+                final_knowledge_base,
+                use_ai_enrichment=use_ai_enrichment,
+                learned_aliases=learned_aliases,
+            )
             save_business_glossary(glossary, "semantic/business_glossary.json")
             self.business_glossary = glossary
             logger.info("Business glossary saved")
@@ -682,7 +719,7 @@ class DatabaseService:
                     for table_data in self.knowledge_base.values()
                     for column in table_data.get("columns", [])
                 )
-                glossary = generate_business_glossary(
+                glossary = _generate_business_glossary(
                     self.knowledge_base,
                     use_ai_enrichment=bool(has_ai_terms),
                 )

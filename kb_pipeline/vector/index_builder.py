@@ -482,11 +482,13 @@ class VectorIndexBuilder:
         
         # Extract table names from mapped columns
         table_names = list(set(m.get("table", "") for m in mapped_columns))
+        sources = list(term_data.get("sources", []) or [])
+        evidence_source = "learned_alias" if "learned_alias" in sources else str(term_data.get("source", "business_glossary") or "business_glossary")
         
         metadata = {
             **self._shared_metadata(
                 source_type="glossary",
-                evidence_source=str(term_data.get("source", "business_glossary") or "business_glossary"),
+                evidence_source=evidence_source,
                 source_context=source_context,
             ),
             "term": term,
@@ -501,8 +503,10 @@ class VectorIndexBuilder:
             "mapped_columns": mapped_columns,
             "sample_values": sample_values,
             "profile_facts": profile_facts,
-            "sources": list(term_data.get("sources", []) or []),
+            "sources": sources,
             "example_questions": example_questions[:3],
+            "authority": "non_authoritative_evidence" if "learned_alias" in sources else "semantic_evidence",
+            "safe_for_join_authorization": False if "learned_alias" in sources else None,
         }
         
         document = {

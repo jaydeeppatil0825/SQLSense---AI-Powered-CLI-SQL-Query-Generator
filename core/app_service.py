@@ -19,6 +19,8 @@ from core.chart_service import ChartService
 from core.cache_service import build_cache_store
 from core.insight_service import InsightService
 from core.ai_backend_service import get_ai_backend_service
+from semantic_learning.learning_recorder import LearningRecorder
+from semantic_learning.learned_aliases import stable_hash
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -55,6 +57,7 @@ class AppService:
         self.chart_service = ChartService()
         self.insight_service = InsightService()
         self.ai_backend_service = get_ai_backend_service()
+        self.learning_recorder = LearningRecorder()
         self.database_ready: bool = False
         self.last_prepare_report: Dict[str, Any] = {}
 
@@ -578,6 +581,17 @@ class AppService:
             reason_code="" if success else str(message),
             row_count=len(rows or []),
         )
+        if success:
+            try:
+                metadata = dict(self.database_service.knowledge_base_metadata or {})
+                self.learning_recorder.record_successful_execution(
+                    query_context=query_context,
+                    knowledge_base=knowledge_base or {},
+                    database_identity_hash=stable_hash(self.database_service._connected_database_identity()),
+                    schema_fingerprint=str(metadata.get("schema_fingerprint") or metadata.get("schema_hash") or ""),
+                )
+            except Exception as exc:
+                logger.debug(f"Semantic learning recording skipped: {exc}")
         
         return success, message, rows
     

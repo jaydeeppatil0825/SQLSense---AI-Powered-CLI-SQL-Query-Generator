@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 PLANNER_ROOT = Path("query_pipeline/planner")
+PUBLIC_QUERY_PLANNER = Path("query_pipeline/query_planner.py")
 ORCHESTRATOR_MODULE = "query_pipeline.query_planner"
 
 
@@ -50,6 +51,11 @@ def test_neutral_query_predicates_do_not_import_orchestrator():
 def test_planner_modules_import_independently():
     modules = [
         "query_pipeline.query_planner",
+        "query_pipeline.planner.orchestrator",
+        "query_pipeline.planner.shape_router",
+        "query_pipeline.planner.plan_context",
+        "query_pipeline.planner.fail_closed",
+        "query_pipeline.planner.ambiguity",
         "query_pipeline.planner.join_resolver",
         "query_pipeline.planner.phase7_bfs_join_resolver",
         "query_pipeline.planner.filter_resolver",
@@ -61,3 +67,17 @@ def test_planner_modules_import_independently():
 
     for module_name in modules:
         importlib.import_module(module_name)
+
+
+def test_public_query_planner_is_thin_facade():
+    tree = ast.parse(PUBLIC_QUERY_PLANNER.read_text(encoding="utf-8"))
+    function_names = [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+    imports_orchestrator = any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "query_pipeline.planner"
+        and any(alias.name == "orchestrator" for alias in node.names)
+        for node in ast.walk(tree)
+    )
+
+    assert imports_orchestrator
+    assert function_names == ["__getattr__"]

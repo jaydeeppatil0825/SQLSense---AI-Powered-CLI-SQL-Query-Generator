@@ -26,6 +26,7 @@ import re
 from typing import Any, Optional
 
 from kb_pipeline.schema_facts import resolved_semantic_type
+from sql_pipeline.query_plan import DeterministicQueryPlan, build_deterministic_query_plan
 
 _AGGREGATE_HINTS = {
     "sum": {"sum", "total"},
@@ -104,6 +105,7 @@ class DeterministicSqlResult:
     sql: Optional[str] = None
     reason: str = ""
     plan: Optional[DeterministicSqlPlan] = None
+    query_plan: Optional[DeterministicQueryPlan] = None
 
 
 def looks_like_single_table_aggregate_request(query_context: dict[str, Any]) -> bool:
@@ -794,10 +796,31 @@ def generate_deterministic_sql(
     *,
     query_context: dict[str, Any],
     knowledge_base: dict[str, Any],
+    deterministic_query_plan: DeterministicQueryPlan | None = None,
 ) -> DeterministicSqlResult:
     """Generate SQL from the normalized deterministic plan when it is renderable."""
+    query_plan = deterministic_query_plan or build_deterministic_query_plan(query_context)
+    render_context = query_plan.to_legacy_context()
+    if isinstance(query_context, dict):
+        query_context["deterministic_query_plan"] = query_plan.to_dict()
+
+    if not query_plan.executable:
+        plan = DeterministicSqlPlan(
+            query_shape=query_plan.query_shape or "unknown",
+            status="cannot_plan_safely",
+            supported_now=True,
+            missing_evidence=list(query_plan.missing_required_fields),
+            route_reason=query_plan.reason_code or "deterministic query plan is not executable",
+        )
+        return DeterministicSqlResult(
+            status="cannot_plan_safely",
+            reason=plan.route_reason,
+            plan=plan,
+            query_plan=query_plan,
+        )
+
     plan = build_deterministic_sql_plan(
-        query_context=query_context,
+        query_context=render_context,
         knowledge_base=knowledge_base,
     )
     if plan.status != "ready" or not plan.can_render:
@@ -806,6 +829,7 @@ def generate_deterministic_sql(
             status=status,
             reason=plan.route_reason,
             plan=plan,
+            query_plan=query_plan,
         )
 
     renderer = _PLAN_RENDERERS.get(plan.query_shape)
@@ -814,6 +838,7 @@ def generate_deterministic_sql(
             status="not_applicable",
             reason=f"no deterministic renderer is registered for {plan.query_shape}",
             plan=plan,
+            query_plan=query_plan,
         )
 
     sql = renderer(plan)
@@ -822,6 +847,7 @@ def generate_deterministic_sql(
         sql=sql,
         reason=plan.route_reason,
         plan=plan,
+        query_plan=query_plan,
     )
 
 
@@ -829,11 +855,13 @@ def generate_single_table_aggregate_sql(
     *,
     query_context: dict[str, Any],
     knowledge_base: dict[str, Any],
+    deterministic_query_plan: DeterministicQueryPlan | None = None,
 ) -> DeterministicSqlResult:
     """Compatibility wrapper for the current Phase 1A aggregate entry point."""
     result = generate_deterministic_sql(
         query_context=query_context,
         knowledge_base=knowledge_base,
+        deterministic_query_plan=deterministic_query_plan,
     )
     if result.status == "generated":
         return result
@@ -844,11 +872,13 @@ def generate_single_table_aggregate_sql(
             status="cannot_plan_safely",
             reason=plan.route_reason,
             plan=plan,
+            query_plan=result.query_plan,
         )
     return DeterministicSqlResult(
         status="not_applicable",
         reason=(plan.route_reason if plan else result.reason),
         plan=plan,
+        query_plan=result.query_plan,
     )
 
 
