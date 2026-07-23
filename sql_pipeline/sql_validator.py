@@ -16,6 +16,12 @@ from kb_pipeline.relationship_graph import (
     find_safe_direct_join_relationships,
 )
 from kb_pipeline.schema_facts import resolved_semantic_type
+from sql_pipeline.query_plan import DeterministicQueryPlan, build_deterministic_query_plan
+from sql_pipeline.validation_result import (
+    SQLValidationResult,
+    passed_validation_result,
+    rejected_validation_result,
+)
 
 # Forbidden DML/DDL keywords that must never appear in a safe SELECT query.
 _FORBIDDEN_KEYWORDS = [
@@ -1701,3 +1707,258 @@ def validate_sql_structure(
         return False, partial_reason
 
     return True, "SQL structure is valid"
+
+
+def _reason_code(message: str, default: str = "validation_rejected") -> str:
+    text = re.sub(r"[^a-z0-9]+", "_", str(message or "").lower()).strip("_")
+    return text[:80] or default
+
+
+def _coerce_query_plan(
+    deterministic_query_plan: DeterministicQueryPlan | dict[str, Any] | None,
+    query_context: dict[str, Any] | None,
+) -> DeterministicQueryPlan | None:
+    if isinstance(deterministic_query_plan, DeterministicQueryPlan):
+        return deterministic_query_plan
+    if isinstance(deterministic_query_plan, dict):
+        return DeterministicQueryPlan(**deterministic_query_plan)
+    if isinstance(query_context, dict):
+        plan = query_context.get("deterministic_query_plan")
+        if isinstance(plan, DeterministicQueryPlan):
+            return plan
+        if isinstance(plan, dict):
+            return DeterministicQueryPlan(**plan)
+        return build_deterministic_query_plan(query_context)
+    return None
+
+
+def _plan_result_fields(plan: DeterministicQueryPlan | None) -> dict[str, Any]:
+    if plan is None:
+        return {}
+    return {
+        "query_shape": plan.query_shape,
+        "route": plan.route,
+        "plan_contract_version": plan.contract_version,
+        "schema_fingerprint": plan.schema_fingerprint,
+        "graph_fingerprint": plan.graph_fingerprint,
+        "validated_filters": list(plan.where_filters),
+        "validated_grouping": list(plan.group_by_columns),
+        "validated_having": list(plan.having_filters),
+        "validated_ordering": dict(plan.order_by or plan.ranking_decision or {}),
+        "validated_limit": plan.limit,
+    }
+
+
+def _qualified_identifier_name(identifier: str) -> str:
+    return _normalize_identifier(str(identifier or "").strip())
+
+
+def _extract_from_join_tables(sql: str, knowledge_base: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
+    table_ok, _reason, referenced_tables, alias_to_table = _extract_table_references(sql, knowledge_base or {})
+    if table_ok:
+        return referenced_tables, alias_to_table
+    return [], {}
+
+
+def _extract_limit(sql: str) -> int | None:
+    match = re.search(r"\bLIMIT\s+(\d+)\s*;?\s*$", str(sql or ""), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _extract_selected_column_refs(sql: str, alias_to_table: dict[str, str]) -> set[tuple[str, str]]:
+    match = re.search(r"\bSELECT\b\s+(.*?)\s+\bFROM\b", str(sql or ""), re.IGNORECASE | re.DOTALL)
+    if not match:
+        return set()
+    segment = match.group(1)
+    refs: set[tuple[str, str]] = set()
+    for table_or_alias, column in re.findall(
+        r"(`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)\s*\.\s*(`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)",
+        segment,
+    ):
+        owner = _qualified_identifier_name(table_or_alias)
+        table = alias_to_table.get(owner.lower(), alias_to_table.get(owner, owner))
+        refs.add((table, _qualified_identifier_name(column)))
+    if refs:
+        return refs
+    bare_columns = [
+        _qualified_identifier_name(part)
+        for part in re.split(r"\s*,\s*", segment)
+        if re.fullmatch(r"`[^`]+`|[A-Za-z_][A-Za-z0-9_]*", part.strip())
+    ]
+    return {("", column) for column in bare_columns if column != "*"}
+
+
+def _approved_projection_refs(plan: DeterministicQueryPlan) -> set[tuple[str, str]]:
+    refs: set[tuple[str, str]] = set()
+    for entry in plan.selected_columns:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("kind") or "") == "aggregate":
+            continue
+        table = str(entry.get("table") or "").strip()
+        column = str(entry.get("column") or "").strip()
+        if column:
+            refs.add((table, column))
+    return refs
+
+
+def _planned_tables(plan: DeterministicQueryPlan) -> set[str]:
+    tables = {str(plan.base_table or "").strip(), *[str(value).strip() for value in plan.source_tables]}
+    tables.update(str(value).strip() for value in plan.joined_tables)
+    if isinstance(plan.selected_join_path, dict):
+        tables.add(str(plan.selected_join_path.get("base_table") or "").strip())
+        tables.update(str(value).strip() for value in (plan.selected_join_path.get("joined_tables") or []))
+    return {table for table in tables if table}
+
+
+def _edge_signature(edge: dict[str, Any]) -> tuple[tuple[str, str], tuple[str, str]]:
+    left = (str(edge.get("from_table") or ""), str(edge.get("from_column") or ""))
+    right = (str(edge.get("to_table") or ""), str(edge.get("to_column") or ""))
+    return tuple(sorted((left, right)))  # type: ignore[return-value]
+
+
+def _validate_plan_contract(
+    sql: str,
+    knowledge_base: dict[str, Any],
+    plan: DeterministicQueryPlan,
+) -> tuple[bool, str, dict[str, Any]]:
+    if not plan.executable:
+        return False, "Non-executable deterministic query plan cannot validate executable SQL.", {}
+    if plan.missing_required_fields:
+        return False, f"Deterministic query plan is missing required fields: {', '.join(plan.missing_required_fields)}.", {}
+
+    stripped = clean_sql_response(sql).strip()
+    unsupported_patterns = [
+        (r"\bWITH\b", "CTE is not supported by deterministic validation."),
+        (r"\bUNION\b", "UNION is not supported by deterministic validation."),
+        (r"\bCOUNT\s*\(\s*DISTINCT\b", "COUNT DISTINCT is not supported by deterministic validation."),
+        (r"\bOFFSET\b", "OFFSET is not supported by deterministic validation."),
+        (r"\bFOR\s+UPDATE\b", "Locking clauses are not supported by deterministic validation."),
+        (r"\bCALL\b|\bEXEC(?:UTE)?\b", "Stored procedure calls are not supported by deterministic validation."),
+        (r"\bLOAD_FILE\s*\(", "File/system functions are not supported by deterministic validation."),
+    ]
+    for pattern, message in unsupported_patterns:
+        if re.search(pattern, stripped, re.IGNORECASE):
+            return False, message, {}
+    if re.search(r"\bFROM\s*\(", stripped, re.IGNORECASE) or re.search(r"\b(?:IN|EXISTS)\s*\(\s*SELECT\b", stripped, re.IGNORECASE):
+        return False, "Subqueries are not supported by deterministic validation.", {}
+
+    referenced_tables, alias_to_table = _extract_from_join_tables(stripped, knowledge_base)
+    join_ok, join_reason, join_equalities = _join_on_equalities(stripped, alias_to_table)
+    if not join_ok:
+        return False, join_reason, {}
+    validated: dict[str, Any] = {
+        "validated_tables": referenced_tables,
+        "validated_columns": sorted(f"{table}.{column}" if table else column for table, column in _extract_selected_column_refs(stripped, alias_to_table)),
+        "validated_joins": join_equalities,
+        "validated_limit": _extract_limit(stripped),
+    }
+    if plan.base_table and referenced_tables and referenced_tables[0] != plan.base_table:
+        return False, "SQL FROM table does not match deterministic query plan base_table.", validated
+
+    allowed_tables = _planned_tables(plan)
+    extra_tables = [table for table in referenced_tables if allowed_tables and table not in allowed_tables]
+    if extra_tables:
+        return False, f"SQL references table outside deterministic query plan: {extra_tables[0]}.", validated
+
+    if isinstance(plan.selected_join_path, dict) and plan.selected_join_path:
+        required_tables = _planned_tables(plan)
+        missing_tables = [table for table in required_tables if table not in referenced_tables]
+        if missing_tables:
+            return False, f"SQL is missing selected_join_path table: {missing_tables[0]}.", validated
+        planned_edges = [_edge_signature(edge) for edge in plan.join_edges if isinstance(edge, dict)]
+        sql_edges = [
+            tuple(sorted(((left_table, left_column), (right_table, right_column))))
+            for left_table, left_column, right_table, right_column in validated["validated_joins"]
+        ]
+        if len(sql_edges) != len(planned_edges):
+            return False, "SQL JOIN count does not match deterministic query plan.", validated
+        if sorted(sql_edges) != sorted(planned_edges):
+            return False, "SQL JOIN predicates do not match deterministic query plan.", validated
+
+    approved_projection = _approved_projection_refs(plan)
+    selected_refs = _extract_selected_column_refs(stripped, alias_to_table)
+    select_match = re.search(r"\bSELECT\b\s+(.*?)\s+\bFROM\b", stripped, re.IGNORECASE | re.DOTALL)
+    select_segment = select_match.group(1) if select_match else ""
+    has_select_aggregate = bool(re.search(r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\(", select_segment, re.IGNORECASE))
+    if approved_projection and selected_refs and not has_select_aggregate:
+        normalized_selected = {
+            (table or plan.base_table, column)
+            for table, column in selected_refs
+            if column != "*"
+        }
+        extras = [ref for ref in normalized_selected if ref not in approved_projection]
+        if extras:
+            table, column = extras[0]
+            return False, f"SQL selected column is not approved by deterministic query plan: {table}.{column}.", validated
+
+    has_group_by = bool(re.search(r"\bGROUP\s+BY\b", stripped, re.IGNORECASE))
+    if has_group_by and not plan.group_by_columns:
+        return False, "SQL GROUP BY is not approved by deterministic query plan.", validated
+    if plan.group_by_columns and not has_group_by:
+        return False, "SQL is missing deterministic query plan GROUP BY.", validated
+    if re.search(r"\bHAVING\b", stripped, re.IGNORECASE) and not plan.having_filters:
+        return False, "SQL HAVING is not approved by deterministic query plan.", validated
+    if plan.having_filters and not re.search(r"\bHAVING\b", stripped, re.IGNORECASE):
+        return False, "SQL is missing deterministic query plan HAVING.", validated
+
+    plan_limit = plan.limit
+    sql_limit = validated["validated_limit"]
+    if plan_limit is not None and sql_limit != plan_limit:
+        return False, "SQL LIMIT does not match deterministic query plan.", validated
+    if sql_limit is not None and (sql_limit < 1 or sql_limit > 1000):
+        return False, "SQL LIMIT is outside the allowed range.", validated
+
+    if plan.query_shape == "joined_aggregate" and len(plan.join_edges) == 2 and plan.grain_preserved is not True:
+        return False, "Two-edge joined aggregate requires preserved grain in deterministic query plan.", validated
+
+    return True, "SQL matches deterministic query plan.", validated
+
+
+def validate_sql_contract(
+    sql: str,
+    knowledge_base: dict[str, Any] | None = None,
+    *,
+    deterministic_query_plan: DeterministicQueryPlan | dict[str, Any] | None = None,
+    selected_join_path: dict[str, Any] | None = None,
+    query_context: dict[str, Any] | None = None,
+) -> SQLValidationResult:
+    """Validate SQL and return the canonical production validation contract."""
+    plan = _coerce_query_plan(deterministic_query_plan, query_context)
+    result_fields = _plan_result_fields(plan)
+
+    safety_ok, safety_reason = validate_sql(sql)
+    if not safety_ok:
+        return rejected_validation_result(sql, _reason_code(safety_reason), safety_reason, **result_fields)
+
+    kb = knowledge_base or {}
+    path = selected_join_path or (plan.selected_join_path if plan else None)
+    structure_ok, structure_reason = validate_sql_structure(
+        sql,
+        kb,
+        selected_join_path=path,
+        query_context=query_context or (plan.to_legacy_context() if plan else None),
+    )
+    if not structure_ok:
+        return rejected_validation_result(sql, _reason_code(structure_reason), structure_reason, **result_fields)
+
+    validated: dict[str, Any] = {}
+    if plan is not None:
+        plan_ok, plan_reason, validated = _validate_plan_contract(sql, kb, plan)
+        if not plan_ok:
+            return rejected_validation_result(
+                sql,
+                _reason_code(plan_reason, "plan_contract_rejected"),
+                plan_reason,
+                **{**result_fields, **validated},
+            )
+
+    return passed_validation_result(
+        sql,
+        **{
+            **result_fields,
+            **validated,
+            "selected_join_path_verified": bool(plan and plan.selected_join_path),
+            "grain_verified": bool(not plan or plan.grain_preserved is not False),
+        },
+    )

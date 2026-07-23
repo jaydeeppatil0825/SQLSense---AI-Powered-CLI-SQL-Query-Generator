@@ -28,7 +28,13 @@ from sql_pipeline.sql_generator import (
     generate_sql_with_retry as _blocked_generate_sql_with_retry,
 )
 from query_pipeline.question_normalizer import normalize_question, is_too_ambiguous
-from sql_pipeline.sql_validator import validate_sql, validate_sql_structure, add_limit_if_missing, extract_requested_limit
+from sql_pipeline.sql_validator import (
+    validate_sql,
+    validate_sql_contract,
+    validate_sql_structure,
+    add_limit_if_missing,
+    extract_requested_limit,
+)
 from query_pipeline.conversation.followup_detector import detect_follow_up
 from query_pipeline.conversation.question_rewriter import rewrite_follow_up_question
 from query_pipeline.conversation.action_detector import detect_conversation_action
@@ -1875,6 +1881,7 @@ class QuestionService:
         knowledge_base: Optional[Dict[str, Any]] = None,
         selected_join_path: Optional[Dict[str, Any]] = None,
         query_context: Optional[Dict[str, Any]] = None,
+        deterministic_query_plan: Optional[Any] = None,
     ) -> Tuple[bool, str]:
         """
         Validate SQL for safety and structure.
@@ -1886,6 +1893,20 @@ class QuestionService:
         Returns:
             (is_valid, reason)
         """
+        if deterministic_query_plan is not None:
+            result = validate_sql_contract(
+                sql,
+                knowledge_base or {},
+                deterministic_query_plan=deterministic_query_plan,
+                selected_join_path=selected_join_path,
+                query_context=query_context,
+            )
+            if result.valid:
+                return True, "SQL is valid"
+            if result.violations:
+                return False, result.violations[0].message
+            return False, result.reason_code or "SQL validation failed"
+
         # Validate safety
         is_valid, reason = validate_sql(sql)
         if not is_valid:
