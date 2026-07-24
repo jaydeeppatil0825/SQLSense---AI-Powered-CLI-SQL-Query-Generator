@@ -49,6 +49,26 @@ def test_compare_rows_accepts_unordered_columns():
     assert runner.compare_rows(actual, expected, ordered=False) == "match_unordered_columns"
 
 
+def test_compare_sql_semantics_rejects_wrong_grouping_table():
+    actual_sql = "SELECT delivery_city, SUM(shipping_cost) FROM shipments GROUP BY delivery_city"
+    expected_sql = (
+        "SELECT c.city, SUM(s.shipping_cost) "
+        "FROM shipments s "
+        "INNER JOIN orders o ON s.order_id = o.order_id "
+        "INNER JOIN customers c ON o.customer_id = c.customer_id "
+        "GROUP BY c.city"
+    )
+
+    assert runner.compare_sql_semantics(actual_sql, expected_sql) == "sql_table_mismatch"
+
+
+def test_compare_sql_semantics_rejects_wrong_group_by_column():
+    actual_sql = "SELECT delivery_city, SUM(shipping_cost) FROM shipments GROUP BY delivery_city"
+    expected_sql = "SELECT city, SUM(shipping_cost) FROM shipments GROUP BY city"
+
+    assert runner.compare_sql_semantics(actual_sql, expected_sql) == "sql_group_by_mismatch"
+
+
 def test_rewrite_fixture_database_only_changes_default_lab_name():
     sql = "DROP DATABASE IF EXISTS sqlsense_current_scope_business_lab; USE sqlsense_current_scope_business_lab;"
 

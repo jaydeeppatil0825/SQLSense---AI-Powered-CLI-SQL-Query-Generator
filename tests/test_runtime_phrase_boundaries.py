@@ -2,6 +2,7 @@ from datetime import date
 
 from query_pipeline.intent_builder import build_intent
 from query_pipeline.query_planner import build_query_context
+from query_pipeline.planner.role_resolver import rank_role_candidates
 from sql_pipeline.deterministic_sql_generator import generate_deterministic_sql
 
 
@@ -23,6 +24,13 @@ KB = {
             {"name": "product_status", "type": "VARCHAR(30)", "semantic_type": "status", "sample_values": ["Active", "Inactive"]},
             {"name": "stock_quantity", "type": "INT", "semantic_type": "quantity", "is_measure": True},
             {"name": "unit_price", "type": "DECIMAL(12,2)", "semantic_type": "money", "is_measure": True},
+        ]
+    },
+    "categories": {
+        "columns": [
+            {"name": "category_id", "type": "INT", "semantic_type": "id"},
+            {"name": "category_name", "type": "VARCHAR(80)", "semantic_type": "name"},
+            {"name": "category_status", "type": "VARCHAR(30)", "semantic_type": "status"},
         ]
     },
     "payments": {
@@ -222,3 +230,54 @@ def test_human_date_after_phrase_resolves_date_filter():
     assert [(entry["column"], entry.get("operator"), entry.get("value")) for entry in context["selected_filters"]] == [
         ("payment_date", "after", "2026-04-01"),
     ]
+
+
+def test_count_having_with_status_modifier_preserves_filter_boundary():
+    intent = build_intent("customer regions with more than 2 active customers", today=date(2026, 7, 23))
+
+    assert intent["intent_type"] == "grouped_summary"
+    assert intent["aggregate_function"] == "count"
+    assert intent["requested_dimensions"] == ["customer regions"]
+    assert intent["structured_having"][0]["aggregate_function"] == "count"
+    assert intent["structured_having"][0]["entity_phrase"] == "active customers"
+    assert intent["structured_filters"] == [
+        {
+            "raw_phrase": "active",
+            "field": "status",
+            "field_phrase": "status",
+            "operator": "eq",
+            "value": "active",
+            "value_phrase": "active",
+            "values": ["active"],
+            "conjunction": None,
+        }
+    ]
+
+
+def test_supplied_by_phrase_is_joined_lookup_not_grouped_aggregate():
+    intent = build_intent("show order items for products supplied by suppliers in Pune")
+
+    assert intent["intent_type"] == "list"
+    assert intent["requested_dimensions"] == []
+    assert intent["join_lookup_request"] == {
+        "requested": True,
+        "base_entity_phrase": "order items",
+        "related_request_phrase": "suppliers",
+        "requested_output_fields": [],
+        "projection_mode": "broad_related",
+    }
+    assert intent["shape_decision"]["selected_shape"] == "joined_lookup"
+
+
+def test_product_category_prefers_entity_name_over_status_noise():
+    candidates = [
+        _candidate("categories", "category_name", semantic_type="name", is_dimension=True),
+        _candidate("categories", "category_status", semantic_type="status", is_dimension=True),
+        _candidate("products", "product_status", semantic_type="status", is_dimension=True),
+    ]
+
+    result = rank_role_candidates("product category", candidates, role="dimension")
+
+    assert result["status"] == "resolved"
+    selected = result["selected"]["candidate"]
+    assert (selected["table"], selected["column"]) == ("categories", "category_name")

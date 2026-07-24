@@ -1185,6 +1185,37 @@ def _apply_joined_aggregate_contract(
                 "join_need", "relationship_graph_lookup", "safe_join_path",
             },
         )
+    selected_filters = [
+        dict(entry)
+        for entry in selected_filters
+        if str(entry.get("table") or "") in path_tables
+    ]
+    filter_owner_phrases = [
+        str(deferred_source_filter_phrase or ""),
+        str(source_phrase or ""),
+        str(intent.get("target_entity_phrase") or ""),
+        str(next(iter(intent.get("source_scope") or []), "")),
+    ]
+    for filter_owner_phrase in filter_owner_phrases:
+        cleaned_owner_phrase = strip_leading_status_entity_modifier(filter_owner_phrase)
+        if not cleaned_owner_phrase:
+            continue
+        owner_table, owner_status = _resolve_join_table(
+            cleaned_owner_phrase,
+            knowledge_base,
+            retrieved_tables,
+        )
+        if owner_status != "resolved" or owner_table not in path_tables:
+            continue
+        owner_filters = [
+            dict(entry)
+            for entry in selected_filters
+            if str(entry.get("table") or "") == owner_table
+        ]
+        if owner_filters:
+            selected_filters = owner_filters
+            break
+    selected_filters = _dedupe_selected_filters(selected_filters)
     filter_tables = {str(entry.get("table") or "") for entry in selected_filters}
     if not filter_tables <= path_tables:
         return _joined_aggregate_failure_context(

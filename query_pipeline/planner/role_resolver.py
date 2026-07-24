@@ -589,6 +589,7 @@ def _dimension_candidate_is_join_key(entry: dict[str, Any], column_tokens: set[s
 def _apply_dimension_display_preferences(
     *,
     phrase_tokens: set[str],
+    table_tokens: set[str],
     column_name: str,
     column_tokens: set[str],
     entry: dict[str, Any],
@@ -597,10 +598,23 @@ def _apply_dimension_display_preferences(
 ) -> tuple[float, list[str]]:
     penalties: list[str] = []
     explicit_identifier = _dimension_identifier_explicitly_requested(phrase_tokens)
-    display_tokens = _dimension_display_tokens(column_name)
+    semantic_type = _candidate_semantic_type(entry)
+    requested_status = "status" in phrase_tokens
+    display_tokens = set(_dimension_display_tokens(column_name))
+    if not requested_status:
+        display_tokens.discard("status")
     if display_tokens and not explicit_identifier:
         score += 0.08
         reasons.append(f"display-friendly dimension column matched: {', '.join(sorted(display_tokens))}")
+    if table_tokens and table_tokens <= phrase_tokens and display_tokens & table_tokens and not explicit_identifier:
+        score += 0.06
+        reasons.append("entity display column matched requested dimension owner")
+    if {"name", "title", "label"} & column_tokens and not explicit_identifier:
+        score += 0.04
+        reasons.append("descriptive label column preferred for display dimension")
+    if semantic_type == "status" and not requested_status:
+        score = max(0.0, score - 0.12)
+        penalties.append("status dimension penalty without explicit status request")
 
     if _dimension_candidate_is_join_key(entry, column_tokens) and not explicit_identifier:
         score = max(0.0, score - 0.25)
@@ -742,6 +756,7 @@ def score_role_candidate(
     if role == "dimension":
         score, penalties = _apply_dimension_display_preferences(
             phrase_tokens=phrase_tokens,
+            table_tokens=table_tokens,
             column_name=column_name,
             column_tokens=column_tokens,
             entry=entry,

@@ -350,6 +350,16 @@ def _apply_intent_contract(intent: Dict[str, Any], question: str, *, today: date
     if interval_raw_phrases:
         _scrub_interval_role_phrases(normalized, question, interval_raw_phrases)
     structured_having = _extract_structured_having(question)
+    for having_entry in structured_having:
+        if not isinstance(having_entry, dict):
+            continue
+        modifier_filter = _status_modifier_filter_from_phrase(str(having_entry.get("entity_phrase") or ""))
+        if modifier_filter and not any(
+            str(entry.get("raw_phrase") or "").strip().lower()
+            == str(modifier_filter.get("raw_phrase") or "").strip().lower()
+            for entry in structured_filters
+        ):
+            structured_filters.append(modifier_filter)
     keyword_markers = _extract_keyword_markers(question)
     intent_type = str(normalized.get("intent_type") or "unknown").strip().lower()
     shape_decision = normalized.get("shape_decision")
@@ -790,7 +800,7 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
         primary_phrase = _cleanup_phrase(body_without_scope)
         if primary_phrase:
             requested_dimensions = [primary_phrase]
-    elif by_parts:
+    elif by_parts and not join_lookup_request.get("requested"):
         left, right = by_parts
         left = _cleanup_phrase(left)
         right = _cleanup_phrase(right)
@@ -854,6 +864,13 @@ def _build_fallback_intent(question: str) -> Dict[str, Any]:
                 implicit_dimension = _extract_implicit_having_dimension(body)
                 if implicit_dimension:
                     requested_dimensions = [implicit_dimension]
+
+    if join_lookup_request.get("requested"):
+        intent_type = "list"
+        business_operation = "browse"
+        aggregate_function = None
+        requested_metrics = []
+        requested_dimensions = []
 
     shape_ranking_diagnostics = ranking_diagnostics
     if requested_sort and not shape_ranking_diagnostics.get("requested"):
@@ -1432,6 +1449,26 @@ def _extract_join_lookup_request(body: str) -> dict[str, Any]:
     if not cleaned:
         return _empty_join_lookup_request()
 
+    supplied_match = re.search(
+        r"\s+for\s+(.+?)\s+(?:supplied|provided|made)\s+by\s+(.+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if supplied_match:
+        base_phrase = _join_lookup_entity_phrase(cleaned[: supplied_match.start()])
+        related_phrase = _cleanup_phrase(supplied_match.group(2))
+        related_phrase = _cleanup_phrase(
+            re.split(r"\s+(?:in|where|with)\s+", related_phrase, maxsplit=1, flags=re.IGNORECASE)[0]
+        )
+        if base_phrase and related_phrase:
+            return {
+                "requested": True,
+                "base_entity_phrase": base_phrase,
+                "related_request_phrase": _join_lookup_entity_phrase(related_phrase) or related_phrase,
+                "requested_output_fields": [],
+                "projection_mode": "broad_related",
+            }
+
     with_match = _JOIN_LOOKUP_CONNECTOR_RE.search(cleaned)
     if with_match:
         base_phrase = _join_lookup_entity_phrase(cleaned[: with_match.start()])
@@ -1442,6 +1479,8 @@ def _extract_join_lookup_request(body: str) -> dict[str, Any]:
         if not base_phrase or not related_phrase:
             return _empty_join_lookup_request()
         if _with_phrase_is_row_filter(related_phrase):
+            return _empty_join_lookup_request()
+        if _parse_having_condition(related_phrase).get("aggregate_function"):
             return _empty_join_lookup_request()
         aggregate_condition = bool(
             re.match(r"^(?:sum|total|average|avg|mean|count|minimum|min|maximum|max)\b", related_phrase, re.IGNORECASE)
@@ -1836,6 +1875,25 @@ def _extract_leading_status_modifier_filter(question: str) -> dict[str, Any] | N
     }
 
 
+def _status_modifier_filter_from_phrase(phrase: str) -> dict[str, Any] | None:
+    tokens = _tokenize(phrase)
+    if len(tokens) < 2:
+        return None
+    status = tokens[0].lower()
+    if status not in _STATUS_MODIFIER_TOKENS:
+        return None
+    return {
+        "raw_phrase": status,
+        "field": "status",
+        "field_phrase": "status",
+        "operator": "eq",
+        "value": status,
+        "value_phrase": status,
+        "values": [status],
+        "conjunction": None,
+    }
+
+
 def _extract_interval_filters(question: str, *, today: date | None = None) -> list[dict[str, Any]]:
     current = today or date.today()
     results: list[dict[str, Any]] = []
@@ -2148,6 +2206,7 @@ def _parse_having_condition(phrase: str) -> dict[str, Any]:
         entry["value"] = count_prefix_match.group("value")
         entry["value_phrase"] = count_prefix_match.group("value")
         entry["values"] = [count_prefix_match.group("value")]
+        entry["entity_phrase"] = _cleanup_phrase(count_prefix_match.group("entity"))
         return entry
 
     operator_patterns = (

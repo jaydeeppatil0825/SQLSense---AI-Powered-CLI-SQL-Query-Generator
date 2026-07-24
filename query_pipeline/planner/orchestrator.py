@@ -1073,10 +1073,12 @@ def _apply_multi_hop_join_lookup_contract(
     field_tables = {str(field.get("table") or "") for field in resolved_fields if str(field.get("table") or "")}
     target_tables: set[str] = set(field_tables - {base_table})
     related_phrase = str(lookup.get("related_request_phrase") or "").strip()
+    related_table = ""
     if related_phrase:
-        target_table, target_status = _resolve_join_table(related_phrase, knowledge_base, retrieved_tables)
-        if target_status == "resolved" and target_table:
-            target_tables.add(target_table)
+        resolved_related_table, target_status = _resolve_join_table(related_phrase, knowledge_base, retrieved_tables)
+        if target_status == "resolved" and resolved_related_table:
+            related_table = resolved_related_table
+            target_tables.add(related_table)
 
     target_tables.discard(base_table)
     if not target_tables:
@@ -1168,8 +1170,16 @@ def _apply_multi_hop_join_lookup_contract(
     selected_filters = [
         dict(entry)
         for entry in (context.get("selected_filters") or [])
-        if isinstance(entry, dict)
+        if isinstance(entry, dict) and str(entry.get("table") or "") in set(result["tables"])
     ]
+    if related_table and selected_filters:
+        related_filters = [
+            dict(entry)
+            for entry in selected_filters
+            if str(entry.get("table") or "") == related_table
+        ]
+        if related_filters:
+            selected_filters = related_filters
     if base_filter_phrase:
         path_filters, filter_status = _source_scope_as_filters(
             base_filter_phrase,
@@ -1618,11 +1628,29 @@ def _normalize_planner_output(
     dimension_status = "not_required"
     resolved_dimensions = list(dimension_candidates)
     if primary_table and requested_dimensions:
-        resolved_dimensions, dimension_status = _resolve_role_candidate(
-            requested_dimensions[0],
+        dimension_phrase = requested_dimensions[0]
+        global_dimension_result = _rank_role_candidates(
+            dimension_phrase,
             dimension_candidates,
-            allowed_tables={primary_table},
+            role="dimension",
         )
+        global_selected = dict((global_dimension_result.get("selected") or {}).get("candidate") or {})
+        global_tier = str((global_dimension_result.get("selected") or {}).get("tier") or "")
+        global_table = str(global_selected.get("table") or "").strip()
+        if (
+            global_dimension_result.get("status") == "resolved"
+            and global_table
+            and global_table != primary_table
+            and global_tier in {"exact_normalized_column", "owner_qualified_exact"}
+        ):
+            resolved_dimensions = [global_selected]
+            dimension_status = "resolved"
+        else:
+            resolved_dimensions, dimension_status = _resolve_role_candidate(
+                dimension_phrase,
+                dimension_candidates,
+                allowed_tables={primary_table},
+            )
         if dimension_status == "resolved":
             dimension_candidates = resolved_dimensions
 
@@ -2443,10 +2471,30 @@ def _normalize_planner_output(
     if ambiguities:
         debug_trace.append({"stage": "ambiguities", "value": list(ambiguities)})
 
+    result_intent = dict(intent) if isinstance(intent, dict) else {"intent_type": str(intent or "").strip().lower()}
+    if selected_filters:
+        deduped_structured_filters: dict[tuple[str, str], dict[str, Any]] = {}
+        for entry in [
+            *[
+                dict(item)
+                for item in (result_intent.get("structured_filters") or [])
+                if isinstance(item, dict)
+            ],
+            *[dict(item) for item in selected_filters if isinstance(item, dict)],
+        ]:
+            raw_key = _normalize(str(entry.get("raw_phrase") or entry.get("term") or ""))
+            value_key = _normalize(str(entry.get("value_phrase") or entry.get("value") or ""))
+            key = (raw_key, value_key)
+            if key not in deduped_structured_filters or (
+                entry.get("table") and entry.get("column")
+            ):
+                deduped_structured_filters[key] = entry
+        result_intent["structured_filters"] = list(deduped_structured_filters.values())
+
     normalized_result = {
         "planner_contract_version": "1.0",
         "normalized_question": normalized_question,
-        "intent": intent if isinstance(intent, dict) else {"intent_type": str(intent or "").strip().lower()},
+        "intent": result_intent,
         "route": route_recommendation,
         "query_shape": query_shape,
         "route_recommendation": route_recommendation,
@@ -2523,6 +2571,16 @@ def build_query_context(
     normalized_question = _normalize(question)
     
     if intent and retrieved_context is not None:
+        if not intent.get("intent_contract_version"):
+            canonical_intent = _canonical_build_intent(normalized_question)
+            canonical_lookup = canonical_intent.get("join_lookup_request") or {}
+            intent_missing_structural_evidence = bool(
+                (canonical_intent.get("structured_having") and not intent.get("structured_having"))
+                or (canonical_intent.get("aggregate_function") and not intent.get("aggregate_function"))
+                or (canonical_lookup.get("requested") and not (intent.get("join_lookup_request") or {}).get("requested"))
+            )
+            if intent_missing_structural_evidence:
+                intent = canonical_intent
         return _build_query_context_from_retrieved_context(
             question,
             normalized_question,

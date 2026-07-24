@@ -581,8 +581,11 @@ def _filter_decision(
 ) -> dict[str, Any]:
     table_name = str(entry.get("table") or "").strip()
     column_name = str(entry.get("column") or entry.get("field") or "").strip()
+    aggregate_function = str(entry.get("aggregate_function") or "").strip().lower()
     reason = ""
-    if not table_name or not column_name:
+    if clause_scope == "having" and aggregate_function == "count" and table_name:
+        reason = ""
+    elif not table_name or not column_name:
         reason = "filter_column_missing"
     elif table_name not in path_tables:
         reason = "filter_table_outside_selected_path"

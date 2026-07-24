@@ -267,6 +267,95 @@ def expected_sql_is_ordered(sql: str) -> bool:
     return bool(re.search(r"\border\s+by\b", sql or "", re.IGNORECASE))
 
 
+_SQL_ALIAS_RESERVED = {
+    "inner", "left", "right", "full", "cross", "join", "on", "where",
+    "group", "having", "order", "limit", "union",
+}
+
+
+def _clean_sql_identifier(value: str) -> str:
+    return str(value or "").strip().strip("`\"[]").lower()
+
+
+def _sql_aliases(sql: str) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for match in re.finditer(
+        r"\b(?:from|join)\s+([`\"A-Za-z0-9_.]+)(?:\s+(?:as\s+)?([A-Za-z_][A-Za-z0-9_]*))?",
+        sql or "",
+        re.IGNORECASE,
+    ):
+        table = _clean_sql_identifier(match.group(1).split(".")[-1])
+        alias = _clean_sql_identifier(match.group(2) or "")
+        aliases[table] = table
+        if alias and alias not in _SQL_ALIAS_RESERVED:
+            aliases[alias] = table
+    return aliases
+
+
+def _normalize_sql_expr(expr: str, aliases: dict[str, str]) -> str:
+    cleaned = re.sub(r"\s+", " ", str(expr or "").strip().strip(";")).lower()
+    cleaned = cleaned.replace("`", "").replace('"', "")
+    for alias, table in sorted(aliases.items(), key=lambda item: -len(item[0])):
+        cleaned = re.sub(rf"\b{re.escape(alias)}\.", f"{table}.", cleaned)
+    return cleaned
+
+
+def _sql_tables(sql: str) -> set[str]:
+    return {
+        _clean_sql_identifier(match.group(1).split(".")[-1])
+        for match in re.finditer(r"\b(?:from|join)\s+([`\"A-Za-z0-9_.]+)", sql or "", re.IGNORECASE)
+    }
+
+
+def _sql_group_by(sql: str) -> tuple[str, ...]:
+    match = re.search(
+        r"\bgroup\s+by\s+(.+?)(?=\s+(?:having|order\s+by|limit)\b|;|$)",
+        sql or "",
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return ()
+    aliases = _sql_aliases(sql)
+    return tuple(
+        _normalize_sql_expr(part, aliases)
+        for part in match.group(1).split(",")
+        if _normalize_sql_expr(part, aliases)
+    )
+
+
+def _sql_join_predicates(sql: str) -> tuple[str, ...]:
+    aliases = _sql_aliases(sql)
+    predicates = []
+    for match in re.finditer(
+        r"\bon\s+(.+?)(?=\s+(?:inner|left|right|full|cross)?\s*join\b|\s+where\b|\s+group\s+by\b|\s+having\b|\s+order\s+by\b|\s+limit\b|;|$)",
+        sql or "",
+        re.IGNORECASE | re.DOTALL,
+    ):
+        predicate = _normalize_sql_expr(match.group(1), aliases)
+        if predicate:
+            predicates.append(predicate)
+    return tuple(sorted(predicates))
+
+
+def compare_sql_semantics(actual_sql: str, expected_sql: str) -> str:
+    actual_tables = _sql_tables(actual_sql)
+    expected_tables = _sql_tables(expected_sql)
+    if actual_tables != expected_tables:
+        return "sql_table_mismatch"
+
+    actual_joins = _sql_join_predicates(actual_sql)
+    expected_joins = _sql_join_predicates(expected_sql)
+    if actual_joins != expected_joins:
+        return "sql_join_mismatch"
+
+    actual_group_by = _sql_group_by(actual_sql)
+    expected_group_by = _sql_group_by(expected_sql)
+    if actual_group_by != expected_group_by:
+        return "sql_group_by_mismatch"
+
+    return "match"
+
+
 def execute_sql_rows(engine, sql: str) -> list[Any]:
     with engine.connect() as connection:
         result = connection.execute(text(sql))
@@ -330,6 +419,12 @@ def run_question(app: Any, expected_engine, case: ExpectedCase) -> QuestionRunRe
         actual_compare_rows = execute_sql_rows(expected_engine, sql)
         expected_rows = execute_sql_rows(expected_engine, case.expected_sql)
         output.expected_result_row_count = len(expected_rows)
+        sql_semantics = compare_sql_semantics(sql, case.expected_sql)
+        if sql_semantics != "match":
+            output.result_comparison_status = sql_semantics
+            output.passed = False
+            output.failed_stage = "comparison"
+            return output
         output.result_comparison_status = compare_rows(actual_compare_rows, expected_rows, expected_sql_is_ordered(case.expected_sql))
         output.passed = output.result_comparison_status in {"match", "match_unordered_columns"}
         output.failed_stage = "" if output.passed else "comparison"

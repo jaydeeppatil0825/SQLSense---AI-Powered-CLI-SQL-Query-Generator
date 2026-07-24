@@ -17,7 +17,7 @@
   "final_verdict": "failed",
   "git": {
     "branch": "codex/review-project-overview",
-    "commit": "0c841be7"
+    "commit": "f2314e82"
   },
   "kb_build": {
     "ai_enrichment_status": "completed",
@@ -27,7 +27,7 @@
       "glossary_fingerprint": "",
       "graph_fingerprint": "",
       "kb_fingerprint": "",
-      "schema_fingerprint": "6df2aa0790bb80889af5fc547c2bedc1d55fe2503724e122ad2eedaf194fb482",
+      "schema_fingerprint": "b51701a7eaa0c14fb2f50408f397ada7bd43f5f63a23b49e90d5d845539e572a",
       "vector_fingerprint": ""
     },
     "business_glossary": "generated",
@@ -54,7 +54,7 @@
     {
       "actual_result_row_count": 10,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 383,
+      "duration_ms": 150,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -76,7 +76,7 @@
     {
       "actual_result_row_count": 2,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 341,
+      "duration_ms": 138,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -98,7 +98,7 @@
     {
       "actual_result_row_count": 2,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 369,
+      "duration_ms": 121,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -120,7 +120,7 @@
     {
       "actual_result_row_count": 4,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 425,
+      "duration_ms": 172,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -142,7 +142,7 @@
     {
       "actual_result_row_count": 9,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 395,
+      "duration_ms": 183,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -164,7 +164,7 @@
     {
       "actual_result_row_count": 2,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 380,
+      "duration_ms": 138,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -186,7 +186,7 @@
     {
       "actual_result_row_count": 9,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 297,
+      "duration_ms": 113,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -208,7 +208,7 @@
     {
       "actual_result_row_count": 6,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 373,
+      "duration_ms": 127,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -230,7 +230,7 @@
     {
       "actual_result_row_count": 1,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 341,
+      "duration_ms": 117,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -252,7 +252,7 @@
     {
       "actual_result_row_count": 8,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 367,
+      "duration_ms": 110,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -274,7 +274,7 @@
     {
       "actual_result_row_count": 1,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 378,
+      "duration_ms": 119,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -296,7 +296,7 @@
     {
       "actual_result_row_count": 1,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 329,
+      "duration_ms": 142,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -318,7 +318,7 @@
     {
       "actual_result_row_count": 1,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 354,
+      "duration_ms": 206,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -340,7 +340,7 @@
     {
       "actual_result_row_count": 1,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 338,
+      "duration_ms": 190,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -362,7 +362,7 @@
     {
       "actual_result_row_count": 4,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 426,
+      "duration_ms": 213,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -384,7 +384,7 @@
     {
       "actual_result_row_count": 4,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 415,
+      "duration_ms": 250,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -406,7 +406,7 @@
     {
       "actual_result_row_count": 2,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 340,
+      "duration_ms": 208,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -428,7 +428,7 @@
     {
       "actual_result_row_count": 0,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 987,
+      "duration_ms": 513,
       "error_summary": "Cannot choose metric safely. Choices: quantity, unit_price, line_amount, stock_quantity. Please specify one.",
       "executable": false,
       "execution_status": "not_executed",
@@ -449,8 +449,8 @@
     },
     {
       "actual_result_row_count": 0,
-      "actual_route": "cannot_plan_safely",
-      "duration_ms": 1118,
+      "actual_route": "deterministic_sql_required",
+      "duration_ms": 422,
       "error_summary": "Cannot choose metric safely. Choices: stock_quantity, unit_price, quantity, line_amount. Please specify one.",
       "executable": false,
       "execution_status": "not_executed",
@@ -472,7 +472,7 @@
     {
       "actual_result_row_count": 2,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 465,
+      "duration_ms": 148,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -494,7 +494,7 @@
     {
       "actual_result_row_count": 5,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 375,
+      "duration_ms": 116,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -516,7 +516,7 @@
     {
       "actual_result_row_count": 3,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 395,
+      "duration_ms": 120,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -538,7 +538,7 @@
     {
       "actual_result_row_count": 3,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 337,
+      "duration_ms": 121,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -560,7 +560,7 @@
     {
       "actual_result_row_count": 3,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 394,
+      "duration_ms": 118,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -582,7 +582,7 @@
     {
       "actual_result_row_count": 15,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 315,
+      "duration_ms": 99,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -604,7 +604,7 @@
     {
       "actual_result_row_count": 15,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 415,
+      "duration_ms": 138,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -626,7 +626,7 @@
     {
       "actual_result_row_count": 15,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 441,
+      "duration_ms": 145,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -648,7 +648,7 @@
     {
       "actual_result_row_count": 15,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 425,
+      "duration_ms": 135,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -670,7 +670,7 @@
     {
       "actual_result_row_count": 43,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 412,
+      "duration_ms": 165,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -692,7 +692,7 @@
     {
       "actual_result_row_count": 15,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 434,
+      "duration_ms": 147,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -714,7 +714,7 @@
     {
       "actual_result_row_count": 11,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 451,
+      "duration_ms": 200,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -736,7 +736,7 @@
     {
       "actual_result_row_count": 7,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 415,
+      "duration_ms": 154,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -758,7 +758,7 @@
     {
       "actual_result_row_count": 14,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 457,
+      "duration_ms": 159,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -778,31 +778,31 @@
       "test_id": "33"
     },
     {
-      "actual_result_row_count": 3,
+      "actual_result_row_count": 4,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 395,
+      "duration_ms": 165,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
       "expected_category": "supported",
       "expected_result_row_count": 4,
       "expected_sql": "SELECT orders.order_status, AVG(payments.payment_amount) AS avg_payment_amount\nFROM payments\nINNER JOIN orders ON payments.order_id = orders.order_id\nGROUP BY orders.order_status;",
-      "failed_stage": "comparison",
-      "generated_sql": "SELECT payment_status, AVG(payment_amount) AS avg_payment_amount FROM payments GROUP BY payment_status;",
+      "failed_stage": "",
+      "generated_sql": "SELECT orders.order_status AS orders__order_status, AVG(payments.payment_amount) AS avg__payments__payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id GROUP BY orders.order_status;",
       "grain_decision": {},
-      "passed": false,
-      "query_shape": "grouped_aggregate",
+      "passed": true,
+      "query_shape": "joined_aggregate",
       "question": "average payment amount by order status",
-      "reason_code": "deterministic SQL generated for grouped_aggregate/group_by: single-table group_by SQL generated deterministically",
-      "result_comparison_status": "row_count_mismatch",
-      "selected_join_path_length": 0,
+      "reason_code": "deterministic SQL generated for joined_aggregate/group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence",
+      "result_comparison_status": "match",
+      "selected_join_path_length": 1,
       "sql_validation_status": "passed",
       "test_id": "34"
     },
     {
       "actual_result_row_count": 8,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 401,
+      "duration_ms": 160,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -824,7 +824,7 @@
     {
       "actual_result_row_count": 15,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 498,
+      "duration_ms": 170,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -846,7 +846,7 @@
     {
       "actual_result_row_count": 43,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 478,
+      "duration_ms": 147,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -868,7 +868,7 @@
     {
       "actual_result_row_count": 43,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 464,
+      "duration_ms": 209,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -890,7 +890,7 @@
     {
       "actual_result_row_count": 15,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 431,
+      "duration_ms": 128,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -912,7 +912,7 @@
     {
       "actual_result_row_count": 11,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 449,
+      "duration_ms": 169,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -973,31 +973,72 @@
       "test_id": "40"
     },
     {
-      "actual_result_row_count": 0,
-      "actual_route": "cannot_plan_safely",
-      "duration_ms": 297,
-      "error_summary": "Cannot choose dimension safely. Choices: category_name, category_status, product_name, product_status. Please specify one.",
-      "executable": false,
-      "execution_status": "not_executed",
+      "actual_result_row_count": 7,
+      "actual_route": "deterministic_sql_required",
+      "duration_ms": 144,
+      "error_summary": "",
+      "executable": true,
+      "execution_status": "passed",
       "expected_category": "supported",
-      "expected_result_row_count": 0,
+      "expected_result_row_count": 7,
       "expected_sql": "SELECT categories.category_name, SUM(order_items.line_amount) AS sum_line_amount\nFROM order_items\nINNER JOIN products ON order_items.product_id = products.product_id\nINNER JOIN categories ON products.category_id = categories.category_id\nGROUP BY categories.category_name;",
-      "failed_stage": "generator",
-      "generated_sql": "",
-      "grain_decision": {},
-      "passed": false,
+      "failed_stage": "",
+      "generated_sql": "SELECT categories.category_name AS categories__category_name, SUM(order_items.line_amount) AS sum__order_items__line_amount FROM order_items INNER JOIN products ON order_items.product_id = products.product_id INNER JOIN categories ON products.category_id = categories.category_id GROUP BY categories.category_name;",
+      "grain_decision": {
+        "edge_diagnostics": [
+          {
+            "foreign_key_side": {
+              "column": "product_id",
+              "table": "order_items"
+            },
+            "from_table": "order_items",
+            "preserves_metric_grain": true,
+            "referenced_side": {
+              "column": "product_id",
+              "table": "products"
+            },
+            "row_multiplication_risk": false,
+            "status": "grain_preserved",
+            "to_table": "products",
+            "traversal_direction": "many_to_one"
+          },
+          {
+            "foreign_key_side": {
+              "column": "category_id",
+              "table": "products"
+            },
+            "from_table": "products",
+            "preserves_metric_grain": true,
+            "referenced_side": {
+              "column": "category_id",
+              "table": "categories"
+            },
+            "row_multiplication_risk": false,
+            "status": "grain_preserved",
+            "to_table": "categories",
+            "traversal_direction": "many_to_one"
+          }
+        ],
+        "grain_preserved": true,
+        "reason": "all edges traverse many-to-one from metric grain",
+        "row_multiplication_risk": false,
+        "status": "grain_preserved",
+        "unknown_cardinality": false,
+        "unsupported_bridge_path": false
+      },
+      "passed": true,
       "query_shape": "joined_aggregate",
       "question": "total line amount by product category",
-      "reason_code": "joined aggregate dimension evidence is ambiguous",
-      "result_comparison_status": "no_actual_sql",
-      "selected_join_path_length": 0,
-      "sql_validation_status": "rejected",
+      "reason_code": "deterministic SQL generated for joined_aggregate/group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence",
+      "result_comparison_status": "match",
+      "selected_join_path_length": 2,
+      "sql_validation_status": "passed",
       "test_id": "41"
     },
     {
       "actual_result_row_count": 8,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 449,
+      "duration_ms": 136,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -1060,7 +1101,7 @@
     {
       "actual_result_row_count": 3,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 459,
+      "duration_ms": 150,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -1121,72 +1162,31 @@
       "test_id": "43"
     },
     {
-      "actual_result_row_count": 7,
-      "actual_route": "deterministic_sql_required",
-      "duration_ms": 531,
-      "error_summary": "",
-      "executable": true,
-      "execution_status": "passed",
+      "actual_result_row_count": 0,
+      "actual_route": "cannot_plan_safely",
+      "duration_ms": 119,
+      "error_summary": "Question could not be planned safely from the current schema context: joined aggregate filters must belong to the selected join path; missing evidence: where; ambiguous evidence: where.",
+      "executable": false,
+      "execution_status": "not_executed",
       "expected_category": "supported",
-      "expected_result_row_count": 7,
+      "expected_result_row_count": 0,
       "expected_sql": "SELECT suppliers.supplier_name, SUM(order_items.line_amount) AS sum_line_amount\nFROM order_items\nINNER JOIN products ON order_items.product_id = products.product_id\nINNER JOIN suppliers ON products.supplier_id = suppliers.supplier_id\nWHERE products.product_status = 'Active'\nGROUP BY suppliers.supplier_name;",
-      "failed_stage": "",
-      "generated_sql": "SELECT suppliers.supplier_name AS suppliers__supplier_name, SUM(order_items.line_amount) AS sum__order_items__line_amount FROM order_items INNER JOIN products ON order_items.product_id = products.product_id INNER JOIN suppliers ON products.supplier_id = suppliers.supplier_id WHERE products.product_status = 'Active' GROUP BY suppliers.supplier_name;",
-      "grain_decision": {
-        "edge_diagnostics": [
-          {
-            "foreign_key_side": {
-              "column": "product_id",
-              "table": "order_items"
-            },
-            "from_table": "order_items",
-            "preserves_metric_grain": true,
-            "referenced_side": {
-              "column": "product_id",
-              "table": "products"
-            },
-            "row_multiplication_risk": false,
-            "status": "grain_preserved",
-            "to_table": "products",
-            "traversal_direction": "many_to_one"
-          },
-          {
-            "foreign_key_side": {
-              "column": "supplier_id",
-              "table": "products"
-            },
-            "from_table": "products",
-            "preserves_metric_grain": true,
-            "referenced_side": {
-              "column": "supplier_id",
-              "table": "suppliers"
-            },
-            "row_multiplication_risk": false,
-            "status": "grain_preserved",
-            "to_table": "suppliers",
-            "traversal_direction": "many_to_one"
-          }
-        ],
-        "grain_preserved": true,
-        "reason": "all edges traverse many-to-one from metric grain",
-        "row_multiplication_risk": false,
-        "status": "grain_preserved",
-        "unknown_cardinality": false,
-        "unsupported_bridge_path": false
-      },
-      "passed": true,
+      "failed_stage": "generator",
+      "generated_sql": "",
+      "grain_decision": {},
+      "passed": false,
       "query_shape": "joined_aggregate",
       "question": "total line amount by supplier name for active products",
-      "reason_code": "deterministic SQL generated for joined_aggregate/where_group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence",
-      "result_comparison_status": "match",
-      "selected_join_path_length": 2,
-      "sql_validation_status": "passed",
+      "reason_code": "joined aggregate filters must belong to the selected join path",
+      "result_comparison_status": "no_actual_sql",
+      "selected_join_path_length": 0,
+      "sql_validation_status": "rejected",
       "test_id": "44"
     },
     {
       "actual_result_row_count": 3,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 477,
+      "duration_ms": 154,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -1194,7 +1194,7 @@
       "expected_result_row_count": 3,
       "expected_sql": "SELECT customers.region, COUNT(*) AS count_payments\nFROM payments\nINNER JOIN orders ON payments.order_id = orders.order_id\nINNER JOIN customers ON orders.customer_id = customers.customer_id\nWHERE payments.payment_status = 'Completed'\nGROUP BY customers.region;",
       "failed_stage": "",
-      "generated_sql": "SELECT customers.region AS customers__region, COUNT(*) AS count__payments__rows FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE payments.payment_status = 'completed' GROUP BY customers.region;",
+      "generated_sql": "SELECT customers.region AS customers__region, COUNT(*) AS count__payments__rows FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE payments.payment_status = 'Completed' GROUP BY customers.region;",
       "grain_decision": {
         "edge_diagnostics": [
           {
@@ -1247,31 +1247,72 @@
       "test_id": "45"
     },
     {
-      "actual_result_row_count": 0,
-      "actual_route": "cannot_plan_safely",
-      "duration_ms": 274,
-      "error_summary": "Cannot choose dimension safely. Choices: category_name, category_status, product_name, product_status. Please specify one.",
-      "executable": false,
-      "execution_status": "not_executed",
+      "actual_result_row_count": 7,
+      "actual_route": "deterministic_sql_required",
+      "duration_ms": 143,
+      "error_summary": "",
+      "executable": true,
+      "execution_status": "passed",
       "expected_category": "supported",
-      "expected_result_row_count": 0,
+      "expected_result_row_count": 7,
       "expected_sql": "SELECT categories.category_name, AVG(order_items.line_amount) AS avg_line_amount\nFROM order_items\nINNER JOIN products ON order_items.product_id = products.product_id\nINNER JOIN categories ON products.category_id = categories.category_id\nGROUP BY categories.category_name;",
-      "failed_stage": "generator",
-      "generated_sql": "",
-      "grain_decision": {},
-      "passed": false,
+      "failed_stage": "",
+      "generated_sql": "SELECT categories.category_name AS categories__category_name, AVG(order_items.line_amount) AS avg__order_items__line_amount FROM order_items INNER JOIN products ON order_items.product_id = products.product_id INNER JOIN categories ON products.category_id = categories.category_id GROUP BY categories.category_name;",
+      "grain_decision": {
+        "edge_diagnostics": [
+          {
+            "foreign_key_side": {
+              "column": "product_id",
+              "table": "order_items"
+            },
+            "from_table": "order_items",
+            "preserves_metric_grain": true,
+            "referenced_side": {
+              "column": "product_id",
+              "table": "products"
+            },
+            "row_multiplication_risk": false,
+            "status": "grain_preserved",
+            "to_table": "products",
+            "traversal_direction": "many_to_one"
+          },
+          {
+            "foreign_key_side": {
+              "column": "category_id",
+              "table": "products"
+            },
+            "from_table": "products",
+            "preserves_metric_grain": true,
+            "referenced_side": {
+              "column": "category_id",
+              "table": "categories"
+            },
+            "row_multiplication_risk": false,
+            "status": "grain_preserved",
+            "to_table": "categories",
+            "traversal_direction": "many_to_one"
+          }
+        ],
+        "grain_preserved": true,
+        "reason": "all edges traverse many-to-one from metric grain",
+        "row_multiplication_risk": false,
+        "status": "grain_preserved",
+        "unknown_cardinality": false,
+        "unsupported_bridge_path": false
+      },
+      "passed": true,
       "query_shape": "joined_aggregate",
       "question": "average line amount by product category",
-      "reason_code": "joined aggregate dimension evidence is ambiguous",
-      "result_comparison_status": "no_actual_sql",
-      "selected_join_path_length": 0,
-      "sql_validation_status": "rejected",
+      "reason_code": "deterministic SQL generated for joined_aggregate/group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence",
+      "result_comparison_status": "match",
+      "selected_join_path_length": 2,
+      "sql_validation_status": "passed",
       "test_id": "46"
     },
     {
       "actual_result_row_count": 11,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 405,
+      "duration_ms": 156,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
@@ -1279,87 +1320,169 @@
       "expected_result_row_count": 11,
       "expected_sql": "SELECT customers.city, SUM(shipments.shipping_cost) AS sum_shipping_cost\nFROM shipments\nINNER JOIN orders ON shipments.order_id = orders.order_id\nINNER JOIN customers ON orders.customer_id = customers.customer_id\nGROUP BY customers.city;",
       "failed_stage": "",
-      "generated_sql": "SELECT delivery_city, SUM(shipping_cost) AS sum_shipping_cost FROM shipments GROUP BY delivery_city;",
-      "grain_decision": {},
+      "generated_sql": "SELECT customers.city AS customers__city, SUM(shipments.shipping_cost) AS sum__shipments__shipping_cost FROM shipments INNER JOIN orders ON shipments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id GROUP BY customers.city;",
+      "grain_decision": {
+        "edge_diagnostics": [
+          {
+            "foreign_key_side": {
+              "column": "order_id",
+              "table": "shipments"
+            },
+            "from_table": "shipments",
+            "preserves_metric_grain": true,
+            "referenced_side": {
+              "column": "order_id",
+              "table": "orders"
+            },
+            "row_multiplication_risk": false,
+            "status": "grain_preserved",
+            "to_table": "orders",
+            "traversal_direction": "many_to_one"
+          },
+          {
+            "foreign_key_side": {
+              "column": "customer_id",
+              "table": "orders"
+            },
+            "from_table": "orders",
+            "preserves_metric_grain": true,
+            "referenced_side": {
+              "column": "customer_id",
+              "table": "customers"
+            },
+            "row_multiplication_risk": false,
+            "status": "grain_preserved",
+            "to_table": "customers",
+            "traversal_direction": "many_to_one"
+          }
+        ],
+        "grain_preserved": true,
+        "reason": "all edges traverse many-to-one from metric grain",
+        "row_multiplication_risk": false,
+        "status": "grain_preserved",
+        "unknown_cardinality": false,
+        "unsupported_bridge_path": false
+      },
       "passed": true,
-      "query_shape": "grouped_aggregate",
+      "query_shape": "joined_aggregate",
       "question": "total shipping cost by customer city",
-      "reason_code": "deterministic SQL generated for grouped_aggregate/group_by: single-table group_by SQL generated deterministically",
+      "reason_code": "deterministic SQL generated for joined_aggregate/group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence",
       "result_comparison_status": "match",
-      "selected_join_path_length": 0,
+      "selected_join_path_length": 2,
       "sql_validation_status": "passed",
       "test_id": "47"
     },
     {
-      "actual_result_row_count": 0,
-      "actual_route": "cannot_plan_safely",
-      "duration_ms": 272,
-      "error_summary": "Cannot choose dimension safely. Choices: category_name, category_status. Please specify one.",
-      "executable": false,
-      "execution_status": "not_executed",
-      "expected_category": "supported",
-      "expected_result_row_count": 0,
-      "expected_sql": "SELECT categories.category_name, SUM(order_items.line_amount) AS sum_line_amount\nFROM order_items\nINNER JOIN products ON order_items.product_id = products.product_id\nINNER JOIN categories ON products.category_id = categories.category_id\nGROUP BY categories.category_name\nORDER BY SUM(order_items.line_amount) DESC\nLIMIT 3;",
-      "failed_stage": "generator",
-      "generated_sql": "",
-      "grain_decision": {},
-      "passed": false,
-      "query_shape": "joined_aggregate",
-      "question": "top 3 product categories by total line amount",
-      "reason_code": "joined aggregate dimension evidence is ambiguous",
-      "result_comparison_status": "no_actual_sql",
-      "selected_join_path_length": 0,
-      "sql_validation_status": "rejected",
-      "test_id": "48"
-    },
-    {
-      "actual_result_row_count": 0,
-      "actual_route": "cannot_plan_safely",
-      "duration_ms": 1113,
-      "error_summary": "This query was understood, but deterministic SQL generation for this query shape is not implemented yet: filtered_query.",
-      "executable": false,
-      "execution_status": "not_executed",
-      "expected_category": "supported",
-      "expected_result_row_count": 0,
-      "expected_sql": "SELECT order_items.*, products.*, suppliers.*\nFROM order_items\nINNER JOIN products ON order_items.product_id = products.product_id\nINNER JOIN suppliers ON products.supplier_id = suppliers.supplier_id\nWHERE suppliers.city = 'Pune'\nLIMIT 50;",
-      "failed_stage": "generator",
-      "generated_sql": "",
-      "grain_decision": {},
-      "passed": false,
-      "query_shape": "filtered_query",
-      "question": "show order items for products supplied by suppliers in Pune",
-      "reason_code": "filtered SQL requires exactly one selected table and no joins",
-      "result_comparison_status": "no_actual_sql",
-      "selected_join_path_length": 0,
-      "sql_validation_status": "rejected",
-      "test_id": "49"
-    },
-    {
-      "actual_result_row_count": 4,
+      "actual_result_row_count": 3,
       "actual_route": "deterministic_sql_required",
-      "duration_ms": 486,
+      "duration_ms": 131,
       "error_summary": "",
       "executable": true,
       "execution_status": "passed",
       "expected_category": "supported",
-      "expected_result_row_count": 4,
-      "expected_sql": "SELECT customers.segment, SUM(orders.total_amount) AS sum_total_amount\nFROM orders\nINNER JOIN customers ON orders.customer_id = customers.customer_id\nWHERE orders.order_status = 'Delivered'\nGROUP BY customers.segment;",
+      "expected_result_row_count": 3,
+      "expected_sql": "SELECT categories.category_name, SUM(order_items.line_amount) AS sum_line_amount\nFROM order_items\nINNER JOIN products ON order_items.product_id = products.product_id\nINNER JOIN categories ON products.category_id = categories.category_id\nGROUP BY categories.category_name\nORDER BY SUM(order_items.line_amount) DESC\nLIMIT 3;",
       "failed_stage": "",
-      "generated_sql": "SELECT customers.segment AS customers__segment, SUM(orders.total_amount) AS sum__orders__total_amount FROM orders INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE orders.order_status = 'Delivered' GROUP BY customers.segment;",
-      "grain_decision": {},
+      "generated_sql": "SELECT categories.category_name AS categories__category_name, SUM(order_items.line_amount) AS sum__order_items__line_amount FROM order_items INNER JOIN products ON order_items.product_id = products.product_id INNER JOIN categories ON products.category_id = categories.category_id GROUP BY categories.category_name ORDER BY sum__order_items__line_amount DESC LIMIT 3;",
+      "grain_decision": {
+        "edge_diagnostics": [
+          {
+            "foreign_key_side": {
+              "column": "product_id",
+              "table": "order_items"
+            },
+            "from_table": "order_items",
+            "preserves_metric_grain": true,
+            "referenced_side": {
+              "column": "product_id",
+              "table": "products"
+            },
+            "row_multiplication_risk": false,
+            "status": "grain_preserved",
+            "to_table": "products",
+            "traversal_direction": "many_to_one"
+          },
+          {
+            "foreign_key_side": {
+              "column": "category_id",
+              "table": "products"
+            },
+            "from_table": "products",
+            "preserves_metric_grain": true,
+            "referenced_side": {
+              "column": "category_id",
+              "table": "categories"
+            },
+            "row_multiplication_risk": false,
+            "status": "grain_preserved",
+            "to_table": "categories",
+            "traversal_direction": "many_to_one"
+          }
+        ],
+        "grain_preserved": true,
+        "reason": "all edges traverse many-to-one from metric grain",
+        "row_multiplication_risk": false,
+        "status": "grain_preserved",
+        "unknown_cardinality": false,
+        "unsupported_bridge_path": false
+      },
       "passed": true,
       "query_shape": "joined_aggregate",
-      "question": "total order amount by customer segment for delivered orders",
-      "reason_code": "deterministic SQL generated for joined_aggregate/where_group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence",
+      "question": "top 3 product categories by total line amount",
+      "reason_code": "deterministic SQL generated for joined_aggregate/group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence",
       "result_comparison_status": "match",
-      "selected_join_path_length": 1,
+      "selected_join_path_length": 2,
       "sql_validation_status": "passed",
+      "test_id": "48"
+    },
+    {
+      "actual_result_row_count": 5,
+      "actual_route": "deterministic_sql_required",
+      "duration_ms": 178,
+      "error_summary": "",
+      "executable": true,
+      "execution_status": "passed",
+      "expected_category": "supported",
+      "expected_result_row_count": 5,
+      "expected_sql": "SELECT order_items.*, products.*, suppliers.*\nFROM order_items\nINNER JOIN products ON order_items.product_id = products.product_id\nINNER JOIN suppliers ON products.supplier_id = suppliers.supplier_id\nWHERE suppliers.city = 'Pune'\nLIMIT 50;",
+      "failed_stage": "",
+      "generated_sql": "SELECT order_items.order_item_id AS order_items__order_item_id, order_items.order_id AS order_items__order_id, order_items.product_id AS order_items__product_id, order_items.quantity AS order_items__quantity, order_items.unit_price AS order_items__unit_price, order_items.line_amount AS order_items__line_amount, products.product_id AS products__product_id, products.product_name AS products__product_name, products.category_id AS products__category_id, products.supplier_id AS products__supplier_id, products.unit_price AS products__unit_price, products.stock_quantity AS products__stock_quantity, products.product_status AS products__product_status, suppliers.supplier_id AS suppliers__supplier_id, suppliers.supplier_name AS suppliers__supplier_name, suppliers.city AS suppliers__city, suppliers.region AS suppliers__region, suppliers.supplier_status AS suppliers__supplier_status, suppliers.rating AS suppliers__rating FROM order_items INNER JOIN products ON order_items.product_id = products.product_id INNER JOIN suppliers ON products.supplier_id = suppliers.supplier_id WHERE suppliers.city = 'Pune' LIMIT 50;",
+      "grain_decision": {},
+      "passed": true,
+      "query_shape": "joined_lookup",
+      "question": "show order items for products supplied by suppliers in Pune",
+      "reason_code": "deterministic SQL generated for joined_lookup/joined_lookup: joined lookup SQL generated from planner-selected Relationship Graph evidence",
+      "result_comparison_status": "match",
+      "selected_join_path_length": 2,
+      "sql_validation_status": "passed",
+      "test_id": "49"
+    },
+    {
+      "actual_result_row_count": 0,
+      "actual_route": "cannot_plan_safely",
+      "duration_ms": 96,
+      "error_summary": "Question could not be planned safely from the current schema context: joined aggregate filters must belong to the selected join path; missing evidence: where; ambiguous evidence: where.",
+      "executable": false,
+      "execution_status": "not_executed",
+      "expected_category": "supported",
+      "expected_result_row_count": 0,
+      "expected_sql": "SELECT customers.segment, SUM(orders.total_amount) AS sum_total_amount\nFROM orders\nINNER JOIN customers ON orders.customer_id = customers.customer_id\nWHERE orders.order_status = 'Delivered'\nGROUP BY customers.segment;",
+      "failed_stage": "generator",
+      "generated_sql": "",
+      "grain_decision": {},
+      "passed": false,
+      "query_shape": "joined_aggregate",
+      "question": "total order amount by customer segment for delivered orders",
+      "reason_code": "joined aggregate filters must belong to the selected join path",
+      "result_comparison_status": "no_actual_sql",
+      "selected_join_path_length": 0,
+      "sql_validation_status": "rejected",
       "test_id": "50"
     },
     {
       "actual_result_row_count": 0,
       "actual_route": "blocked_unsafe",
-      "duration_ms": 229,
+      "duration_ms": 62,
       "error_summary": "",
       "executable": false,
       "execution_status": "not_executed",
@@ -1381,7 +1504,7 @@
     {
       "actual_result_row_count": 0,
       "actual_route": "blocked_unsafe",
-      "duration_ms": 215,
+      "duration_ms": 59,
       "error_summary": "",
       "executable": false,
       "execution_status": "not_executed",
@@ -1403,7 +1526,7 @@
     {
       "actual_result_row_count": 0,
       "actual_route": "blocked_unsafe",
-      "duration_ms": 203,
+      "duration_ms": 69,
       "error_summary": "",
       "executable": false,
       "execution_status": "not_executed",
@@ -1425,7 +1548,7 @@
     {
       "actual_result_row_count": 0,
       "actual_route": "cannot_plan_safely",
-      "duration_ms": 265,
+      "duration_ms": 98,
       "error_summary": "",
       "executable": false,
       "execution_status": "not_executed",
@@ -1447,7 +1570,7 @@
     {
       "actual_result_row_count": 0,
       "actual_route": "cannot_plan_safely",
-      "duration_ms": 1152,
+      "duration_ms": 321,
       "error_summary": "",
       "executable": false,
       "execution_status": "not_executed",
@@ -1458,9 +1581,9 @@
       "generated_sql": "",
       "grain_decision": {},
       "passed": true,
-      "query_shape": "grouped_aggregate",
+      "query_shape": "filtered_query",
       "question": "show customers with products they purchased",
-      "reason_code": "dimension evidence is ambiguous",
+      "reason_code": "filter evidence is ambiguous",
       "result_comparison_status": "blocked",
       "selected_join_path_length": 0,
       "sql_validation_status": "rejected",
@@ -1469,7 +1592,7 @@
     {
       "actual_result_row_count": 0,
       "actual_route": "cannot_plan_safely",
-      "duration_ms": 227,
+      "duration_ms": 64,
       "error_summary": "",
       "executable": false,
       "execution_status": "not_executed",
@@ -1491,7 +1614,7 @@
     {
       "actual_result_row_count": 0,
       "actual_route": "cannot_plan_safely",
-      "duration_ms": 262,
+      "duration_ms": 74,
       "error_summary": "",
       "executable": false,
       "execution_status": "not_executed",
@@ -1504,7 +1627,7 @@
       "passed": true,
       "query_shape": "joined_aggregate",
       "question": "total payment amount by product category",
-      "reason_code": "joined aggregate dimension evidence is ambiguous",
+      "reason_code": "multi-hop joined aggregate path is unsupported_depth: safe path exceeds maximum supported depth",
       "result_comparison_status": "blocked",
       "selected_join_path_length": 0,
       "sql_validation_status": "rejected",
@@ -1513,7 +1636,7 @@
     {
       "actual_result_row_count": 0,
       "actual_route": "cannot_plan_safely",
-      "duration_ms": 223,
+      "duration_ms": 64,
       "error_summary": "",
       "executable": false,
       "execution_status": "not_executed",
@@ -1533,17 +1656,17 @@
       "test_id": "58"
     }
   ],
-  "run_timestamp": "2026-07-24T04:23:32.192385+00:00",
+  "run_timestamp": "2026-07-24T05:14:55.391197+00:00",
   "setup_error": "",
   "summary": {
     "fail_closed_failed": 0,
     "fail_closed_passed": 8,
     "fail_closed_total": 8,
-    "supported_failed": 7,
-    "supported_passed": 43,
+    "supported_failed": 4,
+    "supported_passed": 46,
     "supported_total": 50,
     "total": 58,
-    "total_failed": 7,
-    "total_passed": 51
+    "total_failed": 4,
+    "total_passed": 54
   }
 }

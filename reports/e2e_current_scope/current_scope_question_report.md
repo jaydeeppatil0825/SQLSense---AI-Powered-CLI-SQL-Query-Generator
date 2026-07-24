@@ -1,7 +1,7 @@
 # SQLSense Current-Scope Question Report
 
-- Run timestamp: 2026-07-24T04:23:32.192385+00:00
-- Git: codex/review-project-overview 0c841be7
+- Run timestamp: 2026-07-24T05:14:55.391197+00:00
+- Git: codex/review-project-overview f2314e82
 - Python: 3.12.10
 - MySQL: 8.0.46
 - Database: sqlsense_current_scope_business_lab
@@ -10,7 +10,7 @@
 - AI semantic enrichment: completed
 - AI fallback used: False
 - Total tests: 58
-- Supported: 43 passed / 7 failed
+- Supported: 46 passed / 4 failed
 - Fail-closed: 8 passed / 0 failed
 - Final verdict: failed
 
@@ -18,7 +18,7 @@
 - `glossary_fingerprint`: ``
 - `graph_fingerprint`: ``
 - `kb_fingerprint`: ``
-- `schema_fingerprint`: `6df2aa0790bb80889af5fc547c2bedc1d55fe2503724e122ad2eedaf194fb482`
+- `schema_fingerprint`: `b51701a7eaa0c14fb2f50408f397ada7bd43f5f63a23b49e90d5d845539e572a`
 - `vector_fingerprint`: ``
 
 ## Row Counts
@@ -458,7 +458,7 @@ HAVING SUM(payment_amount) > 100000;
 ### TEST 19 - FAIL
 - Question: customer regions with more than 2 active customers
 - Expected category: supported
-- Route/shape: cannot_plan_safely / grouped_aggregate
+- Route/shape: deterministic_sql_required / grouped_aggregate
 - Executable: False
 - Validation/execution: rejected / not_executed
 - Expected/actual rows: 0 / 0
@@ -814,21 +814,20 @@ INNER JOIN products ON order_items.product_id = products.product_id
 GROUP BY products.product_name;
 ```
 
-### TEST 34 - FAIL
+### TEST 34 - PASS
 - Question: average payment amount by order status
 - Expected category: supported
-- Route/shape: deterministic_sql_required / grouped_aggregate
+- Route/shape: deterministic_sql_required / joined_aggregate
 - Executable: True
 - Validation/execution: passed / passed
-- Expected/actual rows: 4 / 3
-- Result comparison: row_count_mismatch
-- Join path length: 0
-- Reason code: deterministic SQL generated for grouped_aggregate/group_by: single-table group_by SQL generated deterministically
-- Failed stage: comparison
+- Expected/actual rows: 4 / 4
+- Result comparison: match
+- Join path length: 1
+- Reason code: deterministic SQL generated for joined_aggregate/group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence
 
 Generated SQL:
 ```sql
-SELECT payment_status, AVG(payment_amount) AS avg_payment_amount FROM payments GROUP BY payment_status;
+SELECT orders.order_status AS orders__order_status, AVG(payments.payment_amount) AS avg__payments__payment_amount FROM payments INNER JOIN orders ON payments.order_id = orders.order_id GROUP BY orders.order_status;
 ```
 
 Expected SQL:
@@ -988,18 +987,21 @@ INNER JOIN customers ON orders.customer_id = customers.customer_id
 GROUP BY customers.city;
 ```
 
-### TEST 41 - FAIL
+### TEST 41 - PASS
 - Question: total line amount by product category
 - Expected category: supported
-- Route/shape: cannot_plan_safely / joined_aggregate
-- Executable: False
-- Validation/execution: rejected / not_executed
-- Expected/actual rows: 0 / 0
-- Result comparison: no_actual_sql
-- Join path length: 0
-- Reason code: joined aggregate dimension evidence is ambiguous
-- Failed stage: generator
-- Error summary: Cannot choose dimension safely. Choices: category_name, category_status, product_name, product_status. Please specify one.
+- Route/shape: deterministic_sql_required / joined_aggregate
+- Executable: True
+- Validation/execution: passed / passed
+- Expected/actual rows: 7 / 7
+- Result comparison: match
+- Join path length: 2
+- Reason code: deterministic SQL generated for joined_aggregate/group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence
+
+Generated SQL:
+```sql
+SELECT categories.category_name AS categories__category_name, SUM(order_items.line_amount) AS sum__order_items__line_amount FROM order_items INNER JOIN products ON order_items.product_id = products.product_id INNER JOIN categories ON products.category_id = categories.category_id GROUP BY categories.category_name;
+```
 
 Expected SQL:
 ```sql
@@ -1062,21 +1064,18 @@ ORDER BY SUM(payments.payment_amount) DESC
 LIMIT 3;
 ```
 
-### TEST 44 - PASS
+### TEST 44 - FAIL
 - Question: total line amount by supplier name for active products
 - Expected category: supported
-- Route/shape: deterministic_sql_required / joined_aggregate
-- Executable: True
-- Validation/execution: passed / passed
-- Expected/actual rows: 7 / 7
-- Result comparison: match
-- Join path length: 2
-- Reason code: deterministic SQL generated for joined_aggregate/where_group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence
-
-Generated SQL:
-```sql
-SELECT suppliers.supplier_name AS suppliers__supplier_name, SUM(order_items.line_amount) AS sum__order_items__line_amount FROM order_items INNER JOIN products ON order_items.product_id = products.product_id INNER JOIN suppliers ON products.supplier_id = suppliers.supplier_id WHERE products.product_status = 'Active' GROUP BY suppliers.supplier_name;
-```
+- Route/shape: cannot_plan_safely / joined_aggregate
+- Executable: False
+- Validation/execution: rejected / not_executed
+- Expected/actual rows: 0 / 0
+- Result comparison: no_actual_sql
+- Join path length: 0
+- Reason code: joined aggregate filters must belong to the selected join path
+- Failed stage: generator
+- Error summary: Question could not be planned safely from the current schema context: joined aggregate filters must belong to the selected join path; missing evidence: where; ambiguous evidence: where.
 
 Expected SQL:
 ```sql
@@ -1101,7 +1100,7 @@ GROUP BY suppliers.supplier_name;
 
 Generated SQL:
 ```sql
-SELECT customers.region AS customers__region, COUNT(*) AS count__payments__rows FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE payments.payment_status = 'completed' GROUP BY customers.region;
+SELECT customers.region AS customers__region, COUNT(*) AS count__payments__rows FROM payments INNER JOIN orders ON payments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE payments.payment_status = 'Completed' GROUP BY customers.region;
 ```
 
 Expected SQL:
@@ -1114,18 +1113,21 @@ WHERE payments.payment_status = 'Completed'
 GROUP BY customers.region;
 ```
 
-### TEST 46 - FAIL
+### TEST 46 - PASS
 - Question: average line amount by product category
 - Expected category: supported
-- Route/shape: cannot_plan_safely / joined_aggregate
-- Executable: False
-- Validation/execution: rejected / not_executed
-- Expected/actual rows: 0 / 0
-- Result comparison: no_actual_sql
-- Join path length: 0
-- Reason code: joined aggregate dimension evidence is ambiguous
-- Failed stage: generator
-- Error summary: Cannot choose dimension safely. Choices: category_name, category_status, product_name, product_status. Please specify one.
+- Route/shape: deterministic_sql_required / joined_aggregate
+- Executable: True
+- Validation/execution: passed / passed
+- Expected/actual rows: 7 / 7
+- Result comparison: match
+- Join path length: 2
+- Reason code: deterministic SQL generated for joined_aggregate/group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence
+
+Generated SQL:
+```sql
+SELECT categories.category_name AS categories__category_name, AVG(order_items.line_amount) AS avg__order_items__line_amount FROM order_items INNER JOIN products ON order_items.product_id = products.product_id INNER JOIN categories ON products.category_id = categories.category_id GROUP BY categories.category_name;
+```
 
 Expected SQL:
 ```sql
@@ -1139,17 +1141,17 @@ GROUP BY categories.category_name;
 ### TEST 47 - PASS
 - Question: total shipping cost by customer city
 - Expected category: supported
-- Route/shape: deterministic_sql_required / grouped_aggregate
+- Route/shape: deterministic_sql_required / joined_aggregate
 - Executable: True
 - Validation/execution: passed / passed
 - Expected/actual rows: 11 / 11
 - Result comparison: match
-- Join path length: 0
-- Reason code: deterministic SQL generated for grouped_aggregate/group_by: single-table group_by SQL generated deterministically
+- Join path length: 2
+- Reason code: deterministic SQL generated for joined_aggregate/group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence
 
 Generated SQL:
 ```sql
-SELECT delivery_city, SUM(shipping_cost) AS sum_shipping_cost FROM shipments GROUP BY delivery_city;
+SELECT customers.city AS customers__city, SUM(shipments.shipping_cost) AS sum__shipments__shipping_cost FROM shipments INNER JOIN orders ON shipments.order_id = orders.order_id INNER JOIN customers ON orders.customer_id = customers.customer_id GROUP BY customers.city;
 ```
 
 Expected SQL:
@@ -1161,18 +1163,21 @@ INNER JOIN customers ON orders.customer_id = customers.customer_id
 GROUP BY customers.city;
 ```
 
-### TEST 48 - FAIL
+### TEST 48 - PASS
 - Question: top 3 product categories by total line amount
 - Expected category: supported
-- Route/shape: cannot_plan_safely / joined_aggregate
-- Executable: False
-- Validation/execution: rejected / not_executed
-- Expected/actual rows: 0 / 0
-- Result comparison: no_actual_sql
-- Join path length: 0
-- Reason code: joined aggregate dimension evidence is ambiguous
-- Failed stage: generator
-- Error summary: Cannot choose dimension safely. Choices: category_name, category_status. Please specify one.
+- Route/shape: deterministic_sql_required / joined_aggregate
+- Executable: True
+- Validation/execution: passed / passed
+- Expected/actual rows: 3 / 3
+- Result comparison: match
+- Join path length: 2
+- Reason code: deterministic SQL generated for joined_aggregate/group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence
+
+Generated SQL:
+```sql
+SELECT categories.category_name AS categories__category_name, SUM(order_items.line_amount) AS sum__order_items__line_amount FROM order_items INNER JOIN products ON order_items.product_id = products.product_id INNER JOIN categories ON products.category_id = categories.category_id GROUP BY categories.category_name ORDER BY sum__order_items__line_amount DESC LIMIT 3;
+```
 
 Expected SQL:
 ```sql
@@ -1185,18 +1190,21 @@ ORDER BY SUM(order_items.line_amount) DESC
 LIMIT 3;
 ```
 
-### TEST 49 - FAIL
+### TEST 49 - PASS
 - Question: show order items for products supplied by suppliers in Pune
 - Expected category: supported
-- Route/shape: cannot_plan_safely / filtered_query
-- Executable: False
-- Validation/execution: rejected / not_executed
-- Expected/actual rows: 0 / 0
-- Result comparison: no_actual_sql
-- Join path length: 0
-- Reason code: filtered SQL requires exactly one selected table and no joins
-- Failed stage: generator
-- Error summary: This query was understood, but deterministic SQL generation for this query shape is not implemented yet: filtered_query.
+- Route/shape: deterministic_sql_required / joined_lookup
+- Executable: True
+- Validation/execution: passed / passed
+- Expected/actual rows: 5 / 5
+- Result comparison: match
+- Join path length: 2
+- Reason code: deterministic SQL generated for joined_lookup/joined_lookup: joined lookup SQL generated from planner-selected Relationship Graph evidence
+
+Generated SQL:
+```sql
+SELECT order_items.order_item_id AS order_items__order_item_id, order_items.order_id AS order_items__order_id, order_items.product_id AS order_items__product_id, order_items.quantity AS order_items__quantity, order_items.unit_price AS order_items__unit_price, order_items.line_amount AS order_items__line_amount, products.product_id AS products__product_id, products.product_name AS products__product_name, products.category_id AS products__category_id, products.supplier_id AS products__supplier_id, products.unit_price AS products__unit_price, products.stock_quantity AS products__stock_quantity, products.product_status AS products__product_status, suppliers.supplier_id AS suppliers__supplier_id, suppliers.supplier_name AS suppliers__supplier_name, suppliers.city AS suppliers__city, suppliers.region AS suppliers__region, suppliers.supplier_status AS suppliers__supplier_status, suppliers.rating AS suppliers__rating FROM order_items INNER JOIN products ON order_items.product_id = products.product_id INNER JOIN suppliers ON products.supplier_id = suppliers.supplier_id WHERE suppliers.city = 'Pune' LIMIT 50;
+```
 
 Expected SQL:
 ```sql
@@ -1208,21 +1216,18 @@ WHERE suppliers.city = 'Pune'
 LIMIT 50;
 ```
 
-### TEST 50 - PASS
+### TEST 50 - FAIL
 - Question: total order amount by customer segment for delivered orders
 - Expected category: supported
-- Route/shape: deterministic_sql_required / joined_aggregate
-- Executable: True
-- Validation/execution: passed / passed
-- Expected/actual rows: 4 / 4
-- Result comparison: match
-- Join path length: 1
-- Reason code: deterministic SQL generated for joined_aggregate/where_group_by: joined aggregate SQL generated from planner-selected Relationship Graph evidence
-
-Generated SQL:
-```sql
-SELECT customers.segment AS customers__segment, SUM(orders.total_amount) AS sum__orders__total_amount FROM orders INNER JOIN customers ON orders.customer_id = customers.customer_id WHERE orders.order_status = 'Delivered' GROUP BY customers.segment;
-```
+- Route/shape: cannot_plan_safely / joined_aggregate
+- Executable: False
+- Validation/execution: rejected / not_executed
+- Expected/actual rows: 0 / 0
+- Result comparison: no_actual_sql
+- Join path length: 0
+- Reason code: joined aggregate filters must belong to the selected join path
+- Failed stage: generator
+- Error summary: Question could not be planned safely from the current schema context: joined aggregate filters must belong to the selected join path; missing evidence: where; ambiguous evidence: where.
 
 Expected SQL:
 ```sql
@@ -1280,13 +1285,13 @@ GROUP BY customers.segment;
 ### TEST 55 - PASS
 - Question: show customers with products they purchased
 - Expected category: fail_closed
-- Route/shape: cannot_plan_safely / grouped_aggregate
+- Route/shape: cannot_plan_safely / filtered_query
 - Executable: False
 - Validation/execution: rejected / not_executed
 - Expected/actual rows: 0 / 0
 - Result comparison: blocked
 - Join path length: 0
-- Reason code: dimension evidence is ambiguous
+- Reason code: filter evidence is ambiguous
 
 ### TEST 56 - PASS
 - Question: average supplier city
@@ -1308,7 +1313,7 @@ GROUP BY customers.segment;
 - Expected/actual rows: 0 / 0
 - Result comparison: blocked
 - Join path length: 0
-- Reason code: joined aggregate dimension evidence is ambiguous
+- Reason code: multi-hop joined aggregate path is unsupported_depth: safe path exceeds maximum supported depth
 
 ### TEST 58 - PASS
 - Question: show top records
