@@ -49,6 +49,7 @@ from query_pipeline.planner.query_predicates import (
     _required_join_predicates,
     _resolve_join_table,
     _table_phrase_score,
+    strip_leading_status_entity_modifier,
 )
 from query_pipeline.planner.text_utils import (
     _humanize,
@@ -80,6 +81,24 @@ def _metric_modifier_value_phrase(prefix: str, base_table: str) -> str:
     if _field_tokens(phrase) and _field_tokens(phrase) <= _field_tokens(table_phrase):
         return ""
     return phrase
+
+
+def _dedupe_selected_filters(filters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for entry in filters or []:
+        key = (
+            str(entry.get("table") or ""),
+            str(entry.get("column") or ""),
+            str(entry.get("operator") or ""),
+            _normalize(str(entry.get("value") or entry.get("value_phrase") or "")),
+            _normalize(str(entry.get("raw_phrase") or "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(dict(entry))
+    return deduped
 
 
 def _metric_modifier_from_metric_phrase(metric_phrase: str, metric: dict[str, Any]) -> str:
@@ -414,6 +433,12 @@ def _apply_joined_aggregate_contract(
     intent = context.get("intent") if isinstance(context.get("intent"), dict) else {}
     if intent.get("unsafe"):
         return context
+    has_having_conflict = bool(intent.get("having_metric_conflict") or intent.get("having_aggregate_conflict"))
+    if (
+        not has_having_conflict
+        and (intent.get("unsupported_constructs") or (context.get("missing_evidence_flags") or {}).get("unsupported_intent"))
+    ):
+        return context
 
     intent_type = str(intent.get("intent_type") or "").strip().lower()
     requested_dimensions = [
@@ -453,7 +478,7 @@ def _apply_joined_aggregate_contract(
             reason="formulas are not supported for deterministic joined aggregates",
             resolved_nodes={"unsafe_check", "table_scope"},
         )
-    if intent.get("having_metric_conflict") or intent.get("having_aggregate_conflict"):
+    if has_having_conflict:
         return _joined_aggregate_failure_context(
             context,
             blocked_node="having",
@@ -1499,7 +1524,7 @@ def _apply_join_lookup_contract(
     base_resolution = "missing"
     if base_phrase:
         explicit_base, base_resolution = _resolve_join_table(
-            base_phrase,
+            strip_leading_status_entity_modifier(base_phrase),
             knowledge_base,
             retrieved_tables,
         )
@@ -1710,6 +1735,62 @@ def _apply_join_lookup_contract(
             resolved_nodes={"unsafe_check", "requested_fields", "join_need"},
         )
 
+    structured_non_interval_filters = [
+        dict(entry)
+        for entry in structured_filters
+        if isinstance(entry, dict) and entry.get("filter_kind") != "date_interval"
+    ]
+    if structured_non_interval_filters:
+        resolved_structured_filters: list[dict[str, Any]] = []
+        structured_filter_keys = {
+            (
+                _normalize(str(entry.get("raw_phrase") or "")),
+                _normalize(str(entry.get("value") or entry.get("value_phrase") or "")),
+            )
+            for entry in structured_non_interval_filters
+        }
+        for clause in structured_non_interval_filters:
+            value_phrase = str(clause.get("value") or clause.get("value_phrase") or "").strip()
+            resolved_filter, resolved_status = _build_sample_value_filter(
+                value_phrase=value_phrase,
+                knowledge_base=knowledge_base,
+                allowed_tables={base_table},
+                owner_table=base_table,
+                source="joined_lookup_base_structured_filter",
+            )
+            if resolved_status != "resolved" or resolved_filter is None:
+                resolved_structured_filters = []
+                break
+            selected_filter = dict(resolved_filter)
+            selected_filter.update(
+                {
+                    "type": "value",
+                    "value": resolved_filter.get("value", value_phrase),
+                    "term": str(clause.get("raw_phrase") or value_phrase),
+                    "operator": str(clause.get("operator") or resolved_filter.get("operator") or "eq"),
+                    "field_phrase": str(clause.get("field_phrase") or clause.get("field") or ""),
+                    "value_phrase": str(clause.get("value_phrase") or value_phrase),
+                    "conjunction": clause.get("conjunction"),
+                    "raw_phrase": str(clause.get("raw_phrase") or value_phrase),
+                    "evidence_score": _safe_float(
+                        resolved_filter.get("score") or resolved_filter.get("confidence"),
+                        1.0,
+                    ),
+                }
+            )
+            resolved_structured_filters.append(selected_filter)
+        if resolved_structured_filters:
+            selected_filters = [
+                dict(entry)
+                for entry in selected_filters
+                if (
+                    _normalize(str(entry.get("raw_phrase") or "")),
+                    _normalize(str(entry.get("value") or entry.get("value_phrase") or "")),
+                )
+                not in structured_filter_keys
+            ]
+            selected_filters.extend(resolved_structured_filters)
+
     selected_filters, interval_reason = _resolve_interval_filters_for_scope(
         selected_filters,
         [dict(entry) for entry in structured_filters if isinstance(entry, dict)],
@@ -1735,7 +1816,7 @@ def _apply_join_lookup_contract(
     ).strip()
     if source_filter_phrase:
         source_table, source_table_status = _resolve_join_table(
-            source_filter_phrase,
+            strip_leading_status_entity_modifier(source_filter_phrase),
             knowledge_base,
             retrieved_tables,
         )
@@ -1778,6 +1859,8 @@ def _apply_join_lookup_contract(
                 resolved_nodes=resolved_nodes,
             )
         resolved_nodes.add("where")
+
+    selected_filters = _dedupe_selected_filters(selected_filters)
 
     if projection_mode == "broad_related":
         output_columns = [
@@ -1860,6 +1943,10 @@ def _apply_join_lookup_contract(
     }
     planned_confidence = max(_safe_float(context.get("confidence"), 0.0), 0.86)
     planned_warnings = _remove_weak_context_warning(list(context.get("warnings") or []))
+    planned_intent = {
+        **dict(intent),
+        "structured_filters": [dict(entry) for entry in selected_filters],
+    }
     decision_path = [
         {
             "node": node_name,
@@ -1893,6 +1980,7 @@ def _apply_join_lookup_contract(
     planned.update(
         {
             "query_shape": "joined_lookup",
+            "intent": planned_intent,
             "route": "deterministic_sql_required",
             "route_recommendation": "deterministic_sql_required",
             "route_reason": "joined lookup can be generated from one safe direct Relationship Graph edge",
@@ -1945,6 +2033,7 @@ def _apply_join_lookup_contract(
     }
     planned["complex_sql_plan"] = {
         "query_shape": "joined_lookup",
+        "intent": planned_intent,
         "selected_tables": selected_tables,
         "selected_columns": list(deduped_outputs),
         "selected_filters": list(selected_filters),

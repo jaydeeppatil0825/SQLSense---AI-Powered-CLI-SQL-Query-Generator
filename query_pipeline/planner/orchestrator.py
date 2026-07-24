@@ -89,6 +89,7 @@ from query_pipeline.planner.query_predicates import (
     _required_join_predicates,
     _resolve_join_table,
     _table_phrase_score,
+    strip_leading_status_entity_modifier,
 )
 from query_pipeline.planner.shape_router import classify_query_shape
 from query_pipeline.planner.ranking_resolver import (
@@ -132,6 +133,62 @@ _UNSAFE_QUERY_RE = re.compile(
     r"\b(insert|update|delete|drop|alter|truncate|create|grant|revoke)\b",
     re.IGNORECASE,
 )
+_UNSUPPORTED_CONTROL_RE = re.compile(
+    r"\b(?:count\s+distinct|distinct\s+count|unique\b.*\bcount|count\b.*\bunique)\b",
+    re.IGNORECASE,
+)
+_NUMERIC_AGGREGATES = {"sum", "avg"}
+
+
+def _has_unsupported_control_construct(intent: dict[str, Any] | None, question: str) -> bool:
+    return bool((intent or {}).get("unsupported_constructs")) or bool(_UNSUPPORTED_CONTROL_RE.search(question or ""))
+
+
+def _explicit_aggregate_target_is_nonnumeric(
+    metric_phrase: str,
+    aggregate_function: str,
+    knowledge_base: dict[str, Any],
+) -> bool:
+    if str(aggregate_function or "").strip().lower() not in _NUMERIC_AGGREGATES:
+        return False
+    phrase_tokens = {
+        _singularize_token(token)
+        for token in _tokenize(metric_phrase)
+        if token
+    }
+    if not phrase_tokens:
+        return False
+    for table_name, table_data in (knowledge_base or {}).items():
+        table_tokens = {
+            _singularize_token(token)
+            for token in _tokenize(str(table_name))
+            if token
+        }
+        for column in (table_data or {}).get("columns", []) or []:
+            column_name = str(column.get("name") or "").strip()
+            if not column_name:
+                continue
+            column_tokens = {
+                _singularize_token(token)
+                for token in _tokenize(column_name)
+                if token
+            }
+            if not column_tokens:
+                continue
+            qualified_tokens = table_tokens | column_tokens
+            if phrase_tokens == column_tokens or phrase_tokens <= qualified_tokens:
+                candidate = {
+                    "table": str(table_name),
+                    "column": column_name,
+                    "type": column.get("type") or column.get("data_type") or "",
+                    "data_type": column.get("data_type") or column.get("type") or "",
+                    "semantic_type": resolved_semantic_type(column),
+                    "core_semantic_type": resolved_semantic_type(column),
+                    "is_measure": bool(column.get("is_measure")),
+                    "is_date": bool(column.get("is_date")),
+                }
+                return not _candidate_is_numeric_metric(candidate)
+    return False
 
 
 def _detect_sorting(question: str) -> dict[str, str] | None:
@@ -859,7 +916,7 @@ def _build_query_context_from_retrieved_context(
         missing_evidence_flags["missing_metric"] = True
     if "grouping_phrase" in intent_missing_phrases:
         missing_evidence_flags["missing_dimension"] = True
-    if (intent or {}).get("unsupported_constructs"):
+    if _has_unsupported_control_construct(intent, question):
         missing_evidence_flags["unsupported_intent"] = True
 
     legacy_route_recommendation = _compute_route_recommendation(
@@ -996,7 +1053,11 @@ def _apply_multi_hop_join_lookup_contract(
             part.strip()
             for part in re.split(r"\s+for\s+", base_phrase, maxsplit=1, flags=re.IGNORECASE)
         ]
-    base_table, base_status = _resolve_join_table(base_phrase, knowledge_base, retrieved_tables)
+    base_table, base_status = _resolve_join_table(
+        strip_leading_status_entity_modifier(base_phrase),
+        knowledge_base,
+        retrieved_tables,
+    )
     requested_fields = [str(value).strip() for value in (lookup.get("requested_output_fields") or []) if str(value).strip()]
     resolved_fields: list[dict[str, Any]] = []
     for phrase in requested_fields:
@@ -1290,6 +1351,13 @@ def _normalize_planner_output(
         or next(iter(structured_intent.get("requested_metrics") or []), "")
         or ""
     ).strip()
+    invalid_explicit_metric_type = _explicit_aggregate_target_is_nonnumeric(
+        requested_metric_phrase,
+        str(structured_intent.get("aggregate_function") or ""),
+        full_knowledge_base,
+    )
+    if invalid_explicit_metric_type:
+        effective_measure_candidates = []
     if requested_metric_phrase and effective_measure_candidates:
         resolved_metrics, metric_status = _resolve_role_candidate(
             requested_metric_phrase,
@@ -1600,20 +1668,37 @@ def _normalize_planner_output(
             allowed_tables=allowed_filter_tables,
             owner_context=preferred_filter_table,
         )
+        sample_filter_tables = (
+            {preferred_filter_table}
+            if preferred_filter_table
+            else {selected_table_names[0]} if len(selected_table_names) == 1 else set()
+        )
+        if filter_status != "resolved" and sample_filter_tables:
+            sample_filter, sample_status = _build_sample_value_filter(
+                value_phrase=str(clause.get("value_phrase") or clause.get("value") or ""),
+                knowledge_base=full_knowledge_base,
+                allowed_tables=sample_filter_tables,
+                owner_table=next(iter(sample_filter_tables)) if len(sample_filter_tables) == 1 else None,
+                source="structured_sample_value_filter",
+            )
+            if sample_status == "resolved" and sample_filter is not None:
+                resolved_filter = [sample_filter]
+                filter_status = "resolved"
         if filter_status != "resolved":
             all_filters_resolved = False
             break
         for candidate in resolved_filter:
             raw_phrase = str(clause.get("raw_phrase") or "").strip()
+            resolved_value = candidate.get("value", clause.get("value", clause.get("value_phrase", "")))
             selected_filter = {
                 "type": "value",
                 "table": str(candidate.get("table") or ""),
                 "column": str(candidate.get("column") or ""),
-                "value": clause.get("value", clause.get("value_phrase", "")),
-                "term": raw_phrase or str(clause.get("value") or clause.get("value_phrase") or ""),
+                "value": resolved_value,
+                "term": raw_phrase or str(resolved_value or clause.get("value_phrase") or ""),
                 "operator": str(clause.get("operator") or "unknown"),
                 "field_phrase": field_phrase,
-                "value_phrase": clause.get("value", clause.get("value_phrase", "")),
+                "value_phrase": clause.get("value_phrase", resolved_value),
                 "conjunction": clause.get("conjunction"),
                 "raw_phrase": raw_phrase,
                 "evidence_score": float(candidate.get("score") or candidate.get("confidence") or 0.0),
@@ -1758,6 +1843,13 @@ def _normalize_planner_output(
     group_by_candidates = _group_by_candidates_for_contract(plan, dimension_candidates)
     order_by_candidates = _order_by_candidates_for_contract(plan.get("sorting"), effective_measure_candidates, dimension_candidates)
     required_evidence = _required_evidence_for_query_shape(query_shape)
+    missing_evidence = _missing_evidence_list(missing_evidence_flags)
+    unsupported_intent = _has_unsupported_control_construct(structured_intent, question)
+    if unsupported_intent:
+        missing_evidence_flags["unsupported_intent"] = True
+    if invalid_explicit_metric_type:
+        missing_evidence_flags["missing_metric"] = True
+        missing_evidence_flags["invalid_metric_type"] = True
     missing_evidence = _missing_evidence_list(missing_evidence_flags)
     ambiguities = _ambiguities_for_contract(selected_tables, effective_measure_candidates, dimension_candidates)
     unique_metrics = {
@@ -2210,6 +2302,8 @@ def _normalize_planner_output(
         selected_table_names
         and query_shape not in {"unknown", "blocked_unsafe"}
         and query_shape != "multi_metric_aggregate"
+        and not unsupported_intent
+        and not invalid_explicit_metric_type
         and not missing_evidence
         and not blocking_ambiguities
         and grouped_table_scope_is_safe
@@ -2222,6 +2316,9 @@ def _normalize_planner_output(
         ambiguities=list(blocking_ambiguities),
         can_plan=can_plan,
     )
+    if invalid_explicit_metric_type:
+        route_recommendation = "cannot_plan_safely"
+        route_reason = "requested aggregate metric is not numeric"
     contract_ambiguities = sorted(blocking_ambiguities)
     ambiguity_details = _ambiguity_details_for_contract(
         contract_ambiguities,

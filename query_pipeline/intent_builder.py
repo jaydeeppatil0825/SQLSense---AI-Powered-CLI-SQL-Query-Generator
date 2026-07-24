@@ -194,6 +194,7 @@ _AGGREGATE_AVG_RE = re.compile(r"\b(?:average|avg)\b", re.IGNORECASE)
 _AGGREGATE_MAX_RE = re.compile(r"\b(?:maximum|max|highest)\b", re.IGNORECASE)
 _AGGREGATE_MIN_RE = re.compile(r"\b(?:minimum|min|lowest)\b", re.IGNORECASE)
 _UNSAFE_RE = re.compile(r"\b(delete|update|insert|drop|alter|truncate)\b", re.IGNORECASE)
+_MUTATION_RE = re.compile(r"\b(change|set|make)\b.+\bto\b", re.IGNORECASE)
 _MADE_BY_RE = re.compile(r"\bmade\s+by\s+(.+?)(?=\s+(?:where|having|group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit\s+\d+|from)\b|$)", re.IGNORECASE)
 _STOPWORD_RE = re.compile(
     rf"^(?:{_phrase_group_pattern(_DISPLAY_VERBS)}|me|all|the|a|an|of|for|to|with|by|from|in|where|per|each|group|filter)$",
@@ -208,6 +209,20 @@ _GENERIC_METRIC_TERMS = {
     "quantity",
     "qty",
     "count",
+}
+_STATUS_MODIFIER_TOKENS = {
+    "active",
+    "inactive",
+    "pending",
+    "paid",
+    "unpaid",
+    "cancelled",
+    "canceled",
+    "completed",
+    "delivered",
+    "shipped",
+    "failed",
+    "refunded",
 }
 _IMPLICIT_SUM_METRIC_NOUNS = {"sale", "sales", "revenue", "revenues", "amount", "value"}
 _ROW_RANKING_ENTITY_NOUNS = {
@@ -1292,7 +1307,10 @@ def _coerce_confidence(value: Any) -> float:
 
 def _detect_unsafe_operation(question: str) -> str:
     match = _UNSAFE_RE.search(question)
-    return str(match.group(1) or "").strip().lower() if match else ""
+    if match:
+        return str(match.group(1) or "").strip().lower()
+    mutation_match = _MUTATION_RE.search(question)
+    return str(mutation_match.group(1) or "").strip().lower() if mutation_match else ""
 
 
 def _detect_aggregate_function(question: str) -> str | None:
@@ -1779,7 +1797,43 @@ def _extract_structured_filters(question: str, *, today: date | None = None) -> 
         signature = str(interval.get("raw_phrase") or "").strip().lower()
         if signature and not any(str(entry.get("raw_phrase") or "").strip().lower() == signature for entry in structured):
             structured.append(interval)
+    modifier = _extract_leading_status_modifier_filter(question)
+    if modifier and not any(
+        str(entry.get("raw_phrase") or "").strip().lower() == str(modifier.get("raw_phrase") or "").strip().lower()
+        for entry in structured
+    ):
+        structured.insert(0, modifier)
     return structured
+
+
+def _extract_leading_status_modifier_filter(question: str) -> dict[str, Any] | None:
+    body = _strip_leading_action(_cleanup_phrase(question))
+    if not body or _detect_aggregate_function(body) or _COUNT_RE.search(body):
+        return None
+    if re.search(r"\bby\b", body, re.IGNORECASE):
+        return None
+    body = re.split(
+        r"\s+(?:with|where|from|in|after|before|between|by|per|each|group(?:ed)?\s+by|sort(?:ed)?|order(?:ed)?|limit)\b",
+        body,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    tokens = _tokenize(body)
+    if len(tokens) < 2:
+        return None
+    status = tokens[0].lower()
+    if status not in _STATUS_MODIFIER_TOKENS:
+        return None
+    return {
+        "raw_phrase": status,
+        "field": "status",
+        "field_phrase": "status",
+        "operator": "eq",
+        "value": status,
+        "value_phrase": status,
+        "values": [status],
+        "conjunction": None,
+    }
 
 
 def _extract_interval_filters(question: str, *, today: date | None = None) -> list[dict[str, Any]]:
@@ -1855,6 +1909,27 @@ def _extract_interval_filters(question: str, *, today: date | None = None) -> li
             raw = f"{field_phrase} in {month_name} {year}" if match.lastindex and match.lastindex >= 3 and match.group(3) else f"{field_phrase} in {month_name}"
         add(raw, "between", values, granularity, field_phrase)
         fielded_added = True
+
+    if not fielded_added:
+        match = re.search(r"\b(before|after)\s+([a-z]+)\s+(\d{1,2})(?:,)?\s+(20\d{2})\b", question, re.IGNORECASE)
+        if match and match.group(2).lower() in _MONTHS:
+            month = _MONTHS[match.group(2).lower()]
+            day = int(match.group(3))
+            year = int(match.group(4))
+            try:
+                parsed = date(year, month, day).isoformat()
+            except ValueError:
+                add(match.group(0), "unknown", [match.group(0)], "unknown")
+            else:
+                add(match.group(0), match.group(1).lower(), [parsed], "day")
+            fielded_added = True
+
+    if not fielded_added:
+        match = re.search(r"\bfrom\s+([a-z]+)\s+(20\d{2})\b", question, re.IGNORECASE)
+        if match and match.group(1).lower() in _MONTHS:
+            start, end = _month_range(int(match.group(2)), _MONTHS[match.group(1).lower()])
+            add(match.group(0), "between", [start, end], "month")
+            fielded_added = True
 
     for pattern, operator, granularity in (
         (_BEFORE_RE, "before", "day"),

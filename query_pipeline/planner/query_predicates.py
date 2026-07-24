@@ -77,6 +77,38 @@ _DIMENSION_SEMANTIC_TYPES = {
     "reference",
 }
 
+_LEADING_STATUS_ENTITY_MODIFIERS = {
+    "active",
+    "inactive",
+    "pending",
+    "paid",
+    "unpaid",
+    "cancelled",
+    "canceled",
+    "completed",
+    "delivered",
+    "shipped",
+    "failed",
+    "refunded",
+}
+
+
+def strip_leading_status_entity_modifier(phrase: str) -> str:
+    """Return entity phrase without a leading generic status modifier.
+
+    The removed token is still handled by filter resolution; this helper only
+    keeps table-scope resolution from treating phrases like "delivered orders"
+    as an unknown entity.
+    """
+    tokens = _tokenize(phrase)
+    if len(tokens) < 2:
+        return str(phrase or "").strip()
+    first = _singularize_token(tokens[0])
+    if first not in _LEADING_STATUS_ENTITY_MODIFIERS:
+        return str(phrase or "").strip()
+    remainder = " ".join(tokens[1:]).strip()
+    return remainder or str(phrase or "").strip()
+
 
 def _aggregate_function_hint(question: str) -> str | None:
     normalized = _normalize(question)

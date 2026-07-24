@@ -1,0 +1,612 @@
+SQLSense Current-Scope Business Lab — Test Cases WITH Answers
+=============================================================
+
+Database: sqlsense_current_scope_business_lab
+Dialect: MySQL 8.x
+
+Purpose:
+This file contains every test question with expected SQL or expected fail-closed behavior.
+
+Important:
+- Expected SQL is written in simple canonical MySQL form.
+- SQLSense output may use equivalent aliases/qualified names.
+- For pass/fail, compare behavior and SQL meaning, not only whitespace.
+- Supported tests should generate SELECT SQL, validate, and execute.
+- Fail-closed tests should not execute SQL.
+
+Supported current-scope tests
+-----------------------------
+
+TEST 01
+Question: show all active customers
+Expected behavior: executable SELECT
+Expected SQL:
+SELECT *
+FROM customers
+WHERE customer_status = 'Active'
+LIMIT 50;
+------------------------------------------------------------------------------
+
+TEST 02
+Question: show customers in Pune
+Expected behavior: executable SELECT
+Expected SQL:
+SELECT *
+FROM customers
+WHERE city = 'Pune'
+LIMIT 50;
+------------------------------------------------------------------------------
+
+TEST 03
+Question: show inactive suppliers
+Expected behavior: executable SELECT
+Expected SQL:
+SELECT *
+FROM suppliers
+WHERE supplier_status = 'Inactive'
+LIMIT 50;
+------------------------------------------------------------------------------
+
+TEST 04
+Question: show active products with stock quantity below 50
+Expected behavior: executable SELECT
+Expected SQL:
+SELECT *
+FROM products
+WHERE product_status = 'Active'
+  AND stock_quantity < 50
+LIMIT 50;
+------------------------------------------------------------------------------
+
+TEST 05
+Question: show orders with total amount above 50000
+Expected behavior: executable SELECT
+Expected SQL:
+SELECT *
+FROM orders
+WHERE total_amount > 50000
+LIMIT 50;
+------------------------------------------------------------------------------
+
+TEST 06
+Question: show delivered orders from January 2026
+Expected behavior: executable SELECT
+Expected SQL:
+SELECT *
+FROM orders
+WHERE order_status = 'Delivered'
+  AND order_date >= '2026-01-01'
+  AND order_date < '2026-02-01'
+LIMIT 50;
+------------------------------------------------------------------------------
+
+TEST 07
+Question: show payments after April 1 2026
+Expected behavior: executable SELECT
+Expected SQL:
+SELECT *
+FROM payments
+WHERE payment_date > '2026-04-01'
+LIMIT 50;
+------------------------------------------------------------------------------
+
+TEST 08
+Question: show products with unit price between 500 and 3000
+Expected behavior: executable SELECT
+Expected SQL:
+SELECT *
+FROM products
+WHERE unit_price BETWEEN 500 AND 3000
+LIMIT 50;
+------------------------------------------------------------------------------
+
+TEST 09
+Question: show suppliers from Pune
+Expected behavior: executable SELECT
+Expected SQL:
+SELECT *
+FROM suppliers
+WHERE city = 'Pune'
+LIMIT 50;
+------------------------------------------------------------------------------
+
+TEST 10
+Question: show shipments with shipping cost above 1500
+Expected behavior: executable SELECT
+Expected SQL:
+SELECT *
+FROM shipments
+WHERE shipping_cost > 1500
+LIMIT 50;
+------------------------------------------------------------------------------
+
+TEST 11
+Question: count active customers
+Expected behavior: executable aggregate SELECT
+Expected SQL:
+SELECT COUNT(*) AS count_customers
+FROM customers
+WHERE customer_status = 'Active';
+------------------------------------------------------------------------------
+
+TEST 12
+Question: total value of all orders
+Expected behavior: executable aggregate SELECT
+Expected SQL:
+SELECT SUM(total_amount) AS sum_total_amount
+FROM orders;
+------------------------------------------------------------------------------
+
+TEST 13
+Question: average product unit price
+Expected behavior: executable aggregate SELECT
+Expected SQL:
+SELECT AVG(unit_price) AS avg_unit_price
+FROM products;
+------------------------------------------------------------------------------
+
+TEST 14
+Question: maximum payment amount
+Expected behavior: executable aggregate SELECT
+Expected SQL:
+SELECT MAX(payment_amount) AS max_payment_amount
+FROM payments;
+------------------------------------------------------------------------------
+
+TEST 15
+Question: count orders by order status
+Expected behavior: executable grouped aggregate SELECT
+Expected SQL:
+SELECT order_status, COUNT(*) AS count_orders
+FROM orders
+GROUP BY order_status;
+------------------------------------------------------------------------------
+
+TEST 16
+Question: total order amount by order status
+Expected behavior: executable grouped aggregate SELECT
+Expected SQL:
+SELECT order_status, SUM(total_amount) AS sum_total_amount
+FROM orders
+GROUP BY order_status;
+------------------------------------------------------------------------------
+
+TEST 17
+Question: average product unit price by product status
+Expected behavior: executable grouped aggregate SELECT
+Expected SQL:
+SELECT product_status, AVG(unit_price) AS avg_unit_price
+FROM products
+GROUP BY product_status;
+------------------------------------------------------------------------------
+
+TEST 18
+Question: payment methods with total payment amount above 100000
+Expected behavior: executable grouped aggregate SELECT with HAVING
+Expected SQL:
+SELECT payment_method, SUM(payment_amount) AS sum_payment_amount
+FROM payments
+GROUP BY payment_method
+HAVING SUM(payment_amount) > 100000;
+------------------------------------------------------------------------------
+
+TEST 19
+Question: customer regions with more than 2 active customers
+Expected behavior: executable grouped aggregate SELECT with WHERE and HAVING
+Expected SQL:
+SELECT region, COUNT(*) AS count_customers
+FROM customers
+WHERE customer_status = 'Active'
+GROUP BY region
+HAVING COUNT(*) > 2;
+------------------------------------------------------------------------------
+
+TEST 20
+Question: total stock quantity by product status
+Expected behavior: executable grouped aggregate SELECT
+Expected SQL:
+SELECT product_status, SUM(stock_quantity) AS sum_stock_quantity
+FROM products
+GROUP BY product_status;
+------------------------------------------------------------------------------
+
+TEST 21
+Question: top 5 orders by total amount
+Expected behavior: executable row ranking SELECT
+Expected SQL:
+SELECT *
+FROM orders
+ORDER BY total_amount DESC
+LIMIT 5;
+------------------------------------------------------------------------------
+
+TEST 22
+Question: bottom 3 products by stock quantity
+Expected behavior: executable row ranking SELECT
+Expected SQL:
+SELECT *
+FROM products
+ORDER BY stock_quantity ASC
+LIMIT 3;
+------------------------------------------------------------------------------
+
+TEST 23
+Question: top 3 payment methods by total payment amount
+Expected behavior: executable aggregate ranking SELECT
+Expected SQL:
+SELECT payment_method, SUM(payment_amount) AS sum_payment_amount
+FROM payments
+GROUP BY payment_method
+ORDER BY SUM(payment_amount) DESC
+LIMIT 3;
+------------------------------------------------------------------------------
+
+TEST 24
+Question: top 4 customer regions by customer count
+Expected behavior: executable aggregate ranking SELECT
+Expected SQL:
+SELECT region, COUNT(*) AS count_customers
+FROM customers
+GROUP BY region
+ORDER BY COUNT(*) DESC
+LIMIT 4;
+------------------------------------------------------------------------------
+
+TEST 25
+Question: show products ordered by unit price descending
+Expected behavior: executable ordered list SELECT
+Expected SQL:
+SELECT *
+FROM products
+ORDER BY unit_price DESC
+LIMIT 50;
+------------------------------------------------------------------------------
+
+TEST 26
+Question: show orders with customer details
+Expected behavior: executable direct joined lookup
+Expected SQL:
+SELECT orders.*, customers.*
+FROM orders
+INNER JOIN customers ON orders.customer_id = customers.customer_id
+LIMIT 50;
+Expected note: SQLSense may expand this to explicit qualified aliased columns instead of using table.*.
+------------------------------------------------------------------------------
+
+TEST 27
+Question: show payments with order details
+Expected behavior: executable direct joined lookup
+Expected SQL:
+SELECT payments.*, orders.*
+FROM payments
+INNER JOIN orders ON payments.order_id = orders.order_id
+LIMIT 50;
+Expected note: SQLSense may expand this to explicit qualified aliased columns instead of using table.*.
+------------------------------------------------------------------------------
+
+TEST 28
+Question: show products with supplier details
+Expected behavior: executable direct joined lookup
+Expected SQL:
+SELECT products.*, suppliers.*
+FROM products
+INNER JOIN suppliers ON products.supplier_id = suppliers.supplier_id
+LIMIT 50;
+Expected note: SQLSense may expand this to explicit qualified aliased columns instead of using table.*.
+------------------------------------------------------------------------------
+
+TEST 29
+Question: show order items with product details
+Expected behavior: executable direct joined lookup
+Expected SQL:
+SELECT order_items.*, products.*
+FROM order_items
+INNER JOIN products ON order_items.product_id = products.product_id
+LIMIT 50;
+Expected note: SQLSense may expand this to explicit qualified aliased columns instead of using table.*.
+------------------------------------------------------------------------------
+
+TEST 30
+Question: show shipments with order details
+Expected behavior: executable direct joined lookup
+Expected SQL:
+SELECT shipments.*, orders.*
+FROM shipments
+INNER JOIN orders ON shipments.order_id = orders.order_id
+LIMIT 50;
+Expected note: SQLSense may expand this to explicit qualified aliased columns instead of using table.*.
+------------------------------------------------------------------------------
+
+TEST 31
+Question: total order amount by customer city
+Expected behavior: executable direct joined aggregate
+Expected SQL:
+SELECT customers.city, SUM(orders.total_amount) AS sum_total_amount
+FROM orders
+INNER JOIN customers ON orders.customer_id = customers.customer_id
+GROUP BY customers.city;
+------------------------------------------------------------------------------
+
+TEST 32
+Question: count orders by customer segment
+Expected behavior: executable direct joined aggregate
+Expected SQL:
+SELECT customers.segment, COUNT(*) AS count_orders
+FROM orders
+INNER JOIN customers ON orders.customer_id = customers.customer_id
+GROUP BY customers.segment;
+------------------------------------------------------------------------------
+
+TEST 33
+Question: total line amount by product name
+Expected behavior: executable direct joined aggregate
+Expected SQL:
+SELECT products.product_name, SUM(order_items.line_amount) AS sum_line_amount
+FROM order_items
+INNER JOIN products ON order_items.product_id = products.product_id
+GROUP BY products.product_name;
+------------------------------------------------------------------------------
+
+TEST 34
+Question: average payment amount by order status
+Expected behavior: executable direct joined aggregate
+Expected SQL:
+SELECT orders.order_status, AVG(payments.payment_amount) AS avg_payment_amount
+FROM payments
+INNER JOIN orders ON payments.order_id = orders.order_id
+GROUP BY orders.order_status;
+------------------------------------------------------------------------------
+
+TEST 35
+Question: total stock quantity by supplier city
+Expected behavior: executable direct joined aggregate
+Expected SQL:
+SELECT suppliers.city, SUM(products.stock_quantity) AS sum_stock_quantity
+FROM products
+INNER JOIN suppliers ON products.supplier_id = suppliers.supplier_id
+GROUP BY suppliers.city;
+------------------------------------------------------------------------------
+
+TEST 36
+Question: show payments with customer details
+Expected behavior: executable two-edge joined lookup
+Expected SQL:
+SELECT payments.*, orders.*, customers.*
+FROM payments
+INNER JOIN orders ON payments.order_id = orders.order_id
+INNER JOIN customers ON orders.customer_id = customers.customer_id
+LIMIT 50;
+Expected note: SQLSense may expand this to explicit qualified aliased columns instead of using table.*.
+------------------------------------------------------------------------------
+
+TEST 37
+Question: show order items with customer details
+Expected behavior: executable two-edge joined lookup
+Expected SQL:
+SELECT order_items.*, orders.*, customers.*
+FROM order_items
+INNER JOIN orders ON order_items.order_id = orders.order_id
+INNER JOIN customers ON orders.customer_id = customers.customer_id
+LIMIT 50;
+Expected note: SQLSense may expand this to explicit qualified aliased columns instead of using table.*.
+------------------------------------------------------------------------------
+
+TEST 38
+Question: show order items with category details
+Expected behavior: executable two-edge joined lookup
+Expected SQL:
+SELECT order_items.*, products.*, categories.*
+FROM order_items
+INNER JOIN products ON order_items.product_id = products.product_id
+INNER JOIN categories ON products.category_id = categories.category_id
+LIMIT 50;
+Expected note: SQLSense may expand this to explicit qualified aliased columns instead of using table.*.
+------------------------------------------------------------------------------
+
+TEST 39
+Question: show shipments with customer details
+Expected behavior: executable two-edge joined lookup
+Expected SQL:
+SELECT shipments.*, orders.*, customers.*
+FROM shipments
+INNER JOIN orders ON shipments.order_id = orders.order_id
+INNER JOIN customers ON orders.customer_id = customers.customer_id
+LIMIT 50;
+Expected note: SQLSense may expand this to explicit qualified aliased columns instead of using table.*.
+------------------------------------------------------------------------------
+
+TEST 40
+Question: total payment amount by customer city
+Expected behavior: executable two-edge joined aggregate with grain preserved
+Expected SQL:
+SELECT customers.city, SUM(payments.payment_amount) AS sum_payment_amount
+FROM payments
+INNER JOIN orders ON payments.order_id = orders.order_id
+INNER JOIN customers ON orders.customer_id = customers.customer_id
+GROUP BY customers.city;
+------------------------------------------------------------------------------
+
+TEST 41
+Question: total line amount by product category
+Expected behavior: executable two-edge joined aggregate with grain preserved
+Expected SQL:
+SELECT categories.category_name, SUM(order_items.line_amount) AS sum_line_amount
+FROM order_items
+INNER JOIN products ON order_items.product_id = products.product_id
+INNER JOIN categories ON products.category_id = categories.category_id
+GROUP BY categories.category_name;
+------------------------------------------------------------------------------
+
+TEST 42
+Question: count order items by supplier city
+Expected behavior: executable two-edge joined aggregate with grain preserved
+Expected SQL:
+SELECT suppliers.city, COUNT(*) AS count_order_items
+FROM order_items
+INNER JOIN products ON order_items.product_id = products.product_id
+INNER JOIN suppliers ON products.supplier_id = suppliers.supplier_id
+GROUP BY suppliers.city;
+------------------------------------------------------------------------------
+
+TEST 43
+Question: top 3 customer cities by total payment amount
+Expected behavior: executable two-edge aggregate ranking with grain preserved
+Expected SQL:
+SELECT customers.city, SUM(payments.payment_amount) AS sum_payment_amount
+FROM payments
+INNER JOIN orders ON payments.order_id = orders.order_id
+INNER JOIN customers ON orders.customer_id = customers.customer_id
+GROUP BY customers.city
+ORDER BY SUM(payments.payment_amount) DESC
+LIMIT 3;
+------------------------------------------------------------------------------
+
+TEST 44
+Question: total line amount by supplier name for active products
+Expected behavior: executable two-edge joined aggregate with related filter
+Expected SQL:
+SELECT suppliers.supplier_name, SUM(order_items.line_amount) AS sum_line_amount
+FROM order_items
+INNER JOIN products ON order_items.product_id = products.product_id
+INNER JOIN suppliers ON products.supplier_id = suppliers.supplier_id
+WHERE products.product_status = 'Active'
+GROUP BY suppliers.supplier_name;
+------------------------------------------------------------------------------
+
+TEST 45
+Question: count payments by customer region where payment status is completed
+Expected behavior: executable two-edge joined aggregate with payment filter
+Expected SQL:
+SELECT customers.region, COUNT(*) AS count_payments
+FROM payments
+INNER JOIN orders ON payments.order_id = orders.order_id
+INNER JOIN customers ON orders.customer_id = customers.customer_id
+WHERE payments.payment_status = 'Completed'
+GROUP BY customers.region;
+------------------------------------------------------------------------------
+
+TEST 46
+Question: average line amount by product category
+Expected behavior: executable two-edge joined aggregate with grain preserved
+Expected SQL:
+SELECT categories.category_name, AVG(order_items.line_amount) AS avg_line_amount
+FROM order_items
+INNER JOIN products ON order_items.product_id = products.product_id
+INNER JOIN categories ON products.category_id = categories.category_id
+GROUP BY categories.category_name;
+------------------------------------------------------------------------------
+
+TEST 47
+Question: total shipping cost by customer city
+Expected behavior: executable two-edge joined aggregate with grain preserved
+Expected SQL:
+SELECT customers.city, SUM(shipments.shipping_cost) AS sum_shipping_cost
+FROM shipments
+INNER JOIN orders ON shipments.order_id = orders.order_id
+INNER JOIN customers ON orders.customer_id = customers.customer_id
+GROUP BY customers.city;
+------------------------------------------------------------------------------
+
+TEST 48
+Question: top 3 product categories by total line amount
+Expected behavior: executable two-edge aggregate ranking with grain preserved
+Expected SQL:
+SELECT categories.category_name, SUM(order_items.line_amount) AS sum_line_amount
+FROM order_items
+INNER JOIN products ON order_items.product_id = products.product_id
+INNER JOIN categories ON products.category_id = categories.category_id
+GROUP BY categories.category_name
+ORDER BY SUM(order_items.line_amount) DESC
+LIMIT 3;
+------------------------------------------------------------------------------
+
+TEST 49
+Question: show order items for products supplied by suppliers in Pune
+Expected behavior: executable two-edge joined lookup with related filter
+Expected SQL:
+SELECT order_items.*, products.*, suppliers.*
+FROM order_items
+INNER JOIN products ON order_items.product_id = products.product_id
+INNER JOIN suppliers ON products.supplier_id = suppliers.supplier_id
+WHERE suppliers.city = 'Pune'
+LIMIT 50;
+Expected note: SQLSense may expand this to explicit qualified aliased columns instead of using table.*.
+------------------------------------------------------------------------------
+
+TEST 50
+Question: total order amount by customer segment for delivered orders
+Expected behavior: executable direct joined aggregate with base filter
+Expected SQL:
+SELECT customers.segment, SUM(orders.total_amount) AS sum_total_amount
+FROM orders
+INNER JOIN customers ON orders.customer_id = customers.customer_id
+WHERE orders.order_status = 'Delivered'
+GROUP BY customers.segment;
+------------------------------------------------------------------------------
+
+Fail-closed safety tests
+------------------------
+
+TEST 51
+Question: change inactive suppliers to active
+Expected behavior: fail closed
+Expected reason: write/update request is outside current SELECT-only scope.
+Expected SQL: none
+Should execute: no
+------------------------------------------------------------------------------
+
+TEST 52
+Question: delete cancelled orders
+Expected behavior: fail closed
+Expected reason: DELETE request is outside current SELECT-only scope.
+Expected SQL: none
+Should execute: no
+------------------------------------------------------------------------------
+
+TEST 53
+Question: insert a new customer named Rahul
+Expected behavior: fail closed
+Expected reason: INSERT request is outside current SELECT-only scope.
+Expected SQL: none
+Should execute: no
+------------------------------------------------------------------------------
+
+TEST 54
+Question: count distinct orders by customer city
+Expected behavior: fail closed
+Expected reason: COUNT DISTINCT is unsupported in current scope.
+Expected SQL: none
+Should execute: no
+------------------------------------------------------------------------------
+
+TEST 55
+Question: show customers with products they purchased
+Expected behavior: fail closed
+Expected reason: requires customers -> orders -> order_items -> products, which is 3 edges / 4 tables and exceeds current max 2-edge scope.
+Expected SQL: none
+Should execute: no
+------------------------------------------------------------------------------
+
+TEST 56
+Question: average supplier city
+Expected behavior: fail closed
+Expected reason: AVG over text column city is invalid.
+Expected SQL: none
+Should execute: no
+------------------------------------------------------------------------------
+
+TEST 57
+Question: total payment amount by product category
+Expected behavior: fail closed
+Expected reason: payment amount and product category require order/payment-to-item allocation logic; unsafe grain/multiplication risk in current scope.
+Expected SQL: none
+Should execute: no
+------------------------------------------------------------------------------
+
+TEST 58
+Question: show top records
+Expected behavior: fail closed or clarification required
+Expected reason: missing table/entity and missing ranking metric.
+Expected SQL: none
+Should execute: no
+------------------------------------------------------------------------------

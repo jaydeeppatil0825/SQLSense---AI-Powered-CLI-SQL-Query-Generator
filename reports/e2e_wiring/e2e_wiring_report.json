@@ -1,0 +1,16 @@
+{
+  "database": {
+    "name": "sqlsense_current_scope_business_lab"
+  },
+  "git": {
+    "branch": "codex/review-project-overview",
+    "commit": "0c841be7"
+  },
+  "kb_build": {
+    "status": "not_started"
+  },
+  "python_version": "3.12.10",
+  "questions": [],
+  "run_timestamp": "2026-07-23T12:11:02.410677+00:00",
+  "setup_error": "[Errno 2] No such file or directory: 'C:\\\\Users\\\\JAYDEEP PATIL\\\\OneDrive\\\\Desktop\\\\SQL-Sense\\\\tests\\\\fixtures\\\\sqlsense_current_scope_business_test_cases_no_answers.txt'"
+}

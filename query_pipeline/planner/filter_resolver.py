@@ -42,10 +42,50 @@ _STATUS_VALUE_TOKENS = {
     "shipped",
     "refunded",
 }
+_PROTECTED_FILTER_VALUE_TOKENS = {
+    "total",
+    "sum",
+    "average",
+    "avg",
+    "count",
+    "minimum",
+    "maximum",
+    "min",
+    "max",
+    "highest",
+    "lowest",
+    "top",
+    "bottom",
+    "distinct",
+    "amount",
+    "value",
+    "price",
+    "cost",
+    "quantity",
+    "qty",
+    "unit",
+    "line",
+    "balance",
+    "revenue",
+    "shipping",
+}
 
 
 def _sample_value_matches(value: str, sample: Any) -> bool:
     return _humanize(str(value or "")) == _humanize(str(sample or ""))
+
+
+def _is_protected_filter_value_phrase(value: str) -> bool:
+    tokens = {
+        _singularize_token(token)
+        for token in _tokenize(value)
+        if token
+    }
+    if not tokens:
+        return False
+    if tokens & _STATUS_VALUE_TOKENS:
+        return False
+    return bool(tokens & _PROTECTED_FILTER_VALUE_TOKENS)
 
 
 def _normalized_sample_values(column: dict[str, Any]) -> list[tuple[str, str]]:
@@ -85,6 +125,8 @@ def _detect_runtime_filters(question: str, candidate_tables: dict[str, Any]) -> 
                 continue
             column_name = str(column.get("name", ""))
             for normalized_value, raw_value in _normalized_sample_values(column):
+                if _is_protected_filter_value_phrase(normalized_value):
+                    continue
                 value_terms = set(_tokenize(normalized_value))
                 if not value_terms:
                     continue
@@ -823,6 +865,8 @@ def _build_sample_value_filter(
     value_phrase = str(value_phrase or "").strip()
     if not value_phrase:
         return None, "missing"
+    if _is_protected_filter_value_phrase(value_phrase):
+        return None, "protected"
     matches: list[dict[str, Any]] = []
     tables = {owner_table} if owner_table else set(allowed_tables)
     for table_name in tables:
@@ -883,6 +927,8 @@ def _build_single_role_value_filter(
     value_phrase = str(value_phrase or "").strip()
     if not value_phrase:
         return None, "missing"
+    if _is_protected_filter_value_phrase(value_phrase):
+        return None, "protected"
     matches: list[dict[str, Any]] = []
     table_data = knowledge_base.get(table_name) or {}
     for column in table_data.get("columns", []) or []:
@@ -915,6 +961,8 @@ def _source_scope_as_filter(
     knowledge_base: dict[str, Any],
     allowed_tables: set[str],
 ) -> tuple[dict[str, Any] | None, str]:
+    if _is_protected_filter_value_phrase(source_phrase):
+        return None, "protected"
     phrase_tokens = {_singularize_token(token) for token in _tokenize(source_phrase)}
     if len(allowed_tables) == 1:
         owner_table = next(iter(allowed_tables))
@@ -1116,19 +1164,34 @@ def _apply_implicit_sample_filter_contract(
         for entry in (context.get("selected_filters") or [])
         if isinstance(entry, dict)
     ]
-    has_only_date_intervals = bool(structured_filters or selected_filters) and all(
+    combined_has_only_date_intervals = bool(structured_filters or selected_filters) and all(
         entry.get("filter_kind") == "date_interval"
         for entry in [*structured_filters, *selected_filters]
     )
+    has_date_interval = any(
+        entry.get("filter_kind") == "date_interval"
+        for entry in [*structured_filters, *selected_filters]
+    )
+    selected_has_only_date_intervals = bool(selected_filters) and all(
+        entry.get("filter_kind") == "date_interval" for entry in selected_filters
+    )
+    has_only_date_intervals = combined_has_only_date_intervals or selected_has_only_date_intervals
     if query_shape == "single_table_list":
-        if (structured_filters or selected_filters) and not has_only_date_intervals:
+        if selected_filters and not has_only_date_intervals:
+            planned = dict(context)
+            planned["query_shape"] = "filtered_query"
+            planned["limit"] = context.get("limit") or 50
+            planned["plan"] = {
+                **dict(planned.get("plan") or {}),
+                "filters": selected_filters,
+                "limit": planned.get("limit") or 50,
+            }
+            return planned
+        if (structured_filters or selected_filters) and not has_only_date_intervals and not has_date_interval:
             return context
-        if intent.get("requested_filters") and not has_only_date_intervals:
+        if intent.get("requested_filters") and not has_only_date_intervals and not has_date_interval:
             return context
-    elif not (
-        (structured_filters or selected_filters)
-        and all(entry.get("filter_kind") == "date_interval" for entry in [*structured_filters, *selected_filters])
-    ):
+    elif not has_only_date_intervals:
         return context
     if str(intent.get("intent_type") or "").strip().lower() not in {"list", "filter"}:
         return context
@@ -1137,12 +1200,19 @@ def _apply_implicit_sample_filter_contract(
         for value in (context.get("selected_table_names") or [])
         if str(value).strip()
     ]
-    phrase = str(
+    source_phrase = str(
         next(iter(intent.get("source_scope") or []), "")
         or intent.get("source_scope_phrase")
-        or intent.get("target_entity_phrase")
         or ""
     ).strip()
+    interval_phrases = {
+        _normalize(str(entry.get("raw_phrase") or ""))
+        for entry in structured_filters
+        if entry.get("filter_kind") == "date_interval"
+    }
+    if _normalize(source_phrase) in interval_phrases:
+        source_phrase = ""
+    phrase = str(source_phrase or intent.get("target_entity_phrase") or "").strip()
     if not phrase:
         return context
     if len(selected_table_names) != 1:
@@ -1156,7 +1226,25 @@ def _apply_implicit_sample_filter_contract(
         {selected_table_names[0]},
     )
     if status != "resolved" or not implicit_filters:
-        return context
+        for clause in structured_filters:
+            if clause.get("filter_kind") == "date_interval":
+                continue
+            value_phrase = str(
+                clause.get("value_phrase") or clause.get("value") or clause.get("raw_phrase") or ""
+            ).strip()
+            implicit_filter, sample_status = _build_sample_value_filter(
+                value_phrase=value_phrase,
+                knowledge_base=knowledge_base,
+                allowed_tables={selected_table_names[0]},
+                owner_table=selected_table_names[0],
+                source="structured_sample_value_filter",
+            )
+            if sample_status == "resolved" and implicit_filter:
+                implicit_filters = [implicit_filter]
+                status = "resolved"
+                break
+        if status != "resolved" or not implicit_filters:
+            return context
 
     selected_table = selected_table_names[0]
     narrowed_selected_tables = [
@@ -1171,7 +1259,18 @@ def _apply_implicit_sample_filter_contract(
     ]
     planned = dict(context)
     planned_intent = dict(intent)
-    planned_intent["structured_filters"] = [*structured_filters, *implicit_filters]
+    existing_structured_phrases = {
+        _normalize(str(entry.get("raw_phrase") or entry.get("value_phrase") or entry.get("value") or ""))
+        for entry in structured_filters
+        if isinstance(entry, dict)
+    }
+    implicit_intent_filters = [
+        entry
+        for entry in implicit_filters
+        if _normalize(str(entry.get("raw_phrase") or entry.get("value_phrase") or entry.get("value") or ""))
+        not in existing_structured_phrases
+    ]
+    planned_intent["structured_filters"] = [*structured_filters, *implicit_intent_filters]
     requested_filters = [
         str(value).strip()
         for value in (intent.get("requested_filters") or [])
@@ -1185,7 +1284,7 @@ def _apply_implicit_sample_filter_contract(
             requested_filters.append(implicit_requested_filter)
     planned_intent["requested_filters"] = requested_filters
     planned_filters = [*selected_filters, *implicit_filters]
-    if has_only_date_intervals:
+    if has_date_interval:
         planned_filters, interval_reason = _resolve_interval_filters_for_scope(
             planned_filters,
             structured_filters,
@@ -1206,12 +1305,12 @@ def _apply_implicit_sample_filter_contract(
             "selected_table_names": [selected_table],
             "selected_filters": planned_filters,
             "filter_candidates": _merge_candidate_columns(
-                implicit_filters,
+                planned_filters,
                 [entry for entry in (context.get("filter_candidates") or []) if isinstance(entry, dict)],
             ),
             "selected_columns": _merge_candidate_columns(
                 narrowed_selected_columns,
-                implicit_filters,
+                planned_filters,
             ),
             "required_evidence": ["selected_table", "filter_candidate"],
             "missing_evidence": [
